@@ -36,6 +36,7 @@ from ralph_profile import PROJECT_PROFILE
 import stygnox_core as core
 import stygnox_codex as codex
 import stygnox_runtime as runtime
+import stygnox_operator as operator_contract
 from stygnox_protocol import PLAN_SCHEMA, RESULT_SCHEMA
 
 ROOT = PROJECT_PROFILE.repository_root(__file__)
@@ -6748,6 +6749,122 @@ def cmd_usage_reset_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _operator_snapshot_lines(path: Path, limit: int = 120) -> list[str]:
+    """Read a bounded artifact tail without creating or repairing it."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]
+    except OSError:
+        return []
+
+
+def _operator_snapshot_events(limit: int = 120) -> list[dict]:
+    """Return recent structured controller events, ignoring malformed rows."""
+    events: list[dict] = []
+    for raw in _operator_snapshot_lines(EVENTS, limit):
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            events.append(item)
+    return events
+
+
+def _operator_snapshot_report(state: dict) -> dict:
+    """Read only the plan-addressed completion report, if one was emitted."""
+    plan_hash_value = str(state.get("plan_hash") or "")
+    if not plan_hash_value:
+        return {}
+    path = REPORTS / f"{plan_hash_value[:16]}-summary.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def operator_snapshot_data() -> dict:
+    """Derive the passive operator projection from controller-owned artifacts."""
+    state = load_state()
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+    current_step = int(state.get("current_step") or 0)
+    checkpoint_id = str(state.get("recovery_checkpoint") or "")
+    policy = efficiency_policy.load_policy(ROOT, **_project_policy_kwargs())
+    try:
+        reconciliation = _reconciliation_evidence(state)
+    except RuntimeError as exc:
+        reconciliation = {
+            "schema": "zen_ralph_operation_reconciliation_v1",
+            "state": "refused",
+            "error": str(exc),
+        }
+    try:
+        self_hosting_paths = sorted(authorized_self_hosting_paths(state))
+        self_hosting_error = None
+    except RuntimeError as exc:
+        self_hosting_paths = []
+        self_hosting_error = str(exc)
+    gate_open = state.get("status") == "BLOCKED_HUMAN"
+    return operator_contract.stygnox_operator_snapshot_v1(
+        controller={
+            "status": state.get("status"),
+            "plan_hash": state.get("plan_hash"),
+            "loop_count": state.get("loop_count"),
+            "last_result": state.get("last_result"),
+            "last_failure": state.get("last_failure"),
+            "block_reason": state.get("block_reason"),
+            "runtime": controller_runtime_status(state),
+        },
+        progress={
+            "current_step": current_step,
+            "total_steps": len(steps),
+            "step_results": state.get("step_results") if isinstance(state.get("step_results"), list) else [],
+            "context": context_handoff(state),
+        },
+        gate={
+            "open": gate_open,
+            "id": gate_id_for_state(state) if gate_open else None,
+            "current_step": current_step,
+            "self_hosting_grant": state.get("self_hosting_grant"),
+            "self_hosting_candidate": state.get("self_hosting_candidate"),
+            "authorized_paths": self_hosting_paths,
+            "authority_error": self_hosting_error,
+        },
+        pending_paths=sorted(_pending_step_paths(state, current_step)),
+        recovery={
+            "checkpoint_id": checkpoint_id or None,
+            "checkpoint": load_recovery_checkpoint(checkpoint_id),
+            "interrupted_run": state.get("interrupted_run_recovery"),
+        },
+        reconciliation=reconciliation,
+        retirement={
+            "record_id": state.get("retirement_record_id"),
+            "rollback_preview": state.get("retirement_rollback_preview"),
+        },
+        efficiency_model={
+            "policy": policy,
+            "limits": efficiency_policy.limits(policy),
+            "runaway_limits": efficiency_policy.runaway_limits(policy),
+            "last_efficiency": state.get("last_efficiency"),
+        },
+        report={
+            "final_qualification": state.get("final_qualification"),
+            "completion": _operator_snapshot_report(state),
+        },
+        events=_operator_snapshot_events(),
+        live_output=_operator_snapshot_lines(LIVE),
+    )
+
+
+def cmd_operator_snapshot(args: argparse.Namespace) -> int:
+    """Emit the controller-owned snapshot without entering any lifecycle path."""
+    if not getattr(args, "json", False):
+        raise RuntimeError("operator-snapshot requires --json")
+    print(json.dumps(operator_snapshot_data(), indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_status(_: argparse.Namespace) -> int:
     init_files()
     state = load_state()
@@ -7884,6 +8001,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--session-hours", type=float, default=12.0, help="LAN browser session lifetime; default 12 hours")
     serve.add_argument("--usage-refresh-seconds", type=int, default=60, help="live Codex limit refresh interval; minimum 15 seconds")
     serve.set_defaults(func=cmd_serve)
+    operator_snapshot = sub.add_parser("operator-snapshot", help="emit a passive controller-owned operator snapshot")
+    operator_snapshot.add_argument("--json", action="store_true", required=True)
+    operator_snapshot.set_defaults(func=cmd_operator_snapshot)
     sub.add_parser("status").set_defaults(func=cmd_status)
     return parser
 

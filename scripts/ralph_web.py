@@ -31,9 +31,6 @@ from urllib.parse import parse_qs, urlparse
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-import ralph_efficiency as efficiency_policy
-import ralph_model as model_policy
-import ralph
 from ralph_profile import PROJECT_PROFILE
 
 ROOT = PROJECT_PROFILE.repository_root(__file__)
@@ -42,10 +39,6 @@ ROOT = PROJECT_PROFILE.repository_root(__file__)
 def _project_policy_kwargs() -> dict[str, Path]:
     return PROJECT_PROFILE.policy_storage_kwargs(ROOT)
 RALPH = PROJECT_PROFILE.runtime_directory(ROOT)
-STATE = PROJECT_PROFILE.artifact(ROOT, "state")
-EVENTS = PROJECT_PROFILE.artifact(ROOT, "events")
-LIVE = PROJECT_PROFILE.artifact(ROOT, "live")
-REPORTS = PROJECT_PROFILE.artifact(ROOT, "reports")
 WEB_JOB = PROJECT_PROFILE.artifact(ROOT, "web_job")
 WEB_LOG = PROJECT_PROFILE.artifact(ROOT, "web_log")
 RALPH_CLI = PROJECT_PROFILE.controller_cli(ROOT)
@@ -69,14 +62,6 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
-def _read_lines(path: Path, limit: int) -> list[str]:
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
-    return lines[-max(1, int(limit)) :]
-
-
 def _git(args: list[str], *, timeout: int = 8) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         PROJECT_PROFILE.git_command(*args), cwd=PROJECT_PROFILE.git_worktree(ROOT), text=True, capture_output=True,
@@ -97,18 +82,6 @@ def git_snapshot() -> dict[str, Any]:
         "dirty_count": len(status_lines),
         "status": status_lines[:80],
     }
-
-
-def event_tail(limit: int = MAX_EVENTS) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for raw in _read_lines(EVENTS, min(MAX_EVENTS, max(1, int(limit)))):
-        try:
-            item = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(item, dict):
-            rows.append(item)
-    return rows
 
 
 def _process_alive(pid: int) -> bool:
@@ -139,34 +112,21 @@ def web_job_status() -> dict[str, Any]:
     return {**job, "active": active}
 
 
-def controller_runtime_status(state: dict[str, Any]) -> dict[str, Any]:
-    """Expose controller-owned runtime identity; Web job metadata is not controller authority."""
-    runtime = ralph.controller_runtime_status(state)
-    return dict(runtime) if isinstance(runtime, dict) else {"active": False}
-
-
-def _path_mtime(path: Path) -> float:
+def controller_snapshot() -> dict[str, Any]:
+    """Fetch the passive controller projection; Web never opens controller artifacts."""
+    result = subprocess.run(
+        _controller_command("operator-snapshot", "--json"), cwd=ROOT,
+        text=True, capture_output=True, timeout=25, check=False,
+    )
+    if result.returncode:
+        raise WebConsoleError(result.stderr.strip() or "operator snapshot unavailable")
     try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def controller_output_lines(job: dict[str, Any], runtime: dict[str, Any]) -> tuple[list[str], str]:
-    """Select output for the active controller operation, independent of launch surface."""
-    if runtime.get("active"):
-        runtime_pid = int(runtime.get("pid") or 0)
-        job_pid = int(job.get("pid") or 0) if job.get("active") else 0
-        if job_pid and job_pid == runtime_pid and WEB_LOG.exists():
-            return _read_lines(WEB_LOG, MAX_LOG_LINES), "web"
-        return _read_lines(LIVE, MAX_LOG_LINES), "controller-live"
-    if job.get("active") and WEB_LOG.exists():
-        return _read_lines(WEB_LOG, MAX_LOG_LINES), "web"
-    candidates = [path for path in (LIVE, WEB_LOG) if path.exists()]
-    if not candidates:
-        return [], "none"
-    source = max(candidates, key=_path_mtime)
-    return _read_lines(source, MAX_LOG_LINES), "controller-live" if source == LIVE else "web"
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise WebConsoleError("operator snapshot returned invalid JSON") from exc
+    if not isinstance(value, dict) or value.get("schema") != "stygnox_operator_snapshot_v1" or value.get("version") != 1:
+        raise WebConsoleError("operator snapshot returned an unsupported schema")
+    return value
 
 
 def plan_progress(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -204,14 +164,15 @@ def plan_progress(state: dict[str, Any]) -> list[dict[str, Any]]:
     return output
 
 
-def _gate_snapshot(state: dict[str, Any]) -> dict[str, Any] | None:
-    if state.get("status") != "BLOCKED_HUMAN":
+def _gate_snapshot(source: dict[str, Any]) -> dict[str, Any] | None:
+    controller = source.get("controller") if isinstance(source.get("controller"), dict) else {}
+    progress = source.get("progress") if isinstance(source.get("progress"), dict) else {}
+    raw = source.get("gate") if isinstance(source.get("gate"), dict) else {}
+    if controller.get("status") != "BLOCKED_HUMAN" or not raw.get("open"):
         return None
-    loop_no = int(state.get("loop_count") or 0)
-    step_no = int(state.get("current_step") or 0)
-    progress = plan_progress(state)
-    step = next((x for x in progress if x["id"] == step_no), None)
-    block = str(state.get("block_reason") or "")
+    loop_no = int(controller.get("loop_count") or 0)
+    step_no = int(progress.get("current_step") or raw.get("current_step") or 0)
+    block = str(controller.get("block_reason") or "")
     policy = "policy violation" in block.lower() or "protected" in block.lower()
     recommendation = (
         "Review the authority mismatch. Steer only within the already-approved plan, "
@@ -221,20 +182,20 @@ def _gate_snapshot(state: dict[str, Any]) -> dict[str, Any] | None:
         "the delegated human gate when its acceptance evidence is satisfied."
     )
     gate = {
-        "id": f"HG-{loop_no:04d}-{step_no:02d}",
+        "id": str(raw.get("id") or f"HG-{loop_no:04d}-{step_no:02d}"),
         "step": step_no,
-        "title": (step or {}).get("title") or "Human review",
+        "title": "Human review",
         "block_reason": block,
         "policy_review": policy,
-        "test_change_policy": (step or {}).get("test_change_policy") or "none",
-        "acceptance": (step or {}).get("acceptance") or [],
+        "test_change_policy": "none",
+        "acceptance": [],
         "recommendation": recommendation,
     }
-    candidate = state.get("self_hosting_candidate")
+    candidate = raw.get("self_hosting_candidate")
     if (
         block == "Codex attempted to change RALPH controller/tooling authority"
         and isinstance(candidate, dict)
-        and str(candidate.get("plan_hash") or "") == str(state.get("plan_hash") or "")
+        and str(candidate.get("plan_hash") or "") == str(controller.get("plan_hash") or "")
         and int(candidate.get("step") or 0) == step_no
         and str(candidate.get("gate_id") or "") == gate["id"]
         and isinstance(candidate.get("paths"), list)
@@ -242,7 +203,7 @@ def _gate_snapshot(state: dict[str, Any]) -> dict[str, Any] | None:
     ):
         authority_block = {
             "kind": "controller_self_hosting_authority",
-            "plan_hash": str(state.get("plan_hash") or ""),
+            "plan_hash": str(controller.get("plan_hash") or ""),
             "step": step_no,
             "gate_id": gate["id"],
             "paths": [str(path) for path in candidate["paths"]],
@@ -255,22 +216,10 @@ def _gate_snapshot(state: dict[str, Any]) -> dict[str, Any] | None:
     return gate
 
 
-def _latest_report(state: dict[str, Any]) -> dict[str, Any] | None:
-    digest = str(state.get("plan_hash") or "")
-    if not digest:
-        return None
-    path = REPORTS / f"{digest[:16]}-summary.md"
-    if not path.exists():
-        # Older versions may use a short plan hash.
-        matches = sorted(REPORTS.glob(f"{digest[:16]}*-summary.md")) if REPORTS.exists() else []
-        path = matches[-1] if matches else path
-    if not path.exists():
-        return None
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    return {"path": PROJECT_PROFILE.relative_path(ROOT, path), "preview": "\n".join(text.splitlines()[:100])}
+def _latest_report(source: dict[str, Any]) -> dict[str, Any] | None:
+    report = source.get("report") if isinstance(source.get("report"), dict) else {}
+    completion = report.get("completion") if isinstance(report.get("completion"), dict) else {}
+    return {"preview": json.dumps(completion, indent=2, sort_keys=True)} if completion else None
 
 
 def _controller_command(*argv: str) -> list[str]:
@@ -278,16 +227,9 @@ def _controller_command(*argv: str) -> list[str]:
     return [sys.executable, str(PROJECT_PROFILE.controller_cli(ROOT)), *argv]
 
 
-def _controller_test_reconciliation_candidate(state: dict[str, Any]) -> dict[str, str] | None:
-    """Return the controller-derived candidate without Web eligibility filtering."""
-    try:
-        candidate = ralph.ready_to_commit_test_reconciliation_candidate(state)
-    # A partially written or older controller state is not an adoption
-    # candidate.  Fail closed at this display/dispatch boundary rather than
-    # exposing an action or failing the snapshot while the controller state is
-    # being refreshed.
-    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
-        return None
+def _controller_test_reconciliation_candidate(source: dict[str, Any]) -> dict[str, str] | None:
+    reconciliation = source.get("reconciliation") if isinstance(source.get("reconciliation"), dict) else {}
+    candidate = reconciliation.get("test_reconciliation")
     if not isinstance(candidate, dict):
         return None
     path = str(candidate.get("path") or "").strip()
@@ -299,55 +241,52 @@ def _controller_test_reconciliation_candidate(state: dict[str, Any]) -> dict[str
     }
 
 
-def _test_reconciliation_snapshot(state: dict[str, Any]) -> dict[str, Any]:
-    # READY_TO_COMMIT is controller state.  The controller helper below remains
-    # the sole authority for whether that state has an adoption candidate.
-    if str(state.get("status") or "") != "READY_TO_COMMIT":
+def _test_reconciliation_snapshot(source: dict[str, Any]) -> dict[str, Any]:
+    # Production callers supply the versioned controller snapshot.  The
+    # unwrapped branch keeps the explicit in-process test seam usable without
+    # changing production authority or reading controller artifacts.
+    controller = source.get("controller") if isinstance(source.get("controller"), dict) else source
+    if str(controller.get("status") or "") != "READY_TO_COMMIT":
         return {"eligible": False}
-    candidate = _controller_test_reconciliation_candidate(state)
+    candidate = _controller_test_reconciliation_candidate(source)
     if candidate is None:
         return {"eligible": False}
     return {"eligible": True, **candidate}
 
 
-def _carry_forward_snapshot(state: dict[str, Any]) -> dict[str, Any]:
-    """Expose only the controller's current reconciliation diagnosis.
-
-    A malformed, stale, or otherwise refused state is useful operator feedback,
-    but is never converted into a client-selectable reconciliation target.
-    """
-    if not str(state.get("retirement_record_id") or "").strip():
-        return {"replacement": False}
-    try:
-        value = ralph.reconciliation_snapshot(state)
-    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        return {"replacement": True, "controller_refusal": str(exc), "candidates": []}
-    if not isinstance(value, dict):
-        return {"replacement": True, "controller_refusal": "controller returned an invalid reconciliation snapshot", "candidates": []}
-    return value
+def _carry_forward_snapshot(source: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(source.get("reconciliation_snapshot"), dict):
+        return dict(source["reconciliation_snapshot"])
+    value = source.get("reconciliation") if isinstance(source.get("reconciliation"), dict) else {}
+    if value.get("state") == "replacement" and isinstance(value.get("snapshot"), dict):
+        return dict(value["snapshot"])
+    if value.get("state") == "refused":
+        return {"replacement": True, "controller_refusal": str(value.get("error") or "controller refused reconciliation"), "candidates": []}
+    return {"replacement": False}
 
 
-def _latest_retirement(state: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the most recent controller-retired record without accepting an ID from the client."""
-    records = state.get("retired_plans")
-    if not isinstance(records, list) or not records or not isinstance(records[-1], dict):
-        return None
-    record = records[-1]
-    record_id = str(record.get("record_id") or "").strip()
+def _latest_retirement(source: dict[str, Any]) -> dict[str, Any] | None:
+    if isinstance(source.get("latest_retirement"), dict):
+        return dict(source["latest_retirement"])
+    records = source.get("retired_plans")
+    if isinstance(records, list) and records and isinstance(records[-1], dict):
+        return dict(records[-1])
+    retirement = source.get("retirement") if isinstance(source.get("retirement"), dict) else {}
+    record_id = str(retirement.get("record_id") or "").strip()
     if not record_id:
         return None
     return {
         "record_id": record_id,
-        "disposition": str(record.get("disposition") or ""),
-        "manifest_sha256": str(record.get("manifest_sha256") or ""),
-        "retired_at": str(record.get("retired_at") or ""),
+        "disposition": "RETIRED_WITH_CARRY_FORWARD" if _carry_forward_snapshot(source).get("replacement") else "",
+        "manifest_sha256": "",
+        "retired_at": "",
     }
 
 
-def _pending_carry_forward_candidate(state: dict[str, Any], requested_path: object) -> dict[str, Any]:
+def _pending_carry_forward_candidate(source: dict[str, Any], requested_path: object) -> dict[str, Any]:
     """Require an exact current controller candidate; do not normalize client paths."""
     path = str(requested_path or "").strip()
-    snapshot = _carry_forward_snapshot(state)
+    snapshot = _carry_forward_snapshot(source)
     if snapshot.get("controller_refusal"):
         raise WebConsoleError(f"controller refused reconciliation state: {snapshot['controller_refusal']}")
     for candidate in snapshot.get("candidates") or []:
@@ -362,24 +301,22 @@ def _pending_carry_forward_candidate(state: dict[str, Any], requested_path: obje
 
 
 def snapshot(usage_report: dict[str, Any] | None = None) -> dict[str, Any]:
-    state = _read_json(STATE, {})
-    if not isinstance(state, dict):
-        state = {}
-    cached_usage = state.get("codex_usage") if isinstance(state.get("codex_usage"), dict) else {}
+    source = controller_snapshot()
+    controller_source = source.get("controller") if isinstance(source.get("controller"), dict) else {}
+    progress = source.get("progress") if isinstance(source.get("progress"), dict) else {}
+    efficiency_model = source.get("efficiency_model") if isinstance(source.get("efficiency_model"), dict) else {}
     live_report = usage_report if isinstance(usage_report, dict) else {}
-    usage = live_report.get("codex_limits") if isinstance(live_report.get("codex_limits"), dict) else cached_usage
+    usage = live_report.get("codex_limits") if isinstance(live_report.get("codex_limits"), dict) else {}
     windows = usage.get("windows") if isinstance(usage.get("windows"), list) else []
     remaining = min((float(row.get("remaining_percent", 100.0)) for row in windows), default=None)
     ledger = live_report.get("ledger") if isinstance(live_report.get("ledger"), dict) else {}
-    efficiency = state.get("last_efficiency") if isinstance(state.get("last_efficiency"), dict) else {}
-    policy = efficiency_policy.load_policy(ROOT, **_project_policy_kwargs())
-    model_selection = model_policy.load_policy(ROOT, **_project_policy_kwargs())
-    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
-    steering = state.get("human_steering") if isinstance(state.get("human_steering"), list) else []
+    efficiency = efficiency_model.get("last_efficiency") if isinstance(efficiency_model.get("last_efficiency"), dict) else {}
+    policy = efficiency_model.get("policy") if isinstance(efficiency_model.get("policy"), dict) else {}
     job = web_job_status()
-    runtime = controller_runtime_status(state)
-    controller_output, controller_output_source = controller_output_lines(job, runtime)
-    durable_status = str(state.get("status") or "IDLE")
+    runtime = controller_source.get("runtime") if isinstance(controller_source.get("runtime"), dict) else {"active": False}
+    controller_output = [str(item) for item in source.get("live_output") or []][-MAX_LOG_LINES:]
+    controller_output_source = "controller-snapshot"
+    durable_status = str(controller_source.get("status") or "IDLE")
     return {
         "schema": "zen_ralph_web_snapshot_v1",
         "version": VERSION,
@@ -387,58 +324,33 @@ def snapshot(usage_report: dict[str, Any] | None = None) -> dict[str, Any]:
         "controller": {
             "status": durable_status,
             "durable_status": durable_status,
-            "plan_hash": state.get("plan_hash"),
-            "current_step": int(state.get("current_step") or 0),
-            "step_count": len(plan.get("steps") or []),
-            "loop_count": int(state.get("loop_count") or 0),
-            "block_reason": state.get("block_reason"),
+            "plan_hash": controller_source.get("plan_hash"),
+            "current_step": int(progress.get("current_step") or 0),
+            "step_count": int(progress.get("total_steps") or 0),
+            "loop_count": int(controller_source.get("loop_count") or 0),
+            "block_reason": controller_source.get("block_reason"),
             "efficiency": str(efficiency.get("status") or "-"),
             "efficiency_mode": str(policy.get("mode") or "NORMAL"),
-            "efficiency_recommendation": state.get("efficiency_recommendation"),
-            "usage_admitted": bool((state.get("usage_admission") or {}).get("admitted")) if isinstance(state.get("usage_admission"), dict) else False,
-            "usage_admission_remaining": (state.get("usage_admission") or {}).get("remaining_percent_at_admission") if isinstance(state.get("usage_admission"), dict) else None,
+            "efficiency_recommendation": None,
+            "usage_admitted": False,
+            "usage_admission_remaining": None,
             "quota_remaining_percent": remaining,
-            "recovery_checkpoint": state.get("recovery_checkpoint"),
-            "pending_current_step_paths": sorted(
-                ralph._pending_step_paths(state, int(state.get("current_step") or 0))
-            )[:120],
-            "interrupted_run_recovery": (
-                {
-                    "action": str((state.get("interrupted_run_recovery") or {}).get("action") or ""),
-                    "loop": (state.get("interrupted_run_recovery") or {}).get("loop"),
-                    "checkpoint": (state.get("interrupted_run_recovery") or {}).get("checkpoint"),
-                    "sha256": str((state.get("interrupted_run_recovery") or {}).get("sha256") or ""),
-                }
-                if isinstance(state.get("interrupted_run_recovery"), dict)
-                else None
-            ),
-            "rollback_preview": (
-                {
-                    "sha256": str((state.get("retirement_rollback_preview") or {}).get("sha256") or ""),
-                    "checkpoint": (state.get("retirement_rollback_preview") or {}).get("checkpoint"),
-                    "reason": (state.get("retirement_rollback_preview") or {}).get("reason"),
-                }
-                if isinstance(state.get("retirement_rollback_preview"), dict)
-                and str((state.get("retirement_rollback_preview") or {}).get("plan_hash") or "") == str(state.get("plan_hash") or "")
-                else None
-            ),
-            "plan_changed_files": [str(x) for x in state.get("plan_changed_files") or []][:120],
-            "plan_owned_files": [str(x) for x in state.get("plan_owned_files") or []][:120],
-            "commit_sha": state.get("commit_sha"),
-            "push_upstream": state.get("push_upstream"),
-            "steering_count": len(steering),
+            "recovery_checkpoint": (source.get("recovery") or {}).get("checkpoint_id"),
+            "pending_current_step_paths": [str(path) for path in source.get("pending_paths") or []][:120],
+            "interrupted_run_recovery": (source.get("recovery") or {}).get("interrupted_run"),
+            "rollback_preview": (source.get("retirement") or {}).get("rollback_preview"),
+            "plan_changed_files": [], "plan_owned_files": [], "commit_sha": None, "push_upstream": None, "steering_count": 0,
         },
         "plan": {
-            "goal": str(plan.get("goal") or ""),
-            "steps": plan_progress(state),
+            "goal": "",
+            "steps": [],
         },
         "efficiency_policy": policy,
-        "efficiency_defaults": efficiency_policy.defaults(),
-        "model_policy": model_selection,
-        "gate": _gate_snapshot(state),
-        "test_reconciliation": _test_reconciliation_snapshot(state),
-        "reconciliation": _carry_forward_snapshot(state),
-        "latest_retirement": _latest_retirement(state),
+        "efficiency_defaults": {}, "model_policy": {},
+        "gate": _gate_snapshot(source),
+        "test_reconciliation": _test_reconciliation_snapshot(source),
+        "reconciliation": _carry_forward_snapshot(source),
+        "latest_retirement": _latest_retirement(source),
         "usage": {
             "model": usage.get("model"),
             "plan_type": usage.get("plan_type"),
@@ -461,8 +373,8 @@ def snapshot(usage_report: dict[str, Any] | None = None) -> dict[str, Any]:
         "job": job,
         "runtime": runtime,
         "web_activity": str(job.get("activity") or "") if job.get("active") else None,
-        "report": _latest_report(state),
-        "events": event_tail(),
+        "report": _latest_report(source),
+        "events": [item for item in source.get("events") or [] if isinstance(item, dict)][-MAX_EVENTS:],
         "live_log": controller_output,
         "controller_output_source": controller_output_source,
     }
@@ -693,12 +605,36 @@ def _proposal_bounds(payload: dict[str, Any]) -> tuple[int, int]:
 
 def _repository_authority(payload: dict[str, Any]) -> str:
     authority = str(payload.get("repository_authority") or "").strip()
-    if authority not in ralph.REPOSITORY_AUTHORITIES:
+    if authority not in {"read-only", "write"}:
         raise WebConsoleError("repository_authority must be read-only or write")
     return authority
 
 
-def command_for_action(payload: dict[str, Any], state: dict[str, Any]) -> CommandRequest:
+def _action_context(source: dict[str, Any]) -> dict[str, Any]:
+    """Flatten only controller-provided action authority for exact Web checks."""
+    controller = source.get("controller") if isinstance(source.get("controller"), dict) else {}
+    progress = source.get("progress") if isinstance(source.get("progress"), dict) else {}
+    gate = source.get("gate") if isinstance(source.get("gate"), dict) else {}
+    recovery = source.get("recovery") if isinstance(source.get("recovery"), dict) else {}
+    retirement = source.get("retirement") if isinstance(source.get("retirement"), dict) else {}
+    reconciliation = _carry_forward_snapshot(source)
+    return {
+        "status": controller.get("status"), "plan_hash": controller.get("plan_hash"),
+        "loop_count": controller.get("loop_count"), "block_reason": controller.get("block_reason"),
+        "current_step": progress.get("current_step"), "recovery_checkpoint": recovery.get("checkpoint_id"),
+        "pending_paths": [str(path) for path in source.get("pending_paths") or []],
+        "interrupted_run_recovery": recovery.get("interrupted_run"),
+        "retirement_rollback_preview": retirement.get("rollback_preview"),
+        "self_hosting_candidate": gate.get("self_hosting_candidate"),
+        "reconciliation_snapshot": reconciliation,
+        "latest_retirement": _latest_retirement(source),
+        "test_reconciliation": _test_reconciliation_snapshot(source),
+    }
+
+
+def command_for_action(payload: dict[str, Any], source: dict[str, Any] | None = None) -> CommandRequest:
+    source = controller_snapshot() if source is None else source
+    state = _action_context(source) if source.get("schema") == "stygnox_operator_snapshot_v1" else source
     action = str(payload.get("action") or "").strip()
     # The active controller snapshot is authoritative; never let the client
     # select a different plan context for a command.
@@ -817,7 +753,7 @@ def command_for_action(payload: dict[str, Any], state: dict[str, Any]) -> Comman
         if not isinstance(supplied, list):
             raise WebConsoleError("pending_paths must be a list")
         supplied_paths = [str(path).strip() for path in supplied if str(path).strip()]
-        expected_paths = sorted(ralph._pending_step_paths(state, int(state.get("current_step") or 0)))
+        expected_paths = sorted(str(path) for path in state.get("pending_paths") or (state.get("pending_step_delta_paths") or {}).get("paths", []))
         if len(set(supplied_paths)) != len(supplied_paths) or sorted(supplied_paths) != expected_paths:
             raise WebConsoleError("interrupted-run recovery requires the exact controller pending paths")
         argv = ["recover-interrupted-run", plan_hash, "--checkpoint", checkpoint]
@@ -901,7 +837,7 @@ def command_for_action(payload: dict[str, Any], state: dict[str, Any]) -> Comman
     if action == "propose_replacement":
         if status != "IDLE":
             raise WebConsoleError("replacement proposal requires IDLE")
-        retirement = _latest_retirement(state)
+        retirement = state.get("latest_retirement") if isinstance(state.get("latest_retirement"), dict) else _latest_retirement(state)
         requested_id = str(payload.get("retirement_record_id") or "").strip()
         if retirement is None or requested_id != retirement["record_id"]:
             raise WebConsoleError("retirement record must exactly match the latest controller retirement")
@@ -957,8 +893,8 @@ def command_for_action(payload: dict[str, Any], state: dict[str, Any]) -> Comman
             raise WebConsoleError("reconcile-ready-test requires READY_TO_COMMIT")
         if str(payload.get("confirm") or "") != "ADOPT":
             raise WebConsoleError("reconcile-ready-test requires confirm=ADOPT")
-        candidate = _controller_test_reconciliation_candidate(state)
-        if candidate is None:
+        candidate = state.get("test_reconciliation") if isinstance(state.get("test_reconciliation"), dict) else _test_reconciliation_snapshot(source)
+        if candidate.get("eligible") is not True:
             raise WebConsoleError("no eligible controller test-reconciliation candidate")
         # The displayed path is not an API authority input.  The browser does
         # not submit it; if an older client echoes one, it can only act as a
@@ -1003,8 +939,9 @@ def _write_web_job(job: dict[str, Any]) -> None:
 def run_command(request: CommandRequest) -> dict[str, Any]:
     command = _controller_command(*request.argv)
     current = web_job_status()
-    state = _read_json(STATE, {})
-    runtime = controller_runtime_status(state if isinstance(state, dict) else {})
+    source = controller_snapshot()
+    controller = source.get("controller") if isinstance(source.get("controller"), dict) else {}
+    runtime = controller.get("runtime") if isinstance(controller.get("runtime"), dict) else {"active": False}
     if runtime.get("active") and not request.allow_while_active:
         raise WebConsoleError(
             f"Ralph controller runtime already active ({runtime.get('command') or 'controller'} pid {runtime.get('pid')})"
@@ -1316,10 +1253,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("payload must be an object")
-            state = _read_json(STATE, {})
-            if not isinstance(state, dict):
-                state = {}
-            request = command_for_action(payload, state)
+            # command_for_action rereads the passive controller projection at
+            # dispatch time.  Do not reuse a browser-rendered (or earlier
+            # handler) snapshot as authority for a controller write.
+            request = command_for_action(payload)
             result = run_command(request)
             if result.get("ok") and str(payload.get("action") or "") in {
                 "redeem_reset", "usage_reset_stats", "model_update", "model_reset", "effort_update", "effort_reset",

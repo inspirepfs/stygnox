@@ -20,9 +20,16 @@ class WebGateProfileBoundaryTests(unittest.TestCase):
             git_executable="boundary-git",
         )
         completed = subprocess.CompletedProcess([], 0, stdout="main\n", stderr="")
+        controller_source = {
+            "schema": "stygnox_operator_snapshot_v1", "version": 1,
+            "controller": {}, "progress": {}, "efficiency_model": {},
+            "gate": {}, "recovery": {}, "retirement": {},
+            "reconciliation": {"state": "not-applicable"},
+            "pending_paths": [], "events": [], "live_output": [],
+        }
         with mock.patch.object(ralph_web, "PROJECT_PROFILE", profile), mock.patch.object(
-            ralph_web.subprocess, "run", return_value=completed
-        ) as run:
+            ralph_web, "controller_snapshot", return_value=controller_source
+        ), mock.patch.object(ralph_web.subprocess, "run", return_value=completed) as run:
             snapshot = ralph_web.snapshot()
             ralph_web.git_snapshot()
         self.assertEqual(profile.project_metadata(ralph_web.ROOT), snapshot["project"])

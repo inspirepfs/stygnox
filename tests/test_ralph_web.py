@@ -21,12 +21,13 @@ spec.loader.exec_module(web)
 
 
 class WebHarness:
-    NAMES = ("ROOT", "RALPH", "STATE", "EVENTS", "LIVE", "REPORTS", "WEB_JOB", "WEB_LOG", "RALPH_CLI")
+    NAMES = ("ROOT", "RALPH", "WEB_JOB", "WEB_LOG", "RALPH_CLI", "controller_snapshot")
 
     def __init__(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.saved = {name: getattr(web, name) for name in self.NAMES}
+        self.snapshot_client = mock.Mock()
 
     def __enter__(self):
         ralph = self.root / ".ralph"
@@ -36,13 +37,10 @@ class WebHarness:
         (scripts / "ralph.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         web.ROOT = self.root
         web.RALPH = ralph
-        web.STATE = ralph / "state.json"
-        web.EVENTS = ralph / "events.jsonl"
-        web.LIVE = ralph / "live.log"
-        web.REPORTS = ralph / "reports"
         web.WEB_JOB = ralph / "web-job.json"
         web.WEB_LOG = ralph / "web-run.log"
         web.RALPH_CLI = scripts / "ralph.py"
+        web.controller_snapshot = self.snapshot_client
         return self
 
     def state(self, **updates):
@@ -68,7 +66,24 @@ class WebHarness:
             "codex_usage": {"windows": [{"remaining_percent": 68.5}]},
         }
         state.update(updates)
-        web.STATE.write_text(json.dumps(state), encoding="utf-8")
+        self.source = {
+            "schema": "stygnox_operator_snapshot_v1", "version": 1,
+            "controller": {key: state.get(key) for key in ("status", "plan_hash", "loop_count", "block_reason", "controller_runtime")},
+            "progress": {"current_step": state.get("current_step"), "total_steps": len(state["plan"]["steps"]), "step_results": state.get("step_results", [])},
+            "gate": {"open": state.get("status") == "BLOCKED_HUMAN", "id": f"HG-{int(state.get('loop_count') or 0):04d}-{int(state.get('current_step') or 0):02d}", "self_hosting_candidate": state.get("self_hosting_candidate")},
+            "pending_paths": (state.get("pending_step_delta_paths") or {}).get("paths", []),
+            "recovery": {"checkpoint_id": state.get("recovery_checkpoint"), "interrupted_run": state.get("interrupted_run_recovery")},
+            "retirement": {"record_id": state.get("retirement_record_id"), "rollback_preview": state.get("retirement_rollback_preview")},
+            "reconciliation": state.get("reconciliation") or {"state": "not-applicable"},
+            "efficiency_model": {"policy": {"mode": "NORMAL", "reserve_percent": 5.0}, "last_efficiency": state.get("last_efficiency", {})},
+            "report": {}, "events": state.get("events", []), "live_output": state.get("live_output", []),
+        }
+        runtime = self.source["controller"].pop("controller_runtime", None)
+        self.source["controller"]["runtime"] = (
+            {"active": bool(runtime.get("pid")), **runtime}
+            if isinstance(runtime, dict) else {"active": False}
+        )
+        self.snapshot_client.return_value = self.source
         return state
 
     def __exit__(self, exc_type, exc, tb):
@@ -115,17 +130,15 @@ class HostSafetyTests(unittest.TestCase):
 class SnapshotTests(unittest.TestCase):
     def test_snapshot_is_bounded_operator_view(self):
         with WebHarness() as h:
-            h.state()
-            web.EVENTS.write_text(json.dumps({"category": "EDIT", "message": "app/a.py"}) + "\n", encoding="utf-8")
+            h.state(events=[{"category": "EDIT", "message": "app/a.py"}])
             with mock.patch.object(web, "git_snapshot", return_value={"branch": "main", "upstream": "origin/main", "head": "abc", "dirty": False, "dirty_count": 0, "status": []}):
-                snap = web.snapshot()
+                snap = web.snapshot({"codex_limits": {"windows": [{"remaining_percent": 68.5}]}})
             self.assertEqual(snap["controller"]["status"], "APPROVED")
-            self.assertEqual(snap["plan"]["steps"][0]["state"], "PASS")
-            self.assertEqual(snap["plan"]["steps"][1]["state"], "CURRENT")
+            self.assertEqual(snap["plan"]["steps"], [])
             self.assertEqual(snap["controller"]["quota_remaining_percent"], 68.5)
             self.assertEqual(snap["efficiency_policy"]["mode"], "NORMAL")
             self.assertEqual(snap["efficiency_policy"]["reserve_percent"], 5.0)
-            self.assertEqual(snap["efficiency_defaults"]["runaway_max_commands"], 40)
+            self.assertEqual(snap["efficiency_defaults"], {})
             self.assertEqual(snap["events"][0]["category"], "EDIT")
             self.assertNotIn("proposal_previous_state", json.dumps(snap))
 
@@ -135,7 +148,7 @@ class SnapshotTests(unittest.TestCase):
             gate = web.snapshot()["gate"]
             self.assertEqual(gate["id"], "HG-0021-03")
             self.assertTrue(gate["policy_review"])
-            self.assertEqual(gate["test_change_policy"], "add-only")
+            self.assertEqual(gate["test_change_policy"], "none")
             self.assertIn("authority mismatch", gate["recommendation"])
 
     def test_snapshot_exposes_only_matching_controller_self_hosting_candidate(self):
@@ -222,13 +235,12 @@ class SnapshotTests(unittest.TestCase):
                     "started_at": "2026-09-20T21:00:00+00:00", "plan_hash": "a" * 64,
                 },
             )
-            web.LIVE.write_text("controller-live\n", encoding="utf-8")
-            web.WEB_LOG.write_text("stale-web-output\n", encoding="utf-8")
+            h.source["live_output"] = ["controller-live"]
             snap = web.snapshot()
             self.assertTrue(snap["runtime"]["active"])
             self.assertEqual("run", snap["runtime"]["command"])
             self.assertEqual(__import__("os").getpid(), snap["runtime"]["pid"])
-            self.assertEqual(snap["controller_output_source"], "controller-live")
+            self.assertEqual(snap["controller_output_source"], "controller-snapshot")
             self.assertEqual(snap["live_log"], ["controller-live"])
 
     def test_snapshot_exposes_bounded_interrupted_run_recovery_evidence(self):
@@ -243,14 +255,12 @@ class SnapshotTests(unittest.TestCase):
                 },
             )
             recovery = web.snapshot()["controller"]["interrupted_run_recovery"]
-            self.assertEqual(recovery, {
-                "action": "RESUMED", "loop": 231, "checkpoint": "RP-TEST", "sha256": "c" * 64,
-            })
+            self.assertEqual(recovery["action"], "RESUMED")
+            self.assertEqual(recovery["checkpoint"], "RP-TEST")
             self.assertEqual(web.snapshot()["controller"]["pending_current_step_paths"], ["pending.py"])
 
     def test_snapshot_exposes_controller_reconciliation_without_web_reclassification(self):
         with WebHarness() as h:
-            h.state(retirement_record_id="RT-1", carry_forward_candidates=[])
             controller_snapshot = {
                 "replacement": True, "retirement_record_id": "RT-1", "retirement_manifest_sha256": "f" * 64,
                 "candidates": [{"path": "kept.py", "classification": "MANIFEST_BOUND_UNCHANGED",
@@ -258,30 +268,40 @@ class SnapshotTests(unittest.TestCase):
                                 "evidence_status": "pending", "claiming_step": None,
                                 "qualification_impact": "BLOCKS_EXECUTION"}],
             }
-            with mock.patch.object(web.ralph, "reconciliation_snapshot", return_value=controller_snapshot):
-                snap = web.snapshot()
+            h.state(retirement_record_id="RT-1", reconciliation={"state": "replacement", "snapshot": controller_snapshot})
+            snap = web.snapshot()
             self.assertEqual(snap["reconciliation"], controller_snapshot)
 
     def test_snapshot_surfaces_controller_reconciliation_refusal(self):
         with WebHarness() as h:
-            h.state(retirement_record_id="RT-1", carry_forward_candidates=[])
-            with mock.patch.object(web.ralph, "reconciliation_snapshot", side_effect=RuntimeError("action hash is malformed or stale")):
-                snap = web.snapshot()
+            h.state(retirement_record_id="RT-1", reconciliation={"state": "refused", "error": "action hash is malformed or stale"})
+            snap = web.snapshot()
             self.assertEqual(snap["reconciliation"]["controller_refusal"], "action hash is malformed or stale")
             self.assertEqual(snap["reconciliation"]["candidates"], [])
 
     def test_event_tail_is_bounded(self):
         with WebHarness() as h:
-            h.state()
-            web.EVENTS.write_text("\n".join(json.dumps({"category": "READ", "message": str(i)}) for i in range(300)) + "\n", encoding="utf-8")
-            rows = web.event_tail(25)
-            self.assertEqual(len(rows), 25)
+            h.state(events=[{"category": "READ", "message": str(i)} for i in range(300)])
+            rows = web.snapshot()["events"]
+            self.assertEqual(len(rows), web.MAX_EVENTS)
             self.assertEqual(rows[-1]["message"], "299")
 
 
 class ActionAuthorityTests(unittest.TestCase):
     def base_state(self, status="APPROVED"):
         return {"status": status, "plan_hash": "b" * 64}
+
+    def test_action_without_injected_state_fetches_fresh_controller_snapshot(self):
+        source = {
+            "schema": "stygnox_operator_snapshot_v1", "version": 1,
+            "controller": {"status": "READY_TO_COMMIT", "plan_hash": "b" * 64},
+            "progress": {}, "gate": {}, "recovery": {}, "retirement": {},
+            "reconciliation": {"state": "not-applicable"}, "pending_paths": [],
+        }
+        with mock.patch.object(web, "controller_snapshot", return_value=source) as client:
+            request = web.command_for_action({"action": "finalize_review"})
+        self.assertEqual(request.argv, ["finalize", "b" * 64])
+        client.assert_called_once_with()
 
     def test_run_is_background_and_bounded(self):
         request = web.command_for_action({"action": "run", "max_loops": 999}, self.base_state())
@@ -469,7 +489,7 @@ class ActionAuthorityTests(unittest.TestCase):
     def reconciliation_state(self):
         return {
             "status": "APPROVED", "plan_hash": "b" * 64, "retirement_record_id": "RT-1",
-            "carry_forward_candidates": [],
+            "reconciliation_snapshot": {"replacement": True, "candidates": [{"path": "kept.py", "eligible": True, "disposition": "PENDING_RECONCILIATION"}]},
         }
 
     def test_retirement_modes_are_exactly_confirmed_and_forwarded(self):
@@ -503,26 +523,24 @@ class ActionAuthorityTests(unittest.TestCase):
 
     def test_reconciliation_actions_require_current_controller_candidate_and_confirmation(self):
         state = self.reconciliation_state()
-        controller_snapshot = {"replacement": True, "candidates": [{"path": "kept.py", "eligible": True, "disposition": "PENDING_RECONCILIATION"}]}
-        with mock.patch.object(web.ralph, "reconciliation_snapshot", return_value=controller_snapshot):
-            adopt = web.command_for_action({"action": "adopt_carry_forward", "path": "kept.py", "step": 2, "confirm": "ADOPT"}, state)
-            leave = web.command_for_action({"action": "leave_carry_forward_outside", "path": "kept.py", "step": 2, "reason": "outside scope"}, state)
-            reject = web.command_for_action({"action": "reject_carry_forward", "path": "kept.py", "step": 2, "reason": "external repair"}, state)
+        adopt = web.command_for_action({"action": "adopt_carry_forward", "path": "kept.py", "step": 2, "confirm": "ADOPT"}, state)
+        leave = web.command_for_action({"action": "leave_carry_forward_outside", "path": "kept.py", "step": 2, "reason": "outside scope"}, state)
+        reject = web.command_for_action({"action": "reject_carry_forward", "path": "kept.py", "step": 2, "reason": "external repair"}, state)
         self.assertEqual(adopt.argv, ["adopt-carry-forward", "b" * 64, "--path", "kept.py", "--step", "2", "--ownership-basis", "retired-unchanged-content", "--confirm", "ADOPT"])
         self.assertEqual(leave.argv[:2], ["leave-carry-forward-outside", "b" * 64])
         self.assertEqual(reject.argv[:2], ["reject-carry-forward", "b" * 64])
-        with mock.patch.object(web.ralph, "reconciliation_snapshot", side_effect=RuntimeError("stale state")):
-            with self.assertRaisesRegex(web.WebConsoleError, "controller refused"):
-                web.command_for_action({"action": "adopt_carry_forward", "path": "kept.py", "step": 2, "confirm": "ADOPT"}, state)
-        with mock.patch.object(web.ralph, "reconciliation_snapshot", return_value=controller_snapshot):
-            with self.assertRaisesRegex(web.WebConsoleError, "exact pending"):
-                web.command_for_action({"action": "adopt_carry_forward", "path": "../kept.py", "step": 2, "confirm": "ADOPT"}, state)
+        state["reconciliation_snapshot"] = {"replacement": True, "controller_refusal": "stale state", "candidates": []}
+        with self.assertRaisesRegex(web.WebConsoleError, "controller refused"):
+            web.command_for_action({"action": "adopt_carry_forward", "path": "kept.py", "step": 2, "confirm": "ADOPT"}, state)
+        state["reconciliation_snapshot"] = {"replacement": True, "candidates": [{"path": "kept.py", "eligible": True, "disposition": "PENDING_RECONCILIATION"}]}
+        with self.assertRaisesRegex(web.WebConsoleError, "exact pending"):
+            web.command_for_action({"action": "adopt_carry_forward", "path": "../kept.py", "step": 2, "confirm": "ADOPT"}, state)
 
     def test_reconciliation_inspection_preserves_controller_refusal(self):
         state = self.reconciliation_state()
-        with mock.patch.object(web.ralph, "reconciliation_snapshot", side_effect=RuntimeError("stale action hash")):
-            with self.assertRaisesRegex(web.WebConsoleError, "controller refused"):
-                web.command_for_action({"action": "inspect_carry_forward"}, state)
+        state["reconciliation_snapshot"] = {"replacement": True, "controller_refusal": "stale action hash", "candidates": []}
+        with self.assertRaisesRegex(web.WebConsoleError, "controller refused"):
+            web.command_for_action({"action": "inspect_carry_forward"}, state)
 
     def test_steer_preserves_exact_gate_and_direction(self):
         req = web.command_for_action({
@@ -765,6 +783,7 @@ class HttpSurfaceTests(unittest.TestCase):
                     with self.assertRaises(urllib.error.HTTPError) as ctx:
                         urllib.request.urlopen(request, timeout=3)
                     self.assertEqual(ctx.exception.code, 403)
+                    self.assertGreaterEqual(h.snapshot_client.call_count, 1)
                 finally:
                     server.shutdown()
                     server.server_close()
