@@ -33,6 +33,7 @@ import ralph_tui as tui
 import ralph_efficiency as efficiency_policy
 import ralph_model as model_policy
 from ralph_profile import PROJECT_PROFILE
+from stygnox_protocol import PLAN_SCHEMA, RESULT_SCHEMA
 
 ROOT = PROJECT_PROFILE.repository_root(__file__)
 
@@ -89,54 +90,6 @@ PROTECTED_SUFFIXES = PROJECT_PROFILE.protected_suffixes
 TOOLING_PATHS = PROJECT_PROFILE.tooling_paths
 REPOSITORY_AUTHORITY_FIELD = "repository_authority"
 REPOSITORY_AUTHORITIES = frozenset({"read-only", "write"})
-PLAN_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "goal": {"type": "string"},
-        "steps": {
-            "type": "array", "minItems": 1, "maxItems": PLAN_MAX_STEPS_LIMIT,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "title": {"type": "string"},
-                    "objective": {"type": "string"},
-                    "acceptance": {"type": "array", "items": {"type": "string"}},
-                    "test_change_policy": {"type": "string", "enum": ["none", "add-only", "modify"]},
-                },
-                "required": ["id", "title", "objective", "acceptance", "test_change_policy"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["goal", "steps"],
-    "additionalProperties": False,
-}
-
-RESULT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string"},
-        "ideas": {"type": "array", "items": {"type": "string"}},
-        "blockers": {"type": "array", "items": {"type": "string"}},
-        "needs_human": {"type": "boolean"},
-        "blocker_class": {"type": "string", "enum": ["none", "validation-only", "continuation", "human-decision", "policy"]},
-        "validation_notes": {"type": "array", "items": {"type": "string"}},
-        "context": {
-            "type": "object",
-            "properties": {
-                "relevant_files": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
-                "accepted_findings": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
-                "files_inspected": {"type": "array", "maxItems": 16, "items": {"type": "string"}},
-            },
-            "required": ["relevant_files", "accepted_findings", "files_inspected"],
-            "additionalProperties": False,
-        },
-    },
-    "required": ["summary", "ideas", "blockers", "needs_human", "blocker_class", "validation_notes", "context"],
-    "additionalProperties": False,
-}
-
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
