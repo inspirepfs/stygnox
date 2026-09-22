@@ -60,6 +60,9 @@ class ProjectProfile:
         ("supply-chain", "scripts/supply_chain_validate.py"),
         ("public-audit", "scripts/public_release_audit.py"),
     )
+    optional_step_validators: tuple[tuple[str, str], ...] = (
+        ("ux-validator", "scripts/ux_validate.py"),
+    )
     execution_prompt_guardrails: tuple[str, ...] = (
         "Do not interact with live RouterOS, secrets, credentials, or external production systems.",
     )
@@ -208,11 +211,16 @@ class ProjectProfile:
             for base in (root / relative_path for relative_path in self.source_roots) if base.exists()
             for path in base.glob("*.py")
         )
-        return [
+        gates = [
             ("python-compile", [python_executable, "-m", "py_compile", *py_files]),
             ("unit-tests", [python_executable, "-m", "unittest", "discover", "-s", self.test_root, "-v"]),
-            ("ux-validator", [python_executable, "scripts/ux_validate.py"]),
         ]
+        gates.extend(
+            (name, [python_executable, relative_path])
+            for name, relative_path in self.optional_step_validators
+            if (root / relative_path).exists()
+        )
+        return gates
 
     def final_validator_gates(self, root: Path, python_executable: str) -> list[tuple[str, list[str]]]:
         return [

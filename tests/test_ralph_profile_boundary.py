@@ -24,6 +24,7 @@ class ProfileBoundaryTests(unittest.TestCase):
             completion_commit_prefix="chore(boundary):",
             source_roots=("host_source",),
             test_root="host_tests",
+            optional_step_validators=(("host-step-validator", "scripts/ux_validate.py"),),
             optional_final_validators=(("host-validator", "scripts/ux_validate.py"),),
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -35,7 +36,23 @@ class ProfileBoundaryTests(unittest.TestCase):
             gates = profile.qualification_gates(root, "python3")
             self.assertEqual(["python3", "-m", "py_compile", "host_source/module.py"], gates[0][1])
             self.assertEqual(["python3", "-m", "unittest", "discover", "-s", "host_tests", "-v"], gates[1][1])
+            self.assertEqual(
+                [("host-step-validator", ["python3", "scripts/ux_validate.py"])],
+                gates[2:],
+            )
             self.assertEqual([("host-validator", ["python3", "scripts/ux_validate.py"])], profile.final_validator_gates(root, "python3"))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "host_source").mkdir()
+            (root / "host_source" / "module.py").write_text("value = 1\n", encoding="utf-8")
+            self.assertEqual(
+                [
+                    ("python-compile", ["python3", "-m", "py_compile", "host_source/module.py"]),
+                    ("unit-tests", ["python3", "-m", "unittest", "discover", "-s", "host_tests", "-v"]),
+                ],
+                profile.qualification_gates(root, "python3"),
+            )
 
         with mock.patch.object(ralph, "PROJECT_PROFILE", profile):
             self.assertIn("Boundary Host", ralph.plan_prompt("test"))
@@ -43,8 +60,12 @@ class ProfileBoundaryTests(unittest.TestCase):
             self.assertEqual("chore(boundary): boundary work", ralph._default_commit_message({"plan": {"goal": "Boundary work"}}))
             self.assertEqual(profile.qualification_gates(ralph.ROOT, ralph.sys.executable), ralph.qualification_gates())
             self.assertEqual(
-                profile.final_validator_gates(ralph.ROOT, ralph.sys.executable),
-                ralph.final_qualification_gates()[-2:-1],
+                [
+                    *profile.qualification_gates(ralph.ROOT, ralph.sys.executable),
+                    *profile.final_validator_gates(ralph.ROOT, ralph.sys.executable),
+                    ("diff-check", ["git", "diff", "--check"]),
+                ],
+                ralph.final_qualification_gates(),
             )
 
     def test_profile_owns_runtime_boundary_and_host_prompt_guardrails(self):
