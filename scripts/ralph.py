@@ -34,6 +34,8 @@ import ralph_efficiency as efficiency_policy
 import ralph_model as model_policy
 from ralph_profile import PROJECT_PROFILE
 import stygnox_core as core
+import stygnox_codex as codex
+import stygnox_runtime as runtime
 from stygnox_protocol import PLAN_SCHEMA, RESULT_SCHEMA
 
 ROOT = PROJECT_PROFILE.repository_root(__file__)
@@ -212,9 +214,7 @@ def load_state() -> dict:
 def save_state(state: dict) -> None:
     state["updated_at"] = utc_now()
     RALPH.mkdir(parents=True, exist_ok=True)
-    tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, STATE)
+    runtime.write_json_atomic(state, path=STATE)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -302,9 +302,7 @@ def save_context(context: dict) -> None:
     context["schema"] = "zen_ralph_lite_context_v1"
     context["updated_at"] = utc_now()
     CONTEXT.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CONTEXT.with_suffix(".tmp")
-    tmp.write_text(json.dumps(context, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, CONTEXT)
+    runtime.write_json_atomic(context, path=CONTEXT)
 
 
 def _context_path(value: str) -> str | None:
@@ -428,10 +426,7 @@ def bootstrap_context_from_journal(state: dict) -> bool:
 
 
 def _git(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(["git", *args], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if check and proc.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed ({proc.returncode}): {proc.stdout[-3000:]}")
-    return proc
+    return runtime._git(args, root=ROOT, check=check)
 
 
 def git_head() -> str:
@@ -4114,118 +4109,36 @@ def failure_fingerprint(gate: str, output: str, returncode: int) -> str:
 
 
 def run_process(args: list[str], *, cwd: Path = ROOT, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, cwd=cwd, input=input_text, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return runtime.run_process(args, cwd=cwd, input_text=input_text)
 
 
 def empty_codex_metrics() -> dict:
-    return {
-        "commands_executed": 0,
-        "input_tokens": 0,
-        "cached_input_tokens": 0,
-        "cache_write_input_tokens": 0,
-        "output_tokens": 0,
-        "reasoning_output_tokens": 0,
-    }
+    return codex.empty_codex_metrics()
 
 
 def update_codex_metrics(metrics: dict, event: dict) -> None:
-    event_type = str(event.get("type") or "")
-    item = event.get("item") if isinstance(event.get("item"), dict) else {}
-    if event_type == "item.completed" and str(item.get("type") or "") == "command_execution":
-        metrics["commands_executed"] = int(metrics.get("commands_executed") or 0) + 1
-    if event_type == "turn.completed":
-        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
-        for key in (
-            "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
-            "output_tokens", "reasoning_output_tokens",
-        ):
-            metrics[key] = int(usage.get(key) or 0)
+    codex.update_codex_metrics(metrics, event)
 
 
 def stream_codex_process(args: list[str]) -> tuple[int, str, dict]:
-    """Run Codex while rendering its JSONL event stream for the operator."""
-    proc = subprocess.Popen(
-        args, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1,
+    return codex.stream_codex_process(
+        args, cwd=ROOT, render_event=codex_event_messages, clip=_clip, live_write=live_write,
     )
-    captured: list[str] = []
-    metrics = empty_codex_metrics()
-    assert proc.stdout is not None
-    for raw in proc.stdout:
-        captured.append(raw)
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        try:
-            event = json.loads(stripped)
-        except json.JSONDecodeError:
-            live_write(_clip(stripped, 800), "CODEX")
-            continue
-        if isinstance(event, dict):
-            update_codex_metrics(metrics, event)
-            for category, message in codex_event_messages(event):
-                if message:
-                    live_write(message, category)
-    return proc.wait(), "".join(captured), metrics
 
 
 def is_bwrap_bootstrap_failure(output: str) -> bool:
-    """Return True only for the known Codex Linux bubblewrap bootstrap failure."""
-    text = output.lower()
-    return "bwrap:" in text and any(
-        marker in text
-        for marker in (
-            "failed rtm_newaddr",
-            "setting up uid map: permission denied",
-            "write failed /proc/self/uid_map",
-        )
-    )
+    return codex.is_bwrap_bootstrap_failure(output)
 
 
 def codex_environment_error_output(output: str) -> str:
-    """Extract only process/turn errors eligible for sandbox classification."""
-    errors: list[str] = []
-    for raw in output.splitlines():
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        try:
-            event = json.loads(stripped)
-        except json.JSONDecodeError:
-            if is_bwrap_bootstrap_failure(stripped):
-                errors.append(stripped)
-            continue
-        if not isinstance(event, dict):
-            continue
-        event_type = str(event.get("type") or "")
-        if event_type == "turn.failed":
-            error = event.get("error") if isinstance(event.get("error"), dict) else {}
-            message = str(error.get("message") or "").strip()
-            if message:
-                errors.append(message)
-        elif event_type == "error":
-            message = str(event.get("message") or "").strip()
-            if message:
-                errors.append(message)
-    return "\n".join(errors)
+    return codex.codex_environment_error_output(output)
 
 
-class EnvironmentBlocked(RuntimeError):
-    """Environment prerequisite failed; metrics are retained if a turn had already started."""
-
-    def __init__(self, message: str, metrics: dict | None = None):
-        super().__init__(message)
-        self.metrics = dict(metrics or {})
+EnvironmentBlocked = codex.EnvironmentBlocked
 
 
 def sandbox_prefix_from_preflights(default_returncode: int, default_output: str) -> list[str]:
-    """Accept only the supported default sandbox backend for workspace-write."""
-    if default_returncode == 0 and not is_bwrap_bootstrap_failure(default_output):
-        return ["codex"]
-    detail = default_output[-1200:] or f"exit={default_returncode}"
-    raise EnvironmentBlocked(
-        "Codex default Linux sandbox preflight failed; fix the host sandbox prerequisites before running RALPH: "
-        + detail
-    )
+    return codex.sandbox_prefix_from_preflights(default_returncode, default_output)
 
 
 def codex_command_prefix() -> list[str]:
@@ -4233,59 +4146,19 @@ def codex_command_prefix() -> list[str]:
     global _CODEX_PREFIX
     if _CODEX_PREFIX is not None:
         return list(_CODEX_PREFIX)
-    if shutil.which("codex") is None:
-        raise EnvironmentBlocked("codex CLI is not installed or not on PATH")
-
-    default = run_process(["codex", "sandbox", "--", "/bin/true"])
-    _CODEX_PREFIX = sandbox_prefix_from_preflights(default.returncode, default.stdout)
-    live_write("sandbox preflight=PASS backend=default", "SANDBOX")
+    _CODEX_PREFIX = codex.codex_command_prefix(
+        run_process=run_process, live_write=live_write, which=shutil.which,
+    )
     return list(_CODEX_PREFIX)
 
 
 def run_codex(prompt: str, schema: dict, sandbox: str, *, context: str = "Codex") -> dict:
-    prefix = codex_command_prefix()
-    selected_model = selected_codex_model()
-    selected_effort = selected_codex_effort()
-    with tempfile.TemporaryDirectory(prefix="ralph-lite-") as temp_dir:
-        schema_path = Path(temp_dir) / "schema.json"
-        output_path = Path(temp_dir) / "result.json"
-        schema_path.write_text(json.dumps(schema), encoding="utf-8")
-        command = [*prefix, "exec"]
-        if selected_model:
-            command += ["--model", selected_model]
-        if selected_effort:
-            command += ["--config", f'model_reasoning_effort="{selected_effort}"']
-        command += [
-            "--ephemeral", "--json", "--sandbox", sandbox,
-            "--output-schema", str(schema_path), "-o", str(output_path), prompt,
-        ]
-        live_write(
-            f"{context} · model={selected_model or 'codex-default'} · effort={selected_effort or 'codex-default'} "
-            f"· sandbox={sandbox} backend=default",
-            "CODEX",
-        )
-        started = time.monotonic()
-        returncode, output, metrics = stream_codex_process(command)
-        metrics["codex_seconds"] = time.monotonic() - started
-
-        environment_error = codex_environment_error_output(output)
-        if is_bwrap_bootstrap_failure(environment_error):
-            raise EnvironmentBlocked(
-                "Codex default sandbox failed inside the model turn; automatic legacy fallback is disabled: "
-                + normalize_failure(environment_error)[-1200:],
-                metrics=metrics,
-            )
-        if returncode != 0:
-            raise RuntimeError(f"codex exec failed ({returncode}):\n{output[-6000:]}")
-        try:
-            result = json.loads(output_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"codex returned invalid structured output: {exc}") from exc
-        if isinstance(result, dict) and result.get("summary"):
-            live_write(_clip(result["summary"], 800), "SUMMARY")
-        if isinstance(result, dict):
-            result["_ralph_metrics"] = metrics
-        return result
+    return codex.run_codex(
+        prompt, schema, sandbox, cwd=ROOT, prefix=codex_command_prefix(),
+        stream_process=stream_codex_process, normalize_failure=normalize_failure,
+        clip=_clip, live_write=live_write, selected_model=selected_codex_model(),
+        selected_effort=selected_codex_effort(), context=context,
+    )
 
 
 def qualification_gates() -> list[tuple[str, list[str]]]:
