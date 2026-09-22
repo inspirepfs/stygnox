@@ -33,6 +33,7 @@ import ralph_tui as tui
 import ralph_efficiency as efficiency_policy
 import ralph_model as model_policy
 from ralph_profile import PROJECT_PROFILE
+import stygnox_core as core
 from stygnox_protocol import PLAN_SCHEMA, RESULT_SCHEMA
 
 ROOT = PROJECT_PROFILE.repository_root(__file__)
@@ -96,85 +97,41 @@ def utc_now() -> str:
 
 
 def canonical_plan(plan: dict) -> bytes:
-    return json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return core.canonical_plan(plan)
 
 
 def plan_hash(plan: dict) -> str:
-    return hashlib.sha256(canonical_plan(plan)).hexdigest()
+    return core.plan_hash(plan)
 
 
 def proposal_step_bounds(min_steps: object = None, max_steps: object = None) -> tuple[int, int]:
     """Validate operator-selected planning bounds without granting execution authority."""
-    minimum = PLAN_MIN_STEPS_DEFAULT if min_steps is None else int(min_steps)
-    maximum = PLAN_MAX_STEPS_DEFAULT if max_steps is None else int(max_steps)
-    if minimum < 1:
-        raise ValueError("minimum plan steps must be at least 1")
-    if maximum < minimum:
-        raise ValueError("maximum plan steps must be greater than or equal to minimum plan steps")
-    if maximum > PLAN_MAX_STEPS_LIMIT:
-        raise ValueError(f"maximum plan steps must not exceed {PLAN_MAX_STEPS_LIMIT}")
-    return minimum, maximum
+    return core.proposal_step_bounds(min_steps, max_steps)
 
 
 def plan_step_bounds(plan: dict) -> tuple[int, int]:
-    planning = plan.get("planning") if isinstance(plan, dict) and isinstance(plan.get("planning"), dict) else {}
-    return proposal_step_bounds(planning.get("min_steps"), planning.get("max_steps"))
+    return core.plan_step_bounds(plan)
 
 
 def validate_plan(plan: dict) -> None:
-    steps = plan.get("steps") if isinstance(plan, dict) else None
-    if not isinstance(plan.get("goal") if isinstance(plan, dict) else None, str) or not plan["goal"].strip():
-        raise ValueError("plan goal must be a non-empty string")
-    minimum, maximum = plan_step_bounds(plan)
-    if not isinstance(steps, list) or not minimum <= len(steps) <= maximum:
-        raise ValueError(f"plan must contain {minimum}-{maximum} steps")
-    for index, step in enumerate(steps, 1):
-        if step.get("id") != index:
-            raise ValueError("plan step ids must be sequential starting at 1")
-        for key in ("title", "objective"):
-            if not isinstance(step.get(key), str) or not step[key].strip():
-                raise ValueError(f"step {index} {key} must be non-empty")
-        acceptance = step.get("acceptance")
-        if not isinstance(acceptance, list) or not acceptance or not all(isinstance(x, str) and x.strip() for x in acceptance):
-            raise ValueError(f"step {index} acceptance must contain at least one item")
-        if step.get("test_change_policy") not in {"none", "add-only", "modify"}:
-            raise ValueError(f"step {index} has invalid test_change_policy")
+    core.validate_plan(plan)
 
 
 def validate_complete_plan(plan: dict, expected_hash: str | None = None) -> None:
     """Validate the controller-completed approval candidate and its bound identity."""
-    validate_plan(plan)
-    authority = plan.get(REPOSITORY_AUTHORITY_FIELD) if isinstance(plan, dict) else None
-    if authority not in REPOSITORY_AUTHORITIES:
-        raise ValueError("plan is missing controller-injected repository authority")
-    if expected_hash is not None:
-        expected = str(expected_hash or "").strip()
-        actual = plan_hash(plan)
-        if not expected or not secrets.compare_digest(actual, expected):
-            raise ValueError("approved plan hash does not match controller state")
+    core.validate_complete_plan(plan, expected_hash)
 
 
 def sandbox_for_approved_plan(plan: dict, expected_hash: str | None = None) -> str:
     """Select the model sandbox from the controller-bound plan authority only.
     """
-    validate_complete_plan(plan, expected_hash)
-    authority = plan.get(REPOSITORY_AUTHORITY_FIELD) if isinstance(plan, dict) else None
-    if authority == "read-only":
-        return "read-only"
-    if authority == "write":
-        return "workspace-write"
-    raise ValueError("approved plan has no sandbox-selecting repository authority")
+    return core.sandbox_for_approved_plan(plan, expected_hash)
 
 
 def controller_inject_repository_authority(plan: dict, authority: object) -> None:
     """Bind an operator-selected controller contract after model planning."""
-    if not isinstance(plan, dict):
-        raise ValueError("model proposal must be an object")
-    if REPOSITORY_AUTHORITY_FIELD in plan:
-        raise ValueError("model proposal must not supply repository authority")
-    if authority not in REPOSITORY_AUTHORITIES:
-        raise ValueError("proposal requires repository authority: read-only or write")
-    plan[REPOSITORY_AUTHORITY_FIELD] = authority
+    bound = core.controller_inject_repository_authority(plan, authority)
+    plan.update(bound)
 
 
 def render_plan(plan: dict) -> str:
@@ -3934,6 +3891,8 @@ def repo_snapshot() -> dict[str, str]:
 
 
 def changed_paths(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    # The pure core deliberately receives this derived value; it has no
+    # repository-snapshot dependency or set-diff primitive of its own.
     return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
 
 
@@ -3955,10 +3914,32 @@ def authority_snapshot() -> dict[Path, bytes | None]:
 
 
 def _normalize_repo_path(value: str) -> str:
-    path = str(value or "").strip().replace("\\", "/")
-    while path.startswith("./"):
-        path = path[2:]
-    return path
+    return core.normalize_repo_path(value)
+
+
+def _ralph_path_policy(paths: Iterable[str] = ()) -> core.ProjectPathPolicy:
+    """Adapt host-owned static and RALPH dynamic tooling policy to pure data."""
+    tooling_paths = set(PROJECT_PROFILE.tooling_paths)
+    for path in paths:
+        normalized = core.normalize_repo_path(path)
+        candidate = Path(normalized)
+        if (
+            candidate.parent.as_posix() == "scripts"
+            and candidate.suffix == ".py"
+            and candidate.name.startswith("ralph")
+        ) or (
+            candidate.parent.as_posix() == "tests"
+            and candidate.suffix == ".py"
+            and candidate.name.startswith("test_ralph")
+        ):
+            tooling_paths.add(normalized)
+    return core.ProjectPathPolicy(
+        protected_prefixes=PROJECT_PROFILE.protected_prefixes,
+        protected_exact=PROJECT_PROFILE.protected_exact,
+        protected_dir_prefixes=PROJECT_PROFILE.protected_dir_prefixes,
+        protected_suffixes=PROJECT_PROFILE.protected_suffixes,
+        tooling_paths=frozenset(tooling_paths),
+    )
 
 
 def authority_changed_paths(snapshot: dict[Path, bytes | None]) -> list[str]:
@@ -4076,40 +4057,28 @@ def authority_changed(snapshot: dict[Path, bytes | None]) -> bool:
 
 
 def is_protected_path(path: str) -> bool:
-    name = Path(path).name
-    return (
-        path == ".env"
-        or path.startswith(".env.")
-        or path in PROTECTED_EXACT
-        or path.startswith(PROTECTED_PREFIXES)
-        or path.startswith(PROTECTED_DIR_PREFIXES)
-        or name.endswith(PROTECTED_SUFFIXES)
-    )
+    return core.is_protected_path(path, _ralph_path_policy())
 
 
 def is_tooling_path(path: str) -> bool:
-    normalized = _normalize_repo_path(path)
-    if normalized in TOOLING_PATHS:
-        return True
-    candidate = Path(normalized)
-    if candidate.parent.as_posix() == "scripts" and candidate.suffix == ".py" and candidate.name.startswith("ralph"):
-        return True
-    if candidate.parent.as_posix() == "tests" and candidate.suffix == ".py" and candidate.name.startswith("test_ralph"):
-        return True
-    return False
+    return core.is_tooling_path(path, _ralph_path_policy((path,)))
 
 
 def classify_changes(paths: Iterable[str]) -> str:
     paths = list(paths)
-    if not paths:
-        return "no-code-change"
-    tooling = any(is_tooling_path(path) for path in paths)
-    product = any(not is_tooling_path(path) for path in paths)
-    if tooling and product:
-        return "mixed-tooling-product"
-    if tooling:
-        return "ralph-tooling"
-    return "product-development"
+    policy = _ralph_path_policy(paths)
+    classification = core.classify_changes(paths, policy)
+    compatibility_names = {
+        "no-change": "no-code-change",
+        "tooling": "ralph-tooling",
+        "product": "product-development",
+        "mixed": "mixed-tooling-product",
+    }
+    if classification != "protected":
+        return compatibility_names[classification]
+    tooling = any(core.is_tooling_path(path, policy) for path in paths)
+    product = any(not core.is_tooling_path(path, policy) for path in paths)
+    return "mixed-tooling-product" if tooling and product else "ralph-tooling" if tooling else "product-development"
 
 
 def test_policy_violation(
@@ -4127,43 +4096,21 @@ def test_policy_violation(
     remain protected.  Explicit human steering may authorize one exact new test
     path without granting authority over existing tests.
     """
-    changed = [p for p in changed_paths(before, after) if p == "tests" or p.startswith("tests/")]
-    if policy == "modify":
-        return []
+    changed = changed_paths(before, after)
     allowed = steering_allowed_new_tests(state or {}, int(step_no or 0)) if state else set()
-    if policy == "none":
-        return [p for p in changed if p not in allowed]
-    violations: list[str] = []
-    for path in changed:
-        if path in allowed:
-            continue
-        if state is not None:
-            if plan_baseline_path_kind(state, path) == "absent":
-                continue
-            violations.append(path)
-        elif path in before:
-            violations.append(path)
-    return violations
+    baseline_path_kinds = {
+        path: plan_baseline_path_kind(state, path) if state is not None else "tracked" if path in before else "absent"
+        for path in changed
+    }
+    return core.test_policy_violations(changed, policy, baseline_path_kinds, allowed)
 
 
 def normalize_failure(text: str) -> str:
-    useful = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if re.search(r"^(FAIL|ERROR):|AssertionError|Traceback|FAILED|ERRORS?\b", stripped):
-            useful.append(stripped)
-    if not useful:
-        useful = [line.strip() for line in text.splitlines() if line.strip()][-20:]
-    normalized = "\n".join(useful)
-    normalized = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", normalized)
-    normalized = re.sub(r"/tmp/[^\s:]+", "/tmp/TMP", normalized)
-    normalized = re.sub(r"\b\d+\.\d+s\b", "TIME", normalized)
-    return normalized[:8000]
+    return core.normalize_failure(text)
 
 
 def failure_fingerprint(gate: str, output: str, returncode: int) -> str:
-    payload = f"{gate}\n{returncode}\n{normalize_failure(output)}".encode()
-    return hashlib.sha256(payload).hexdigest()[:20]
+    return core.failure_fingerprint(gate, output, returncode)
 
 
 def run_process(args: list[str], *, cwd: Path = ROOT, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -4449,25 +4396,11 @@ def _step_explicitly_delegates_human_gate(step: dict | None) -> bool:
     new human authority by itself; the approved plan must already say that missing
     runtime/operator evidence stops at BLOCKED_HUMAN.
     """
-    if not isinstance(step, dict):
-        return False
-    text = " ".join([
-        str(step.get("objective") or ""),
-        *(str(value) for value in (step.get("acceptance") or [])),
-    ]).lower()
-    return (
-        "blocked_human" in text
-        and any(marker in text for marker in ("operator", "runtime", "evidence", "human-owned", "human owned"))
-    )
+    return core.approved_step_delegates_human_gate(step)
 
 
 def _declared_human_block(result: dict) -> str:
-    summary = str(result.get("summary") or "").strip()
-    match = re.match(r"^BLOCKED_HUMAN\s*:\s*(.*)$", summary, flags=re.IGNORECASE | re.DOTALL)
-    if not match:
-        return ""
-    detail = match.group(1).strip()
-    return detail or "Approved step requires human-owned evidence before it can advance"
+    return core.declared_human_block(result)
 
 
 def codex_requires_human_before_gates(result: dict, step: dict | None = None) -> tuple[bool, str]:
@@ -4482,9 +4415,10 @@ def codex_requires_human_before_gates(result: dict, step: dict | None = None) ->
     blocker_class = str(result.get("blocker_class") or "none")
     blockers = [str(item).strip() for item in (result.get("blockers") or []) if str(item).strip()]
 
+    delegated, delegated_reason = core.agent_requires_human_before_qualification(result, step)
+    if delegated:
+        return True, delegated_reason
     declared = _declared_human_block(result)
-    if declared and _step_explicitly_delegates_human_gate(step):
-        return True, declared
 
     if blocker_class in {"validation-only", "continuation"}:
         return False, ""
@@ -4508,12 +4442,11 @@ def codex_requests_continuation(result: dict, step: dict | None = None) -> tuple
     summary = str(result.get("summary") or "").strip()
     text = " ".join([summary, *blockers]).lower()
 
-    if _declared_human_block(result) and _step_explicitly_delegates_human_gate(step):
+    delegated_continuation, delegated_reason = core.agent_requests_continuation(result, step)
+    if delegated_continuation:
+        return True, delegated_reason
+    if core.agent_requires_human_before_qualification(result, step)[0]:
         return False, ""
-
-    if blocker_class == "continuation":
-        reason = "; ".join(blockers) or summary or "approved step requires another bounded implementation turn"
-        return True, reason
 
     continuation_markers = (
         "another shell execution",
