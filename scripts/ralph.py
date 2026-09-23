@@ -42,6 +42,28 @@ from stygnox_protocol import PLAN_SCHEMA, RESULT_SCHEMA
 ROOT = PROJECT_PROFILE.repository_root(__file__)
 
 
+def bind_controller_root(explicit_repository_root: Path) -> None:
+    """Atomically bind controller runtime artifacts to an explicit resolved root."""
+    replacement_map = {
+        "ROOT": explicit_repository_root,
+        "RALPH": PROJECT_PROFILE.runtime_directory(explicit_repository_root),
+        "STATE": PROJECT_PROFILE.artifact(explicit_repository_root, "state"),
+        "PLAN": PROJECT_PROFILE.artifact(explicit_repository_root, "plan"),
+        "IDEAS": PROJECT_PROFILE.artifact(explicit_repository_root, "ideas"),
+        "JOURNAL": PROJECT_PROFILE.artifact(explicit_repository_root, "journal"),
+        "POLICY": PROJECT_PROFILE.artifact(explicit_repository_root, "policy"),
+        "LIVE": PROJECT_PROFILE.artifact(explicit_repository_root, "live"),
+        "CONTEXT": PROJECT_PROFILE.artifact(explicit_repository_root, "context"),
+        "EVENTS": PROJECT_PROFILE.artifact(explicit_repository_root, "events"),
+        "RECOVERY": PROJECT_PROFILE.artifact(explicit_repository_root, "recovery"),
+        "REPORTS": PROJECT_PROFILE.artifact(explicit_repository_root, "reports"),
+        "RETIREMENTS": PROJECT_PROFILE.artifact(explicit_repository_root, "retirements"),
+        "USAGE_LEDGER": PROJECT_PROFILE.artifact(explicit_repository_root, "usage_ledger"),
+        "USAGE_STATS_RESET": PROJECT_PROFILE.artifact(explicit_repository_root, "usage_stats_reset"),
+    }
+    globals().update(replacement_map)
+
+
 def _project_policy_kwargs() -> dict[str, Path]:
     return PROJECT_PROFILE.policy_storage_kwargs(ROOT)
 RALPH = PROJECT_PROFILE.runtime_directory(ROOT)
