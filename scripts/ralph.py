@@ -30,6 +30,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import ralph_tui as tui
+import ralph_gate
 import ralph_efficiency as efficiency_policy
 import ralph_model as model_policy
 from ralph_profile import PROJECT_PROFILE
@@ -62,6 +63,7 @@ def bind_controller_root(explicit_repository_root: Path) -> None:
         "USAGE_STATS_RESET": PROJECT_PROFILE.artifact(explicit_repository_root, "usage_stats_reset"),
     }
     globals().update(replacement_map)
+    ralph_gate.LIVE = replacement_map["LIVE"]
 
 
 def _project_policy_kwargs() -> dict[str, Path]:
@@ -4131,8 +4133,8 @@ def failure_fingerprint(gate: str, output: str, returncode: int) -> str:
     return core.failure_fingerprint(gate, output, returncode)
 
 
-def run_process(args: list[str], *, cwd: Path = ROOT, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    return runtime.run_process(args, cwd=cwd, input_text=input_text)
+def run_process(args: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return runtime.run_process(args, cwd=ROOT if cwd is None else cwd, input_text=input_text)
 
 
 def empty_codex_metrics() -> dict:

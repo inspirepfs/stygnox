@@ -480,7 +480,9 @@ def render_markdown(gate: dict[str, Any], *, details: bool = False, view: str = 
     return "\n".join(lines)
 
 
-def gate_history(path: Path = LIVE) -> list[dict[str, Any]]:
+def gate_history(path: Path | None = None) -> list[dict[str, Any]]:
+    if path is None:
+        path = LIVE
     if not path.exists():
         return []
     current: dict[str, Any] = {}
