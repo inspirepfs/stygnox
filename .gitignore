@@ -12,3 +12,8 @@ venv/
 .ralph/*
 !.ralph/policy.md
 .stygnox/
+
+# Local Python distribution build artifacts.
+build/
+dist/
+*.egg-info/
