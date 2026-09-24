@@ -91,7 +91,7 @@ def support_policy() -> dict[str, Any]:
             "system_package_manager": False,
         },
         "project_state_compatibility": {
-            "package_only_upgrade_from": ["0.1.0.dev1", "0.1.0.dev2", "0.1.0.dev3"],
+            "package_only_upgrade_from": ["0.1.0.dev1", "0.1.0.dev2", "0.1.0.dev3", "0.1.0.dev4"],
             "runtime_upgrade_from_dev_min": 2,
             "runtime_upgrade_through_dev": current_dev,
             "known_schemas": {

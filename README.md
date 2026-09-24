@@ -14,7 +14,9 @@ transaction authority binding, explicit safe stop, and operator-approved exact
 baseline restoration for new/unborn, clean, and dirty projects. D8.4 adds
 reversible extraction of supported idle legacy RALPH runtime into neutral
 Stygnox retained evidence, explicit upgrade compatibility, and non-destructive
-uninstall preparation.
+uninstall preparation. D8.5 adds the neutral installed profile, atomic
+execution policy, reviewed provider/model/effort overrides, and an installed
+controller activation/run path bound to D8.3 transaction authority.
 
 The D8.1 installed command is intentionally a narrow product-identity boundary:
 it provides neutral `--help` and `--version` behaviour from an installed wheel
@@ -24,10 +26,13 @@ a target-project `scripts/ralph.py`, or a Stygnox source checkout.
 D8.2 installs the bounded `stygnox adopt` / `stygnox bootstrap` admission
 surface. D8.3 adds `stygnox transaction` / `stygnox recover` for exact handoff
 binding, safe-stop authority revocation, stale recovery-preview refusal, and
-baseline restoration. D8.4 adds `stygnox migrate`, `stygnox support`,
-`stygnox upgrade`, and `stygnox uninstall`. Autonomous controller execution
-remains disabled pending D8.5 controller neutralisation. Current source-tree
-controller entrypoints remain compatibility/development surfaces.
+baseline restoration. D8.4 adds `stygnox migrate`, `stygnox support`, `stygnox upgrade`, and
+`stygnox uninstall`. D8.5 adds `stygnox profile`, `stygnox execution-policy`,
+and the installed `stygnox controller` authority surface. Adoption handoff still
+starts with controller execution disabled; a separate D8.5 activation gate binds
+controller authority to an ACTIVE D8.3 transaction and the exact reviewed
+execution policy. Current source-tree controller entrypoints remain
+compatibility/development surfaces and are not installed fallbacks.
 
 ## Installable product development
 
@@ -94,6 +99,18 @@ and project-state compatibility policy. See
 `docs/d8-4-migration-upgrade-uninstall.md` for reversible legacy extraction,
 upgrade refusal/acceptance, retained evidence, and uninstall ownership.
 
+For the D8.5 neutral controller/execution-policy gate, run:
+
+```bash
+python3 scripts/qualify_d8_5_controller.py
+```
+
+Neutral defaults select no provider, model, or effort. Use
+`stygnox execution-policy preview/set/reset` for reviewer-bound overrides and
+`stygnox controller status/activate/run-preview/run` for installed controller
+authority. See `docs/d8-5-neutral-controller.md` for the exact profile, policy,
+activation, provider, and qualification boundary.
+
 ## Compatibility seams still intentionally retained
 
 The following are not adopted as final Stygnox product identity and remain
@@ -101,10 +118,10 @@ later-stage obligations:
 
 - persisted `zen_ralph_*` schemas;
 - `.ralph` compatibility runtime/policy naming;
-- the active ZEN host profile and `chore(zen):` commit identity;
-- source-tree `scripts/ralph.py` controller compatibility;
+- source-tree `scripts/ralph.py` and legacy ZEN/RALPH compatibility surfaces;
+- persisted legacy schemas retained only where compatibility/evidence requires them;
 - external Web/TUI parity and presentation; and
-- migration, upgrade, uninstall, and release-wide installed-artifact gates.
+- release-wide installed-artifact/documentation closure.
 
 The staged roadmap and release acceptance baseline are documented in
 `docs/d8-0-roadmap-and-release-acceptance.md`.

@@ -26,6 +26,7 @@ import subprocess
 import sys
 from typing import Any
 
+from . import execution_policy
 from .product import PRODUCT
 
 
@@ -239,27 +240,23 @@ def _validated_operator(value: str) -> str:
     return operator
 
 
-def render_config() -> str:
-    return (
-        f'schema = "{CONFIG_SCHEMA}"\n'
-        f'runtime_directory = "{RUNTIME_NAME}"\n'
-        f'policy_file = "{POLICY_NAME}"\n'
-        "\n[defaults]\n"
-        'provider = ""\n'
-        'model = ""\n'
-        'effort = ""\n'
-        "\n[authority]\n"
-        'stage = "bootstrap-policy-runtime-boundary"\n'
-        "controller_execution = false\n"
-    )
+def render_config(policy: Mapping[str, Any] | None = None) -> str:
+    return execution_policy.render_config(policy or execution_policy.neutral_policy())
 
 
-def render_policy(operator: str) -> str:
+def render_policy(operator: str, review: Mapping[str, Any] | None = None) -> str:
+    review = dict(review or {})
+    reviewer = review.get("reviewer") or "none (neutral provider/model/effort)"
+    provider = review.get("provider") or "neutral"
+    model = review.get("model") or "neutral"
+    effort = review.get("effort") or "neutral"
     return f"""# Stygnox Project Policy
 
 Schema: `{POLICY_SCHEMA}`
 Runtime: `{RUNTIME_NAME}/`
 Named operator / human decision maker: `{operator}`
+Execution-policy reviewer: `{reviewer}`
+Reviewed provider/model/effort: `{provider}` / `{model}` / `{effort}`
 
 ## D8.2 bootstrap authority
 
@@ -267,8 +264,9 @@ Named operator / human decision maker: `{operator}`
   to normal Git review. Ignored runtime material never substitutes for them.
 - `{RUNTIME_NAME}/` is controller-owned runtime. Agents and implementation
   workers must not create, edit, delete, rename, or adopt content there.
-- Provider, model, and effort defaults are neutral. A later reviewed stage must
-  explicitly authorize any non-neutral selection before controller execution.
+- Provider, model, and effort default to neutral. Any non-neutral selection
+  shown above is bound to this tracked policy/configuration preview and named
+  reviewer before authority handoff. Changing it invalidates confirmation.
 - The D8.2 handoff grants only the exact bootstrap writes previewed by the
   installed command. It does **not** grant autonomous controller execution.
 - A changed baseline, changed tracked policy/configuration, changed external
@@ -294,10 +292,18 @@ def _proposed_gitignore(root: Path) -> tuple[str, str, str]:
     return before, after, "create" if not path.exists() else "modify"
 
 
-def _planned_tracked_files(root: Path, operator: str) -> tuple[list[dict[str, Any]], list[str]]:
+def _planned_tracked_files(
+    root: Path,
+    operator: str,
+    policy: Mapping[str, Any],
+    review: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
     conflicts: list[str] = []
     plans: list[dict[str, Any]] = []
-    for name, content in ((CONFIG_NAME, render_config()), (POLICY_NAME, render_policy(operator))):
+    for name, content in (
+        (CONFIG_NAME, render_config(policy)),
+        (POLICY_NAME, render_policy(operator, review)),
+    ):
         path = root / name
         if path.exists() or path.is_symlink():
             conflicts.append(name)
@@ -371,11 +377,40 @@ def _parse_dirty_evidence(path: Path, baseline: GitBaseline) -> dict[str, Any]:
     }
 
 
-def build_preview(project: Path, operator: str, *, dirty_evidence: Path | None = None) -> dict[str, Any]:
+def build_preview(
+    project: Path,
+    operator: str,
+    *,
+    dirty_evidence: Path | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    reviewer: str | None = None,
+    efficiency_mode: str | None = None,
+    reserve_percent: float | None = None,
+    wait_for_limits: bool | None = None,
+    usage_poll_seconds: int | None = None,
+    max_loops: int | None = None,
+) -> dict[str, Any]:
     baseline = capture_baseline(project)
     operator_name = _validated_operator(operator)
     command = resolve_installed_command(baseline.worktree)
-    tracked, conflicts = _planned_tracked_files(baseline.worktree, operator_name)
+    try:
+        selected_policy = execution_policy.normalize_policy(
+            provider=provider,
+            model=model,
+            effort=effort,
+            reviewer=reviewer,
+            efficiency_mode=efficiency_mode,
+            reserve_percent=reserve_percent,
+            wait_for_limits=wait_for_limits,
+            usage_poll_seconds=usage_poll_seconds,
+            max_loops=max_loops,
+        )
+        review = execution_policy.policy_review(selected_policy, selected_policy.get("reviewer"))
+    except execution_policy.ExecutionPolicyError as exc:
+        raise AdoptionError(str(exc)) from exc
+    tracked, conflicts = _planned_tracked_files(baseline.worktree, operator_name, selected_policy, review)
     dirty: dict[str, Any] = {"required": baseline.journey == "dirty", "evidence": None}
     evidence_error: str | None = None
     if baseline.journey == "dirty" and dirty_evidence is not None:
@@ -406,7 +441,20 @@ def build_preview(project: Path, operator: str, *, dirty_evidence: Path | None =
             "agent_writable": False,
             "native_delta": False,
         },
-        "defaults": {"provider": None, "model": None, "effort": None},
+        "defaults": {key: selected_policy.get(key) for key in ("provider", "model", "effort")},
+        "execution_policy": {
+            "review": review,
+            "controls": {
+                key: selected_policy[key]
+                for key in (
+                    "efficiency_mode",
+                    "reserve_percent",
+                    "wait_for_limits",
+                    "usage_poll_seconds",
+                    "max_loops",
+                )
+            },
+        },
         "authority": {
             "scope": "bootstrap-policy-runtime-boundary-only",
             "paths": authority_paths,
@@ -469,9 +517,16 @@ def write_runtime_record(
     return target
 
 
-def abort_adoption(project: Path, operator: str, preview_sha256: str, *, dirty_evidence: Path | None = None) -> dict[str, Any]:
+def abort_adoption(
+    project: Path,
+    operator: str,
+    preview_sha256: str,
+    *,
+    dirty_evidence: Path | None = None,
+    **policy_kwargs: Any,
+) -> dict[str, Any]:
     expected = _require_preview_digest(preview_sha256)
-    preview = build_preview(project, operator, dirty_evidence=dirty_evidence)
+    preview = build_preview(project, operator, dirty_evidence=dirty_evidence, **policy_kwargs)
     if preview["preview_sha256"] != expected:
         raise AdoptionError("preview is stale: baseline, policy/configuration, command, or recovery evidence changed; preview again")
     return {
@@ -491,11 +546,12 @@ def handoff_adoption(
     confirmation: str,
     *,
     dirty_evidence: Path | None = None,
+    **policy_kwargs: Any,
 ) -> dict[str, Any]:
     if confirmation != "HANDOFF":
         raise AdoptionError("explicit confirmation required: --confirm HANDOFF")
     expected = _require_preview_digest(preview_sha256)
-    preview = build_preview(project, operator, dirty_evidence=dirty_evidence)
+    preview = build_preview(project, operator, dirty_evidence=dirty_evidence, **policy_kwargs)
     if preview["preview_sha256"] != expected:
         raise AdoptionError("preview is stale: baseline, policy/configuration, command, or recovery evidence changed; preview again")
     if not preview["admissible"]:
@@ -559,8 +615,10 @@ def handoff_adoption(
         },
         "dirty_recovery": preview["dirty_recovery"],
         "recovery_source": recovery_source,
+        "execution_policy_review": preview["execution_policy"]["review"],
+        "execution_policy_controls": preview["execution_policy"]["controls"],
         "controller_execution": False,
-        "next_stage": "D8.3 transaction/recovery qualification before autonomous controller execution",
+        "next_stage": "D8.5 neutral controller activation after D8.3 transaction binding",
     }
     runtime_record = write_runtime_record(root, "adoption.json", handoff, actor=_RUNTIME_WRITE_ACTOR)
     return {
@@ -590,6 +648,18 @@ def build_parser() -> argparse.ArgumentParser:
             type=Path,
             help="external operator-owned D8.2 recovery attestation for a dirty journey",
         )
+        command.add_argument("--provider", help="reviewed provider override; requires --model and --reviewer")
+        command.add_argument("--model", help="reviewed model override; requires --provider and --reviewer")
+        command.add_argument("--effort", help="reviewed effort override; requires provider/model/reviewer")
+        command.add_argument("--reviewer", help="named reviewer for non-neutral provider/model/effort")
+        command.add_argument("--efficiency-mode", choices=execution_policy.MODES)
+        command.add_argument("--reserve-percent", type=float)
+        wait = command.add_mutually_exclusive_group()
+        wait.add_argument("--wait-for-limits", dest="wait_for_limits", action="store_true")
+        wait.add_argument("--no-wait-for-limits", dest="wait_for_limits", action="store_false")
+        command.set_defaults(wait_for_limits=None)
+        command.add_argument("--usage-poll-seconds", type=int)
+        command.add_argument("--max-loops", type=int)
 
     preview = sub.add_parser("preview", help="produce a no-change adoption preview")
     common(preview)
@@ -608,15 +678,32 @@ def build_parser() -> argparse.ArgumentParser:
 def cli_main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
+    policy_kwargs = {
+        "provider": args.provider,
+        "model": args.model,
+        "effort": args.effort,
+        "reviewer": args.reviewer,
+        "efficiency_mode": args.efficiency_mode,
+        "reserve_percent": args.reserve_percent,
+        "wait_for_limits": args.wait_for_limits,
+        "usage_poll_seconds": args.usage_poll_seconds,
+        "max_loops": args.max_loops,
+    }
     try:
         if args.action == "preview":
-            result = build_preview(args.project, args.operator, dirty_evidence=args.dirty_recovery_evidence)
+            result = build_preview(
+                args.project,
+                args.operator,
+                dirty_evidence=args.dirty_recovery_evidence,
+                **policy_kwargs,
+            )
         elif args.action == "abort":
             result = abort_adoption(
                 args.project,
                 args.operator,
                 args.preview,
                 dirty_evidence=args.dirty_recovery_evidence,
+                **policy_kwargs,
             )
         else:
             result = handoff_adoption(
@@ -625,6 +712,7 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
                 args.preview,
                 args.confirm,
                 dirty_evidence=args.dirty_recovery_evidence,
+                **policy_kwargs,
             )
     except AdoptionError as exc:
         print(f"stygnox: adoption refused: {exc}", file=sys.stderr)

@@ -1,11 +1,10 @@
 """Installed Stygnox command surface.
 
-D8.4 extends the installed product boundary with reversible legacy migration,
-explicit upgrade compatibility, and non-destructive uninstall preparation.
-The installed package still has no dependency on legacy ``ralph`` controller
-modules or on a Stygnox source checkout.
+D8.5 adds the neutral installed profile, reviewer-bound execution policy, and
+installed controller authority/provider path.  Legacy source-tree controller
+modules are compatibility/development surfaces only and are never imported by
+the installed command.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -14,10 +13,9 @@ from collections.abc import Sequence
 from .product import PRODUCT
 
 
-_CONTROLLER_BOUNDARY = (
-    "autonomous controller execution commands are not enabled by the D8.4 "
-    "migration/lifecycle surface; D8.4 proves extraction, compatibility, "
-    "uninstall safety, and rollback before controller neutralisation"
+_UNKNOWN_COMMAND = (
+    "unknown installed Stygnox command; legacy/source-tree controller fallbacks "
+    "are not permitted by the installed product boundary"
 )
 
 
@@ -25,15 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PRODUCT.command,
         description=(
-            "Stygnox installed product with adoption, transaction/recovery, migration, upgrade, and uninstall surfaces. "
-            "Autonomous controller execution remains disabled pending D8.5."
+            "Stygnox installed product with adoption, recovery, lifecycle, neutral execution-policy, "
+            "and installed controller surfaces."
         ),
     )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {PRODUCT.version}",
-    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {PRODUCT.version}")
     parser.add_argument("command", nargs="?", help="installed product command")
     parser.add_argument("args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     return parser
@@ -47,27 +41,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if namespace.command in {"adopt", "bootstrap"}:
         from .adoption import cli_main
-
         return cli_main(namespace.args)
     if namespace.command in {"transaction", "recover"}:
         from .transactions import cli_main
-
         return cli_main(namespace.args)
     if namespace.command == "migrate":
         from .migration import cli_main
-
         return cli_main(namespace.args)
     if namespace.command == "upgrade":
         from .lifecycle import upgrade_cli_main
-
         return upgrade_cli_main(namespace.args)
     if namespace.command == "uninstall":
         from .lifecycle import uninstall_cli_main
-
         return uninstall_cli_main(namespace.args)
     if namespace.command == "support":
         from .lifecycle import support_cli_main
-
         return support_cli_main(namespace.args)
-    parser.error(_CONTROLLER_BOUNDARY)
-    return 2  # pragma: no cover - argparse.error exits
+    if namespace.command == "profile":
+        from .profile import cli_main
+        return cli_main(namespace.args)
+    if namespace.command in {"execution-policy", "policy"}:
+        from .execution_policy import cli_main
+        return cli_main(namespace.args)
+    if namespace.command == "controller":
+        from .controller import cli_main
+        return cli_main(namespace.args)
+    parser.error(_UNKNOWN_COMMAND)
+    return 2  # pragma: no cover

@@ -94,7 +94,7 @@ class StygnoxDistributionTests(TestCase):
                 check=False,
             )
             self.assertEqual(2, result.returncode)
-            self.assertIn("not enabled by the D8.4", result.stderr)
+            self.assertIn("legacy/source-tree controller fallbacks are not permitted", result.stderr)
             self.assertFalse(sentinel.exists())
 
 
