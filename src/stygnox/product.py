@@ -19,5 +19,5 @@ PRODUCT = ProductIdentity(
     name="Stygnox",
     command="stygnox",
     version=__version__,
-    stage="D8.3 clean/dirty transaction and baseline recovery",
+    stage="D8.4 migration, upgrade, and uninstall",
 )

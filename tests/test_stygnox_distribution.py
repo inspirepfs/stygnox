@@ -26,6 +26,7 @@ class StygnoxDistributionTests(TestCase):
         self.assertEqual("stygnox", project["project"]["name"])
         self.assertEqual(["version"], project["project"]["dynamic"])
         self.assertEqual("stygnox.cli:main", project["project"]["scripts"]["stygnox"])
+        self.assertEqual(">=3.11,<3.14", project["project"]["requires-python"])
         self.assertEqual(
             "stygnox._version.__version__",
             project["tool"]["setuptools"]["dynamic"]["version"]["attr"],
@@ -93,7 +94,7 @@ class StygnoxDistributionTests(TestCase):
                 check=False,
             )
             self.assertEqual(2, result.returncode)
-            self.assertIn("not enabled by the D8.3", result.stderr)
+            self.assertIn("not enabled by the D8.4", result.stderr)
             self.assertFalse(sentinel.exists())
 
 

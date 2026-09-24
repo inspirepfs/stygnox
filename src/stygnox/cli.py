@@ -1,8 +1,9 @@
 """Installed Stygnox command surface.
 
-D8.3 extends the installed product boundary with bounded transaction and
-baseline-recovery semantics.  The installed package still has no dependency on
-the legacy ``ralph`` controller modules or on a Stygnox source checkout.
+D8.4 extends the installed product boundary with reversible legacy migration,
+explicit upgrade compatibility, and non-destructive uninstall preparation.
+The installed package still has no dependency on legacy ``ralph`` controller
+modules or on a Stygnox source checkout.
 """
 
 from __future__ import annotations
@@ -14,9 +15,9 @@ from .product import PRODUCT
 
 
 _CONTROLLER_BOUNDARY = (
-    "autonomous controller execution commands are not enabled by the D8.3 "
-    "transaction/recovery surface; D8.3 proves authority binding, safe stop, "
-    "and operator-approved restoration before controller neutralisation"
+    "autonomous controller execution commands are not enabled by the D8.4 "
+    "migration/lifecycle surface; D8.4 proves extraction, compatibility, "
+    "uninstall safety, and rollback before controller neutralisation"
 )
 
 
@@ -24,8 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PRODUCT.command,
         description=(
-            "Stygnox installed product with D8.2 adoption and D8.3 transaction/recovery surfaces. "
-            "Use 'stygnox adopt --help' or 'stygnox transaction --help'."
+            "Stygnox installed product with adoption, transaction/recovery, migration, upgrade, and uninstall surfaces. "
+            "Autonomous controller execution remains disabled pending D8.5."
         ),
     )
     parser.add_argument(
@@ -52,5 +53,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .transactions import cli_main
 
         return cli_main(namespace.args)
+    if namespace.command == "migrate":
+        from .migration import cli_main
+
+        return cli_main(namespace.args)
+    if namespace.command == "upgrade":
+        from .lifecycle import upgrade_cli_main
+
+        return upgrade_cli_main(namespace.args)
+    if namespace.command == "uninstall":
+        from .lifecycle import uninstall_cli_main
+
+        return uninstall_cli_main(namespace.args)
+    if namespace.command == "support":
+        from .lifecycle import support_cli_main
+
+        return support_cli_main(namespace.args)
     parser.error(_CONTROLLER_BOUNDARY)
     return 2  # pragma: no cover - argparse.error exits

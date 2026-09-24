@@ -7,7 +7,7 @@ name = "stygnox"
 dynamic = ["version"]
 description = "Stygnox autonomous development-loop controller"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 license = { file = "LICENSE" }
 authors = [
   { name = "Stygnox contributors" }

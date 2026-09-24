@@ -11,7 +11,10 @@ neutral installed `stygnox` command. D8.2 adds the installed read-only
 bootstrap/admission preview, explicit confirmed handoff, reviewed tracked
 policy/configuration, and ignored controller-owned runtime boundary. D8.3 adds
 transaction authority binding, explicit safe stop, and operator-approved exact
-baseline restoration for new/unborn, clean, and dirty projects.
+baseline restoration for new/unborn, clean, and dirty projects. D8.4 adds
+reversible extraction of supported idle legacy RALPH runtime into neutral
+Stygnox retained evidence, explicit upgrade compatibility, and non-destructive
+uninstall preparation.
 
 The D8.1 installed command is intentionally a narrow product-identity boundary:
 it provides neutral `--help` and `--version` behaviour from an installed wheel
@@ -21,9 +24,10 @@ a target-project `scripts/ralph.py`, or a Stygnox source checkout.
 D8.2 installs the bounded `stygnox adopt` / `stygnox bootstrap` admission
 surface. D8.3 adds `stygnox transaction` / `stygnox recover` for exact handoff
 binding, safe-stop authority revocation, stale recovery-preview refusal, and
-baseline restoration. Autonomous controller execution remains disabled pending
-later controller-neutralisation stages. Current source-tree controller
-entrypoints remain compatibility/development surfaces.
+baseline restoration. D8.4 adds `stygnox migrate`, `stygnox support`,
+`stygnox upgrade`, and `stygnox uninstall`. Autonomous controller execution
+remains disabled pending D8.5 controller neutralisation. Current source-tree
+controller entrypoints remain compatibility/development surfaces.
 
 ## Installable product development
 
@@ -78,6 +82,17 @@ python3 scripts/qualify_d8_3_transactions.py
 See `docs/d8-3-transaction-recovery.md` for transaction binding, safe-stop,
 dirty external-manifest requirements, exact restoration, and retained runtime
 evidence semantics.
+
+For the D8.4 migration/upgrade/uninstall gate, run:
+
+```bash
+python3 scripts/qualify_d8_4_lifecycle.py
+```
+
+Use `stygnox support` for the machine-readable supported platform/install-media
+and project-state compatibility policy. See
+`docs/d8-4-migration-upgrade-uninstall.md` for reversible legacy extraction,
+upgrade refusal/acceptance, retained evidence, and uninstall ownership.
 
 ## Compatibility seams still intentionally retained
 
