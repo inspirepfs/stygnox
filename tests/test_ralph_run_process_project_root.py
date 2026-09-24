@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +58,28 @@ class RunProcessProjectRootTests(unittest.TestCase):
         self.assertEqual(source_file, Path(ralph.__file__).resolve())
         self.assertEqual(source_runtime, SOURCE_ROOT / ".ralph")
         self.assertEqual(runtime_before, self._runtime_snapshot(source_runtime))
+
+    def test_run_process_forwards_explicit_environment(self) -> None:
+        environment = {"PYTHONPYCACHEPREFIX": "/project/.ralph/pycache"}
+        with mock.patch.object(ralph.runtime, "run_process") as run:
+            ralph.run_process(["tool"], env=environment)
+        run.assert_called_once_with(["tool"], cwd=ralph.ROOT, input_text=None, env=environment)
+
+    def test_regular_and_final_qualification_use_copied_contained_environments(self) -> None:
+        completed = __import__("subprocess").CompletedProcess(["gate"], 0, "")
+        expected_prefix = str((ralph.RALPH / "pycache").resolve())
+        with mock.patch.dict(os.environ, {"INHERITED_FOR_QUALIFICATION": "yes"}, clear=True):
+            with mock.patch.object(ralph, "qualification_gates", return_value=[("regular", ["gate"])]):
+                with mock.patch.object(ralph, "final_qualification_gates", return_value=[("final", ["gate"])]):
+                    with mock.patch.object(ralph, "run_process", return_value=completed) as run:
+                        self.assertTrue(ralph.run_gates()[0])
+                        self.assertTrue(ralph.run_final_qualification()[0])
+        environments = [call.kwargs["env"] for call in run.call_args_list]
+        self.assertEqual(2, len(environments))
+        self.assertIsNot(environments[0], environments[1])
+        for environment in environments:
+            self.assertEqual("yes", environment["INHERITED_FOR_QUALIFICATION"])
+            self.assertEqual(expected_prefix, environment["PYTHONPYCACHEPREFIX"])
 
     @staticmethod
     def _runtime_snapshot(runtime: Path) -> tuple[tuple[str, int, int], ...]:

@@ -16,6 +16,11 @@ _EXTERNAL_PROJECT_COMMANDS = frozenset({
     "finalize", "reconcile-commit", "reconcile-push", "adopt-test-reconciliation",
     "usage", "operator-snapshot", "status",
 })
+_SOURCE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _establish_pycache_prefix(root: Path) -> None:
+    sys.pycache_prefix = str((root / ".ralph" / "pycache").resolve())
 
 
 def _remove_project_root(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -44,10 +49,10 @@ def _print_wrapper_help() -> None:
 
 def main() -> int:
     """Delegate, admitting an external project only through explicit binding."""
-    import ralph
-
     project_root, controller_argv = _remove_project_root(sys.argv[1:])
     if project_root is None:
+        _establish_pycache_prefix(_SOURCE_ROOT)
+        import ralph
         if sys.argv[1:] in (["--help"], ["-h"]):
             _print_wrapper_help()
         return int(ralph.main())
@@ -58,12 +63,19 @@ def main() -> int:
     if command not in _EXTERNAL_PROJECT_COMMANDS:
         raise SystemExit(f"stygnox: --project-root refuses non-allowlisted command {command!r}")
 
-    from stygnox_project_root import ProjectRootError, resolve_project_root
+    original_dont_write_bytecode = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        from stygnox_project_root import ProjectRootError, resolve_project_root
+    finally:
+        sys.dont_write_bytecode = original_dont_write_bytecode
 
     try:
         resolved_root: Path = resolve_project_root(project_root)
     except ProjectRootError as error:
         raise SystemExit(f"stygnox: --project-root refused: {error}") from error
+    _establish_pycache_prefix(resolved_root)
+    import ralph
     ralph.bind_controller_root(resolved_root)
     sys.argv[:] = [sys.argv[0], *controller_argv]
     return int(ralph.main())

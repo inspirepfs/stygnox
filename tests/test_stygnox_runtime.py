@@ -25,6 +25,16 @@ class RuntimeProcessTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
 
+    def test_run_process_forwards_an_explicit_environment(self):
+        completed = subprocess.CompletedProcess(["tool"], 0, "ok")
+        environment = {"PYTHONPYCACHEPREFIX": "/repo/.ralph/pycache"}
+        with mock.patch.object(runtime.subprocess, "run", return_value=completed) as run:
+            self.assertIs(runtime.run_process(["tool"], cwd=Path("/repo"), env=environment), completed)
+        run.assert_called_once_with(
+            ["tool"], cwd=Path("/repo"), input=None, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment,
+        )
+
     def test_git_failure_has_the_existing_exact_error_text(self):
         completed = subprocess.CompletedProcess(["git"], 7, "bad output")
         with mock.patch.object(runtime.subprocess, "run", return_value=completed):

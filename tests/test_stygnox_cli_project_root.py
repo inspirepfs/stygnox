@@ -25,6 +25,7 @@ def load_wrapper() -> ModuleType:
 class StygnoxCliProjectRootTests(TestCase):
     def setUp(self) -> None:
         self.wrapper = load_wrapper()
+        self.original_pycache_prefix = sys.pycache_prefix
         self.ralph = ModuleType("ralph")
         self.ralph.main = Mock(return_value=17)
         self.ralph.bind_controller_root = Mock()
@@ -32,12 +33,16 @@ class StygnoxCliProjectRootTests(TestCase):
         self.roots.ProjectRootError = ValueError
         self.roots.resolve_project_root = Mock(return_value=Path("/resolved/project"))
 
+    def tearDown(self) -> None:
+        sys.pycache_prefix = self.original_pycache_prefix
+
     def test_no_project_root_preserves_exact_delegation_and_arguments(self) -> None:
         original_argv = ["stygnox_cli.py", "status", "--json"]
         with patch.dict(sys.modules, {"ralph": self.ralph, "stygnox_project_root": self.roots}):
             with patch.object(sys, "argv", original_argv):
                 self.assertEqual(17, self.wrapper.main())
                 self.assertEqual(original_argv, sys.argv)
+        self.assertEqual(str((SCRIPTS.parent / ".ralph" / "pycache").resolve()), sys.pycache_prefix)
         self.ralph.main.assert_called_once_with()
         self.ralph.bind_controller_root.assert_not_called()
         self.roots.resolve_project_root.assert_not_called()
@@ -74,8 +79,10 @@ class StygnoxCliProjectRootTests(TestCase):
                 self.roots.resolve_project_root.assert_called_once_with("/external/project")
                 self.ralph.bind_controller_root.assert_called_once_with(Path("/resolved/project"))
                 self.ralph.main.assert_called_once_with()
+                self.assertEqual("/resolved/project/.ralph/pycache", sys.pycache_prefix)
 
     def test_external_mode_refuses_web_and_unknown_commands_before_dispatch(self) -> None:
+        sys.pycache_prefix = "/caller/pycache"
         for command, refusal in (("serve", "serve/Web"), ("unknown", "non-allowlisted")):
             with self.subTest(command=command):
                 self.ralph.main.reset_mock()
@@ -86,8 +93,10 @@ class StygnoxCliProjectRootTests(TestCase):
                             self.wrapper.main()
                 self.ralph.main.assert_not_called()
                 self.ralph.bind_controller_root.assert_not_called()
+                self.assertEqual("/caller/pycache", sys.pycache_prefix)
 
     def test_external_mode_fails_closed_when_root_resolution_fails(self) -> None:
+        sys.pycache_prefix = "/caller/pycache"
         self.roots.resolve_project_root.side_effect = ValueError("not a worktree")
         with patch.dict(sys.modules, {"ralph": self.ralph, "stygnox_project_root": self.roots}):
             with patch.object(sys, "argv", ["stygnox_cli.py", "status", "--project-root", "/bad"]):
@@ -95,6 +104,7 @@ class StygnoxCliProjectRootTests(TestCase):
                     self.wrapper.main()
         self.ralph.bind_controller_root.assert_not_called()
         self.ralph.main.assert_not_called()
+        self.assertEqual("/caller/pycache", sys.pycache_prefix)
 
     def test_wrapper_scan_rejects_missing_or_repeated_roots(self) -> None:
         with patch.dict(sys.modules, {"ralph": self.ralph}):

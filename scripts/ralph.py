@@ -29,6 +29,8 @@ from typing import Iterable
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+if __name__ == "__main__":
+    sys.pycache_prefix = str((_SCRIPT_DIR.parent / ".ralph" / "pycache").resolve())
 import ralph_tui as tui
 import ralph_gate
 import ralph_efficiency as efficiency_policy
@@ -2092,7 +2094,7 @@ def run_final_qualification(requalification_state: dict | None = None) -> tuple[
     for name, command in final_qualification_gates():
         live_write(f"running {name}", "GATE")
         started = time.monotonic()
-        proc = run_process(command)
+        proc = run_process(command, env=qualification_environment())
         durations[name] = time.monotonic() - started
         outcome = "PASS" if proc.returncode == 0 else "FAIL"
         results.append(f"{name}={outcome}")
@@ -4133,8 +4135,18 @@ def failure_fingerprint(gate: str, output: str, returncode: int) -> str:
     return core.failure_fingerprint(gate, output, returncode)
 
 
-def run_process(args: list[str], *, cwd: Path | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    return runtime.run_process(args, cwd=ROOT if cwd is None else cwd, input_text=input_text)
+def run_process(
+    args: list[str], *, cwd: Path | None = None, input_text: str | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return runtime.run_process(args, cwd=ROOT if cwd is None else cwd, input_text=input_text, env=env)
+
+
+def qualification_environment() -> dict[str, str]:
+    """Return an inherited environment that contains qualification bytecode."""
+    environment = os.environ.copy()
+    environment["PYTHONPYCACHEPREFIX"] = str((RALPH / "pycache").resolve())
+    return environment
 
 
 def empty_codex_metrics() -> dict:
@@ -4196,7 +4208,7 @@ def run_gates() -> tuple[bool, list[str], str | None, str, dict[str, float]]:
     for name, command in qualification_gates():
         live_write(f"running {name}", "GATE")
         started = time.monotonic()
-        proc = run_process(command)
+        proc = run_process(command, env=qualification_environment())
         durations[name] = time.monotonic() - started
         outcome = "PASS" if proc.returncode == 0 else "FAIL"
         gate_log.append(f"{name}={outcome}")

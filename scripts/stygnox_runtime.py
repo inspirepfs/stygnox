@@ -9,10 +9,16 @@ from pathlib import Path
 
 def run_process(
     args: list[str], *, cwd: Path, input_text: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if env is None:
+        return subprocess.run(
+            args, cwd=cwd, input=input_text, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
     return subprocess.run(
         args, cwd=cwd, input=input_text, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
     )
 
 
