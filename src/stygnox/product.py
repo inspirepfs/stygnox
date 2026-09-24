@@ -19,5 +19,5 @@ PRODUCT = ProductIdentity(
     name="Stygnox",
     command="stygnox",
     version=__version__,
-    stage="D8.5 neutral authority, profile, controller, and execution policy",
+    stage="D8.6A installed Web and operator/reconciliation UX",
 )

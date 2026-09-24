@@ -31,6 +31,8 @@ class StygnoxDistributionTests(TestCase):
             "stygnox._version.__version__",
             project["tool"]["setuptools"]["dynamic"]["version"]["attr"],
         )
+        package_data = project["tool"]["setuptools"]["package-data"]["stygnox"]
+        self.assertIn("web_assets/*", package_data)
 
     def test_installed_package_has_no_legacy_ralph_import(self) -> None:
         offenders: list[str] = []

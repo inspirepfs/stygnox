@@ -31,6 +31,9 @@ stygnox = "stygnox.cli:main"
 package-dir = { "" = "src" }
 include-package-data = false
 
+[tool.setuptools.package-data]
+stygnox = ["web_assets/*"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["stygnox*"]

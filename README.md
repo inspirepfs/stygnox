@@ -111,6 +111,31 @@ Neutral defaults select no provider, model, or effort. Use
 authority. See `docs/d8-5-neutral-controller.md` for the exact profile, policy,
 activation, provider, and qualification boundary.
 
+
+## D8.6A installed Web operator surface
+
+The installed product now provides a neutral, branded local operator console:
+
+```bash
+stygnox web --project /path/to/project
+```
+
+D8.6A uses the approved `branding/` design tokens and selected logo assets,
+projects only installed Stygnox state, and shares its action dispatcher with the
+future TUI.  CLI/Web adoption preview digests are qualified for parity.  The
+Web surface is deliberately loopback-only in D8.6A; non-loopback binding fails
+closed before authority.  Carry-forward/reconciliation attribution is visible
+as operator-baseline, Stygnox-native, runtime-only, external, or unresolved and
+never auto-adopts or silently reattributes prior material.
+
+Run:
+
+```bash
+python3 scripts/qualify_d8_6a_web.py
+```
+
+See `docs/d8-6a-web-operator-ux.md` for the exact boundary.
+
 ## Compatibility seams still intentionally retained
 
 The following are not adopted as final Stygnox product identity and remain
@@ -120,7 +145,8 @@ later-stage obligations:
 - `.ralph` compatibility runtime/policy naming;
 - source-tree `scripts/ralph.py` and legacy ZEN/RALPH compatibility surfaces;
 - persisted legacy schemas retained only where compatibility/evidence requires them;
-- external Web/TUI parity and presentation; and
+- installed TUI/terminal parity and final D8.6 cross-surface closure;
+- D8.6A Web is intentionally loopback-only until the final cross-surface policy gate; and
 - release-wide installed-artifact/documentation closure.
 
 The staged roadmap and release acceptance baseline are documented in

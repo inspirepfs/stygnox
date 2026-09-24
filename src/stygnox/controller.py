@@ -286,6 +286,14 @@ def run_controller(
     after = adoption.capture_baseline(root).public()
     if preview["repository_authority"] == "read-only" and after.get("sha256") != before.get("sha256"):
         raise ControllerError("read-only provider turn changed the project baseline")
+    from .operator import status_attribution
+
+    attribution = status_attribution(before, after) if preview["repository_authority"] == "write" else {
+        "controller_native_paths": [],
+        "operator_baseline_paths": [],
+        "overlap_unresolved_paths": [],
+        "removed_preexisting_paths": [],
+    }
     result: dict[str, Any] = {
         "schema": RUN_RESULT_SCHEMA,
         "product_version": PRODUCT.version,
@@ -299,6 +307,7 @@ def run_controller(
         "before_baseline_sha256": before["sha256"],
         "after_baseline_sha256": after["sha256"],
         "project_changed": before["sha256"] != after["sha256"],
+        "change_attribution": attribution,
         "next_action": "qualification-required" if before["sha256"] != after["sha256"] else "turn-complete",
     }
     result["record_sha256"] = _digest(result)

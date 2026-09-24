@@ -1,7 +1,7 @@
 """Installed Stygnox command surface.
 
-D8.5 adds the neutral installed profile, reviewer-bound execution policy, and
-installed controller authority/provider path.  Legacy source-tree controller
+D8.6A adds the neutral installed Web operator surface and shared presentation-
+neutral operator/reconciliation model. Legacy source-tree Web/controller
 modules are compatibility/development surfaces only and are never imported by
 the installed command.
 """
@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PRODUCT.command,
         description=(
             "Stygnox installed product with adoption, recovery, lifecycle, neutral execution-policy, "
-            "and installed controller surfaces."
+            "installed controller, and installed Web operator surfaces."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {PRODUCT.version}")
@@ -65,6 +65,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cli_main(namespace.args)
     if namespace.command == "controller":
         from .controller import cli_main
+        return cli_main(namespace.args)
+    if namespace.command in {"web", "serve"}:
+        from .web import cli_main
         return cli_main(namespace.args)
     parser.error(_UNKNOWN_COMMAND)
     return 2  # pragma: no cover
