@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StygNox Development Style Guide</title>
+<link rel="stylesheet" href="css/design-tokens.css">
+<link rel="stylesheet" href="css/components.css">
+<style>
+  .guide-header { padding: 74px 0 54px; }
+  .guide-logo { width: min(480px,100%); border-radius: 14px; display:block; }
+  .swatches { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+  .swatch { overflow:hidden; border:1px solid var(--sn-border); border-radius:12px; background:var(--sn-surface); }
+  .swatch__colour { height:88px; }
+  .swatch__meta { padding:12px; font:12px/1.5 var(--sn-font-mono); color:var(--sn-text-muted); }
+  .sample-row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+  .type-display { font:700 clamp(2.6rem,7vw,5.4rem)/.95 var(--sn-font-display); letter-spacing:-.055em; margin:.2em 0; }
+  .type-heading { font:700 2rem/1.1 var(--sn-font-display); }
+  .type-body { max-width:62ch; color:var(--sn-text-muted); line-height:1.7; }
+  @media(max-width:800px){.swatches{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<nav class="sn-nav">
+  <div class="sn-container sn-nav__inner">
+    <a class="sn-brand" href="homepage.html"><img src="assets/brand/stygnox-icon-128.png" alt=""><span>StygNox</span></a>
+    <div class="sn-nav__links"><a href="#colour">Colour</a><a href="#type">Typography</a><a href="#components">Components</a><a class="sn-btn sn-btn--primary" href="homepage.html">Homepage reference</a></div>
+  </div>
+</nav>
+
+<header class="guide-header">
+  <div class="sn-container">
+    <div class="sn-kicker">Development system · v1.0</div>
+    <h1 class="sn-display">Styg<span class="accent">Nox</span> style guide</h1>
+    <p class="sn-lead">A dark-first product system derived from the selected StygNox branding: metallic neutrals, controlled violet energy, terminal credibility and operator-first clarity.</p>
+  </div>
+</header>
+
+<main>
+<section id="colour" class="sn-section">
+  <div class="sn-container">
+    <div class="sn-kicker">01 · Foundation</div>
+    <h2>Colour</h2>
+    <p class="sn-lead">Purple is a signal, not a page fill. Keep the product grounded in near-black and navy surfaces so the brand colour retains meaning.</p>
+    <div class="swatches" style="margin-top:28px">
+      <div class="swatch"><div class="swatch__colour" style="background:#05090F"></div><div class="swatch__meta">BG 950<br>#05090F</div></div>
+      <div class="swatch"><div class="swatch__colour" style="background:#0D1320"></div><div class="swatch__meta">SURFACE<br>#0D1320</div></div>
+      <div class="swatch"><div class="swatch__colour" style="background:#925EED"></div><div class="swatch__meta">PURPLE<br>#925EED</div></div>
+      <div class="swatch"><div class="swatch__colour" style="background:#AF76F0"></div><div class="swatch__meta">PURPLE BRIGHT<br>#AF76F0</div></div>
+      <div class="swatch"><div class="swatch__colour" style="background:#D5A1FA"></div><div class="swatch__meta">PURPLE SOFT<br>#D5A1FA</div></div>
+      <div class="swatch"><div class="swatch__colour" style="background:#7EA8FF"></div><div class="swatch__meta">SIGNAL BLUE<br>#7EA8FF</div></div>
+      <div class="swatch"><div class="swatch__colour" style="background:#D6DCE8"></div><div class="swatch__meta">SILVER<br>#D6DCE8</div></div>
+      <div class="swatch"><div class="swatch__colour" style="background:#26324A"></div><div class="swatch__meta">BORDER<br>#26324A</div></div>
+    </div>
+  </div>
+</section>
+
+<hr class="sn-rule">
+
+<section id="type" class="sn-section">
+  <div class="sn-container">
+    <div class="sn-kicker">02 · Typography</div>
+    <div class="type-display">Controlled <span style="color:var(--sn-purple-bright)">autonomy.</span></div>
+    <h3 class="type-heading">Evidence remains readable at every layer.</h3>
+    <p class="type-body">Use Space Grotesk or a strong geometric sans for display work, Inter for product UI and JetBrains Mono/Cascadia Code for machine state, commands, logs, hashes and evidence.</p>
+    <div class="sn-terminal" style="margin-top:26px"><div class="sn-terminal__bar"><i class="sn-terminal__lamp"></i><i class="sn-terminal__lamp"></i><i class="sn-terminal__lamp"></i></div><pre><span class="purple">$</span> stygnox run --plan EX-READY-0042
+status=RUNNING  authority=GUARDED  evidence=CAPTURING
+gate=none       recovery=ARMED    step=04/09</pre></div>
+  </div>
+</section>
+
+<hr class="sn-rule">
+
+<section id="components" class="sn-section">
+  <div class="sn-container">
+    <div class="sn-kicker">03 · Components</div>
+    <h2>Controls and surfaces</h2>
+    <div class="sample-row" style="margin:22px 0 28px"><a class="sn-btn sn-btn--primary" href="#">Primary action</a><a class="sn-btn sn-btn--secondary" href="#">Secondary action</a><span class="sn-badge"><i class="sn-dot"></i> Live</span></div>
+    <div class="sn-grid sn-grid--3">
+      <article class="sn-panel sn-card sn-panel--glow"><div class="sn-kicker">Selected</div><h3>Featured panel</h3><p>Use restrained glow for selected, active or deliberately featured content.</p></article>
+      <article class="sn-panel sn-card"><div class="sn-kicker">Evidence</div><h3>Normal panel</h3><p>Most cards should rely on border, hierarchy and spacing rather than visual effects.</p></article>
+      <article class="sn-panel sn-card"><div class="sn-kicker">Authority</div><h3>Explicit state</h3><p>Never use colour alone to communicate authority, risk or destructive intent.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="sn-section">
+  <div class="sn-container">
+    <div class="sn-panel sn-card">
+      <div class="sn-kicker">Brand source</div>
+      <h2>Selected visual reference</h2>
+      <img class="guide-logo" src="assets/brand/stygnox-selected-brand-board.png" alt="Selected StygNox branding board">
+    </div>
+  </div>
+</section>
+</main>
+</body>
+</html>

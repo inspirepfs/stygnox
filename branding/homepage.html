@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="StygNox — autonomous development with evidence, control and recovery built in.">
+<title>StygNox — Autonomous Development-Loop Platform</title>
+<link rel="stylesheet" href="css/design-tokens.css">
+<link rel="stylesheet" href="css/components.css">
+<style>
+  .hero { padding: clamp(68px,10vw,128px) 0 78px; position:relative; overflow:hidden; }
+  .hero::after { content:""; position:absolute; inset:auto -15% -35% 40%; height:520px; background:radial-gradient(circle,rgba(146,94,237,.18),transparent 68%); pointer-events:none; }
+  .hero-grid { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(360px,.9fr); gap:54px; align-items:center; position:relative; z-index:1; }
+  .hero-actions { display:flex; flex-wrap:wrap; gap:12px; margin-top:26px; }
+  .hero-meta { display:flex; flex-wrap:wrap; gap:10px; margin-top:30px; }
+  .hero-mark { width:min(520px,100%); margin:auto; display:block; filter:drop-shadow(0 0 28px rgba(146,94,237,.12)); border-radius:20px; }
+  .trust-strip { border-top:1px solid var(--sn-border-subtle); border-bottom:1px solid var(--sn-border-subtle); background:rgba(255,255,255,.012); }
+  .trust-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); }
+  .trust-item { padding:20px 18px; border-right:1px solid var(--sn-border-subtle); }
+  .trust-item:last-child { border-right:0; }
+  .trust-item strong { display:block; font:700 1rem var(--sn-font-display); }
+  .trust-item span { color:var(--sn-text-muted); font-size:.84rem; }
+  .stage { position:relative; padding-top:28px; }
+  .stage::before { content:""; position:absolute; top:9px; left:0; width:32px; height:2px; background:linear-gradient(90deg,var(--sn-purple),var(--sn-purple-soft)); }
+  .capability-num { font:700 .75rem var(--sn-font-mono); color:var(--sn-purple-bright); }
+  .split { display:grid; grid-template-columns:1fr 1fr; gap:36px; align-items:center; }
+  .authority-list { display:grid; gap:12px; margin-top:24px; }
+  .authority-row { display:flex; gap:14px; padding:14px 16px; border:1px solid var(--sn-border-subtle); border-radius:10px; background:rgba(255,255,255,.012); }
+  .authority-row b { min-width:110px; color:var(--sn-text-secondary); }
+  .authority-row span { color:var(--sn-text-muted); }
+  .cta-box { padding:42px; text-align:center; overflow:hidden; position:relative; }
+  .cta-box::before { content:""; position:absolute; inset:-100px 25% auto; height:240px; background:radial-gradient(circle,rgba(146,94,237,.24),transparent 70%); }
+  .footer { padding:34px 0 54px; border-top:1px solid var(--sn-border-subtle); color:var(--sn-text-muted); font-size:.88rem; }
+  .footer-inner { display:flex; justify-content:space-between; gap:22px; flex-wrap:wrap; }
+  @media(max-width:900px){.hero-grid,.split{grid-template-columns:1fr}.hero-mark{max-width:430px}.trust-grid{grid-template-columns:1fr 1fr}.trust-item:nth-child(2){border-right:0}.trust-item:nth-child(-n+2){border-bottom:1px solid var(--sn-border-subtle)}}
+  @media(max-width:560px){.trust-grid{grid-template-columns:1fr}.trust-item{border-right:0;border-bottom:1px solid var(--sn-border-subtle)!important}.cta-box{padding:30px 20px}}
+</style>
+</head>
+<body>
+<nav class="sn-nav" aria-label="Primary">
+  <div class="sn-container sn-nav__inner">
+    <a class="sn-brand" href="#"><img src="assets/brand/stygnox-icon-128.png" alt=""><span>StygNox</span></a>
+    <div class="sn-nav__links">
+      <a href="#platform">Platform</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#control">Human control</a>
+      <a href="style-guide.html">Style guide</a>
+      <a class="sn-btn sn-btn--primary" href="#start">Explore StygNox</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="sn-container hero-grid">
+    <div>
+      <div class="sn-kicker">Autonomous development-loop platform</div>
+      <h1 class="sn-display">Build with autonomy.<br><span class="accent">Keep control.</span></h1>
+      <p class="sn-lead">StygNox coordinates a bounded development loop that plans, executes, captures evidence, stops for human authority when required and preserves deterministic recovery.</p>
+      <div class="hero-actions">
+        <a class="sn-btn sn-btn--primary" href="#platform">Explore the platform →</a>
+        <a class="sn-btn sn-btn--secondary" href="#evidence">See the evidence model</a>
+      </div>
+      <div class="hero-meta">
+        <span class="sn-badge"><i class="sn-dot"></i> Human-gated autonomy</span>
+        <span class="sn-badge">Recovery-aware</span>
+        <span class="sn-badge">Evidence-first</span>
+      </div>
+    </div>
+    <div>
+      <img class="hero-mark" src="assets/brand/stygnox-logo-800x300.png" alt="StygNox">
+    </div>
+  </div>
+</header>
+
+<section class="trust-strip" aria-label="Platform principles">
+  <div class="sn-container trust-grid">
+    <div class="trust-item"><strong>Bounded execution</strong><span>Plans establish scope before action.</span></div>
+    <div class="trust-item"><strong>Human authority</strong><span>Stop, review and explicitly resume.</span></div>
+    <div class="trust-item"><strong>Durable evidence</strong><span>Every material step leaves a record.</span></div>
+    <div class="trust-item"><strong>Deterministic recovery</strong><span>Know what changed and how to unwind it.</span></div>
+  </div>
+</section>
+
+<main>
+<section id="platform" class="sn-section">
+  <div class="sn-container">
+    <div class="sn-kicker">The loop</div>
+    <h2 style="font:700 clamp(2rem,4vw,3.5rem)/1.05 var(--sn-font-display);letter-spacing:-.035em;margin:.5rem 0 1rem">Plan · Execute · Evidence · Evolve</h2>
+    <p class="sn-lead">Autonomy is useful only when its boundaries, evidence and recovery semantics are explicit.</p>
+    <div class="sn-grid sn-grid--4" style="margin-top:34px">
+      <article class="sn-panel sn-card stage"><div class="capability-num">01</div><h3>Plan</h3><p>Turn intent into an inspectable, bounded execution contract before work begins.</p></article>
+      <article class="sn-panel sn-card stage"><div class="capability-num">02</div><h3>Execute</h3><p>Run work inside declared authority, scope and test policy.</p></article>
+      <article class="sn-panel sn-card stage"><div class="capability-num">03</div><h3>Evidence</h3><p>Capture state, commands, diffs, gates and outcomes as durable operational evidence.</p></article>
+      <article class="sn-panel sn-card stage"><div class="capability-num">04</div><h3>Evolve</h3><p>Carry learning forward without silently mutating previously approved contracts.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="sn-section" style="background:linear-gradient(180deg,rgba(17,26,42,.20),rgba(5,9,15,0))">
+  <div class="sn-container">
+    <div class="sn-kicker">Core capabilities</div>
+    <div class="sn-grid sn-grid--3" style="margin-top:26px">
+      <article class="sn-panel sn-card"><div class="capability-num">AUTHORITY</div><h3>Human gates</h3><p>Pause exactly where execution needs operator authority, with the evidence needed to make the decision.</p></article>
+      <article class="sn-panel sn-card sn-panel--glow"><div class="capability-num">RECOVERY</div><h3>Safe continuation</h3><p>Preserve lineage and recovery semantics so a failed or retired plan never becomes ambiguous working-tree state.</p></article>
+      <article class="sn-panel sn-card"><div class="capability-num">PROVENANCE</div><h3>Evidence by design</h3><p>Record who authorised what, what actually changed, and why a run stopped or continued.</p></article>
+    </div>
+  </div>
+</section>
+
+<section id="evidence" class="sn-section">
+  <div class="sn-container split">
+    <div>
+      <div class="sn-kicker">Evidence, not vibes</div>
+      <h2 style="font:700 clamp(2rem,4vw,3.4rem)/1.05 var(--sn-font-display);letter-spacing:-.035em">Know what the system did.</h2>
+      <p class="sn-lead">Operational trust comes from inspectable state. StygNox keeps runtime status, authority, recovery and evidence visible rather than burying them behind a conversational interface.</p>
+    </div>
+    <div class="sn-terminal">
+      <div class="sn-terminal__bar"><i class="sn-terminal__lamp"></i><i class="sn-terminal__lamp"></i><i class="sn-terminal__lamp"></i></div>
+      <pre><span class="purple">$</span> stygnox status
+plan       EX-READY-0042
+state      RUNNING
+step       4 / 9
+authority  GUARDED
+tests      add-only
+recovery   ARMED
+evidence   37 events
+
+<span class="purple">→</span> next: execute bounded implementation
+<span class="purple">✓</span> plan fingerprint verified
+<span class="purple">✓</span> recovery checkpoint verified</pre>
+    </div>
+  </div>
+</section>
+
+<section id="control" class="sn-section">
+  <div class="sn-container split">
+    <div class="sn-panel sn-card">
+      <div class="sn-kicker">Authority model</div>
+      <div class="authority-list">
+        <div class="authority-row"><b>Guarded</b><span>Human approval at defined policy boundaries.</span></div>
+        <div class="authority-row"><b>Rapid</b><span>Broader execution freedom for deliberately disposable/prototype work.</span></div>
+        <div class="authority-row"><b>Retire</b><span>Explicitly abandon an invalid plan and reconcile its working state.</span></div>
+        <div class="authority-row"><b>Recover</b><span>Resume from verified state rather than inventing continuation.</span></div>
+      </div>
+    </div>
+    <div>
+      <div class="sn-kicker">Human control</div>
+      <h2 style="font:700 clamp(2rem,4vw,3.4rem)/1.05 var(--sn-font-display);letter-spacing:-.035em">Autonomy without surrendering authority.</h2>
+      <p class="sn-lead">StygNox is designed around explicit boundaries. It can move quickly, but changes to authority, scope or execution contract remain visible and deliberate.</p>
+    </div>
+  </div>
+</section>
+
+<section id="start" class="sn-section">
+  <div class="sn-container">
+    <div class="sn-panel sn-panel--glow cta-box">
+      <div class="sn-kicker">Build · automate · improve · repeat</div>
+      <h2 style="position:relative;font:700 clamp(2.2rem,5vw,4.3rem)/1 var(--sn-font-display);letter-spacing:-.045em;margin:.55rem 0 1rem">A stronger development loop.</h2>
+      <p class="sn-lead" style="position:relative;margin-inline:auto">Move faster while preserving evidence, recoverability and human authority.</p>
+      <div class="hero-actions" style="position:relative;justify-content:center"><a class="sn-btn sn-btn--primary" href="#">Start with StygNox</a><a class="sn-btn sn-btn--secondary" href="style-guide.html">View the design system</a></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="footer">
+  <div class="sn-container footer-inner">
+    <div>StygNox · Autonomous Development-Loop Platform</div>
+    <div>Plan · Execute · Evidence · Evolve</div>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,82 @@
+{
+  "meta": {
+    "name": "StygNox Development Style Guide",
+    "version": "1.0",
+    "theme": "dark-first",
+    "source": "Derived from selected StygNox branding board"
+  },
+  "color": {
+    "bg": {
+      "950": "#05090F",
+      "900": "#080D16",
+      "850": "#0D1320",
+      "800": "#111A2A"
+    },
+    "surface": {
+      "default": "#0D1320",
+      "raised": "#111A2A",
+      "interactive": "#151F32"
+    },
+    "border": {
+      "subtle": "#1B2740",
+      "default": "#26324A",
+      "strong": "#3A4762"
+    },
+    "text": {
+      "primary": "#F2F4F8",
+      "secondary": "#D6DCE8",
+      "muted": "#9AA8BE",
+      "disabled": "#667289"
+    },
+    "brand": {
+      "purple": "#925EED",
+      "purpleBright": "#AF76F0",
+      "purpleSoft": "#D5A1FA",
+      "violet": "#6945EA",
+      "deep": "#5A3897",
+      "signalBlue": "#7EA8FF"
+    },
+    "state": {
+      "success": "#55D6A5",
+      "warning": "#F6C76A",
+      "danger": "#FF6B88",
+      "info": "#7EA8FF"
+    }
+  },
+  "radius": {
+    "sm": "6px",
+    "md": "10px",
+    "lg": "16px",
+    "xl": "22px",
+    "pill": "999px"
+  },
+  "space": {
+    "1": "4px",
+    "2": "8px",
+    "3": "12px",
+    "4": "16px",
+    "5": "20px",
+    "6": "24px",
+    "8": "32px",
+    "10": "40px",
+    "12": "48px",
+    "16": "64px",
+    "20": "80px"
+  },
+  "shadow": {
+    "panel": "0 18px 50px rgba(0,0,0,.34)",
+    "glow": "0 0 0 1px rgba(146,94,237,.28), 0 0 38px rgba(146,94,237,.14)"
+  },
+  "motion": {
+    "fast": "120ms",
+    "normal": "180ms",
+    "slow": "320ms"
+  },
+  "breakpoint": {
+    "sm": "640px",
+    "md": "768px",
+    "lg": "1024px",
+    "xl": "1280px",
+    "xxl": "1536px"
+  }
+}
