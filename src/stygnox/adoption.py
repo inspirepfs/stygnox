@@ -510,6 +510,28 @@ def handoff_adoption(
             raise AdoptionError(f"handoff refused because reserved tracked path appeared after preview: {name}")
 
     plans = {item["path"]: item for item in preview["tracked_review"]}
+
+    recovery_source: dict[str, Any]
+    if preview["baseline"]["journey"] == "dirty":
+        evidence = preview["dirty_recovery"].get("evidence")
+        if not isinstance(evidence, dict):
+            raise AdoptionError("dirty handoff requires bound operator recovery evidence")
+        recovery_source = {
+            "kind": "operator-external",
+            "attestation_path": evidence["attestation_path"],
+            "attestation_sha256": evidence["attestation_sha256"],
+            "capture_path": evidence["capture_path"],
+            "capture_sha256": evidence["capture_sha256"],
+            "baseline_sha256": preview["baseline"]["sha256"],
+        }
+    else:
+        try:
+            from .recovery import create_internal_checkpoint
+
+            recovery_source = create_internal_checkpoint(root, preview["baseline"])
+        except Exception as exc:
+            raise AdoptionError(f"cannot create pre-authority recovery checkpoint: {exc}") from exc
+
     if plans[".gitignore"]["action"] != "unchanged":
         _atomic_write(root / ".gitignore", plans[".gitignore"]["content"])
     _atomic_write(root / CONFIG_NAME, plans[CONFIG_NAME]["content"])
@@ -520,12 +542,15 @@ def handoff_adoption(
     if ignored.returncode != 0:
         raise AdoptionError("tracked ignore policy did not exclude the Stygnox runtime")
 
+    authority_baseline = capture_baseline(root).public()
     handoff = {
         "schema": HANDOFF_SCHEMA,
         "product_version": PRODUCT.version,
         "operator": preview["operator"],
         "preview_sha256": expected,
         "baseline_sha256": preview["baseline"]["sha256"],
+        "baseline": preview["baseline"],
+        "authority_baseline": authority_baseline,
         "journey": preview["baseline"]["journey"],
         "command": preview["command"],
         "authority": preview["authority"],
@@ -533,6 +558,7 @@ def handoff_adoption(
             path: plans[path]["sha256"] for path in (".gitignore", CONFIG_NAME, POLICY_NAME)
         },
         "dirty_recovery": preview["dirty_recovery"],
+        "recovery_source": recovery_source,
         "controller_execution": False,
         "next_stage": "D8.3 transaction/recovery qualification before autonomous controller execution",
     }

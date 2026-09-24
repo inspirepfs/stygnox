@@ -93,7 +93,7 @@ class StygnoxDistributionTests(TestCase):
                 check=False,
             )
             self.assertEqual(2, result.returncode)
-            self.assertIn("not enabled by the D8.2", result.stderr)
+            self.assertIn("not enabled by the D8.3", result.stderr)
             self.assertFalse(sentinel.exists())
 
 

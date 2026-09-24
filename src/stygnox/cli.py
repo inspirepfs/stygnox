@@ -1,7 +1,7 @@
 """Installed Stygnox command surface.
 
-D8.2 extends the neutral installed D8.1 product boundary with a bounded
-bootstrap/admission surface.  The installed package still has no dependency on
+D8.3 extends the installed product boundary with bounded transaction and
+baseline-recovery semantics.  The installed package still has no dependency on
 the legacy ``ralph`` controller modules or on a Stygnox source checkout.
 """
 
@@ -14,9 +14,9 @@ from .product import PRODUCT
 
 
 _CONTROLLER_BOUNDARY = (
-    "installed controller execution commands are not enabled by the D8.2 "
-    "bootstrap/admission surface; D8.2 grants only the reviewed tracked-policy "
-    "and ignored-runtime bootstrap boundary"
+    "autonomous controller execution commands are not enabled by the D8.3 "
+    "transaction/recovery surface; D8.3 proves authority binding, safe stop, "
+    "and operator-approved restoration before controller neutralisation"
 )
 
 
@@ -24,8 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PRODUCT.command,
         description=(
-            "Stygnox installed product and D8.2 bootstrap/admission surface. "
-            "Use 'stygnox adopt --help' for the fail-closed handoff workflow."
+            "Stygnox installed product with D8.2 adoption and D8.3 transaction/recovery surfaces. "
+            "Use 'stygnox adopt --help' or 'stygnox transaction --help'."
         ),
     )
     parser.add_argument(
@@ -46,6 +46,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if namespace.command in {"adopt", "bootstrap"}:
         from .adoption import cli_main
+
+        return cli_main(namespace.args)
+    if namespace.command in {"transaction", "recover"}:
+        from .transactions import cli_main
 
         return cli_main(namespace.args)
     parser.error(_CONTROLLER_BOUNDARY)

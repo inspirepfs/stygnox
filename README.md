@@ -9,18 +9,21 @@ The repository has completed the extraction/standalone foundation through D8.0
 and the D8.0.1 Python-bytecode containment closure. D8.1 introduced the first versioned installable Stygnox distribution and a
 neutral installed `stygnox` command. D8.2 adds the installed read-only
 bootstrap/admission preview, explicit confirmed handoff, reviewed tracked
-policy/configuration, and ignored controller-owned runtime boundary.
+policy/configuration, and ignored controller-owned runtime boundary. D8.3 adds
+transaction authority binding, explicit safe stop, and operator-approved exact
+baseline restoration for new/unborn, clean, and dirty projects.
 
 The D8.1 installed command is intentionally a narrow product-identity boundary:
 it provides neutral `--help` and `--version` behaviour from an installed wheel
 without importing or delegating to legacy `ralph`/`ralph_*` controller modules,
 a target-project `scripts/ralph.py`, or a Stygnox source checkout.
 
-D8.2 installs only the bounded `stygnox adopt` / `stygnox bootstrap` admission
-surface. The handoff authority is limited to the previewed tracked policy/config
-and ignored runtime initialization; autonomous controller execution remains
-disabled pending D8.3 and later controller-neutralisation stages. Current
-source-tree controller entrypoints remain compatibility/development surfaces.
+D8.2 installs the bounded `stygnox adopt` / `stygnox bootstrap` admission
+surface. D8.3 adds `stygnox transaction` / `stygnox recover` for exact handoff
+binding, safe-stop authority revocation, stale recovery-preview refusal, and
+baseline restoration. Autonomous controller execution remains disabled pending
+later controller-neutralisation stages. Current source-tree controller
+entrypoints remain compatibility/development surfaces.
 
 ## Installable product development
 
@@ -65,6 +68,16 @@ python3 scripts/qualify_d8_2_bootstrap.py
 
 See `docs/d8-2-bootstrap-boundary.md` for preview, confirmation, tracked policy,
 ignored runtime, dirty external-evidence, and stage-boundary semantics.
+
+For the D8.3 transaction/recovery gate, run:
+
+```bash
+python3 scripts/qualify_d8_3_transactions.py
+```
+
+See `docs/d8-3-transaction-recovery.md` for transaction binding, safe-stop,
+dirty external-manifest requirements, exact restoration, and retained runtime
+evidence semantics.
 
 ## Compatibility seams still intentionally retained
 
