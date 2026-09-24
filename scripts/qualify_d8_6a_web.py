@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ import venv
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "stygnox_d8_6a_web_qualification_v1"
+VERSION = runpy.run_path(str(ROOT / "src/stygnox/_version.py"))["__version__"]
 
 
 def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -231,7 +233,7 @@ def main() -> int:
         env["PATH"] = str(venv_dir / "bin") + os.pathsep + env.get("PATH", "")
 
         version = run(str(stygnox), "--version", env=env).stdout.strip()
-        if version != "stygnox 0.1.0.dev6":
+        if version != f"stygnox {VERSION}":
             raise RuntimeError(f"unexpected installed version: {version}")
         nonloop = run(str(stygnox), "web", "--project", str(ROOT), "--host", "0.0.0.0", "--port", "0", env=env, check=False)
         if nonloop.returncode != 2 or "loopback-only" not in nonloop.stderr:
@@ -260,7 +262,7 @@ def main() -> int:
 
         report = {
             "schema": SCHEMA,
-            "version": "0.1.0.dev6",
+            "version": VERSION,
             "wheel": wheel.name,
             "wheel_sha256": sha256(wheel),
             "fixtures": results,

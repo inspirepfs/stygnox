@@ -65,6 +65,7 @@ class StygnoxLifecycleTests(unittest.TestCase):
         self.assertFalse(policy["controller_execution"])
         self.assertIn("0.1.0.dev4", policy["project_state_compatibility"]["package_only_upgrade_from"])
         self.assertIn("0.1.0.dev5", policy["project_state_compatibility"]["package_only_upgrade_from"])
+        self.assertIn("0.1.0.dev6", policy["project_state_compatibility"]["package_only_upgrade_from"])
 
     def test_upgrade_refuses_active_transaction_then_accepts_stopped_state_without_tracked_change(self) -> None:
         with tempfile.TemporaryDirectory(prefix="stygnox-d84-upgrade-") as temp:

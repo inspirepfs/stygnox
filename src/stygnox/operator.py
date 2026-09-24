@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -254,3 +255,41 @@ def dispatch_action(project: Path, action: str, payload: Mapping[str, Any]) -> d
     except (adoption.AdoptionError, transactions.TransactionError, execution_policy.ExecutionPolicyError, controller.ControllerError, ValueError, PermissionError) as exc:
         raise OperatorSurfaceError(str(exc)) from exc
     return {"schema": ACTION_RESULT_SCHEMA, "action": name, "result": result}
+
+
+def _payload_json(value: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise OperatorSurfaceError(f"payload JSON is invalid: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise OperatorSurfaceError("payload JSON must be an object")
+    return parsed
+
+
+def build_parser():
+    import argparse
+    parser = argparse.ArgumentParser(prog="stygnox operator", description="Presentation-neutral installed Stygnox operator surface")
+    sub = parser.add_subparsers(dest="command", required=True)
+    snapshot = sub.add_parser("snapshot", help="emit the canonical installed operator snapshot")
+    snapshot.add_argument("--project", type=Path, default=Path.cwd())
+    action = sub.add_parser("action", help="dispatch one named installed operator action")
+    action.add_argument("--project", type=Path, default=Path.cwd())
+    action.add_argument("--name", required=True)
+    action.add_argument("--payload-json", default="{}")
+    return parser
+
+
+def cli_main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    try:
+        if args.command == "snapshot":
+            result = operator_snapshot(args.project)
+        else:
+            result = dispatch_action(args.project, args.name, _payload_json(args.payload_json))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    except (OperatorSurfaceError, RuntimeError, OSError, ValueError) as exc:
+        print(f"stygnox: operator refused: {exc}", file=sys.stderr)
+        return 2

@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PRODUCT.command,
         description=(
             "Stygnox installed product with adoption, recovery, lifecycle, neutral execution-policy, "
-            "installed controller, and installed Web operator surfaces."
+            "installed controller, Web, operator, and terminal TUI surfaces."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {PRODUCT.version}")
@@ -68,6 +68,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cli_main(namespace.args)
     if namespace.command in {"web", "serve"}:
         from .web import cli_main
+        return cli_main(namespace.args)
+    if namespace.command == "operator":
+        from .operator import cli_main
+        return cli_main(namespace.args)
+    if namespace.command in {"tui", "terminal"}:
+        from .tui import cli_main
         return cli_main(namespace.args)
     parser.error(_UNKNOWN_COMMAND)
     return 2  # pragma: no cover

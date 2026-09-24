@@ -16,7 +16,10 @@ reversible extraction of supported idle legacy RALPH runtime into neutral
 Stygnox retained evidence, explicit upgrade compatibility, and non-destructive
 uninstall preparation. D8.5 adds the neutral installed profile, atomic
 execution policy, reviewed provider/model/effort overrides, and an installed
-controller activation/run path bound to D8.3 transaction authority.
+controller activation/run path bound to D8.3 transaction authority. D8.6A adds
+the installed branded Web/operator surface; D8.6B completes the operator UX
+with the installed TUI, authoritative terminal identity, and cross-surface
+semantic parity.
 
 The D8.1 installed command is intentionally a narrow product-identity boundary:
 it provides neutral `--help` and `--version` behaviour from an installed wheel
@@ -136,6 +139,33 @@ python3 scripts/qualify_d8_6a_web.py
 
 See `docs/d8-6a-web-operator-ux.md` for the exact boundary.
 
+## D8.6B installed TUI and cross-surface parity
+
+The installed product now provides the neutral terminal surface and canonical
+presentation-neutral operator CLI:
+
+```bash
+stygnox operator snapshot --project /path/to/project
+stygnox tui --project /path/to/project
+```
+
+At normal terminal widths the TUI uses the exact committed plain/ANSI Stygnox
+ASCII identity. Narrow terminals use a compact identity; `NO_COLOR` disables
+ANSI output. The TUI renders the same operator-baseline, Stygnox-native,
+runtime-only, external and unresolved attribution model as Web and never
+relies on colour alone for authority state.
+
+Run:
+
+```bash
+python3 scripts/qualify_d8_6b_tui.py
+```
+
+The qualifier proves installed operator/Web/TUI snapshot parity, adoption
+preview parity, exact branding assets, terminal fallback behaviour and refusal
+of target-local legacy TUI fallbacks. See
+`docs/d8-6b-tui-terminal-parity.md` for the exact boundary.
+
 ## Compatibility seams still intentionally retained
 
 The following are not adopted as final Stygnox product identity and remain
@@ -145,8 +175,7 @@ later-stage obligations:
 - `.ralph` compatibility runtime/policy naming;
 - source-tree `scripts/ralph.py` and legacy ZEN/RALPH compatibility surfaces;
 - persisted legacy schemas retained only where compatibility/evidence requires them;
-- installed TUI/terminal parity and final D8.6 cross-surface closure;
-- D8.6A Web is intentionally loopback-only until the final cross-surface policy gate; and
+- D8.6A/D8.6B Web/TUI surfaces are installed and neutral; Web remains loopback-only pending an explicit future remote-access security policy; and
 - release-wide installed-artifact/documentation closure.
 
 The staged roadmap and release acceptance baseline are documented in
