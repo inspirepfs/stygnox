@@ -19,5 +19,5 @@ PRODUCT = ProductIdentity(
     name="Stygnox",
     command="stygnox",
     version=__version__,
-    stage="D8.1 installed product identity",
+    stage="D8.2 bootstrap and tracked-policy/runtime boundary",
 )

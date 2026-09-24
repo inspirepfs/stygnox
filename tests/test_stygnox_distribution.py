@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import tomllib
+import runpy
 from unittest import TestCase
 
 
@@ -15,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 PACKAGE = SRC / "stygnox"
 PYPROJECT = ROOT / "pyproject.toml"
+VERSION = runpy.run_path(str(PACKAGE / "_version.py"))["__version__"]
 
 
 class StygnoxDistributionTests(TestCase):
@@ -54,7 +57,7 @@ class StygnoxDistributionTests(TestCase):
             check=False,
         )
         self.assertEqual(0, version.returncode, version.stderr)
-        self.assertRegex(version.stdout.strip(), r"^stygnox 0\.1\.0\.dev1$")
+        self.assertRegex(version.stdout.strip(), rf"^stygnox {re.escape(VERSION)}$")
         self.assertNotIn("RALPH", version.stdout.upper())
         self.assertNotIn("ZEN CONTROL", version.stdout.upper())
 
@@ -67,7 +70,7 @@ class StygnoxDistributionTests(TestCase):
             check=False,
         )
         self.assertEqual(0, help_result.returncode, help_result.stderr)
-        self.assertIn("Stygnox installed product identity", help_result.stdout)
+        self.assertIn("Stygnox installed product", help_result.stdout)
         self.assertNotIn("RALPH-Lite", help_result.stdout)
 
     def test_controller_command_fails_closed_without_importing_decoy_ralph(self) -> None:
@@ -90,7 +93,7 @@ class StygnoxDistributionTests(TestCase):
                 check=False,
             )
             self.assertEqual(2, result.returncode)
-            self.assertIn("not enabled by the D8.1", result.stderr)
+            self.assertIn("not enabled by the D8.2", result.stderr)
             self.assertFalse(sentinel.exists())
 
 

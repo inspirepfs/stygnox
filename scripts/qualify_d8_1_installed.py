@@ -19,10 +19,11 @@ import subprocess
 import sys
 import tempfile
 import venv
+import runpy
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = "0.1.0.dev1"
+EXPECTED_VERSION = runpy.run_path(str(ROOT / "src" / "stygnox" / "_version.py"))["__version__"]
 
 
 def run(
@@ -125,7 +126,7 @@ def qualify_fixture(name: str, fixture: Path, stygnox: Path, source_scripts: Pat
     help_result = run([str(stygnox), "--help"], cwd=fixture, env=env)
     if version.stdout.strip() != f"stygnox {EXPECTED_VERSION}":
         raise RuntimeError(f"{name}: unexpected version output: {version.stdout!r}")
-    if "Stygnox installed product identity" not in help_result.stdout:
+    if "Stygnox installed product" not in help_result.stdout:
         raise RuntimeError(f"{name}: installed help did not expose neutral Stygnox identity")
     combined = (version.stdout + version.stderr + help_result.stdout + help_result.stderr).upper()
     if "RALPH-LITE" in combined or "ZEN CONTROL" in combined:

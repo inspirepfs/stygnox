@@ -6,19 +6,21 @@ for independent installation and adoption across Git projects.
 ## Current status
 
 The repository has completed the extraction/standalone foundation through D8.0
-and the D8.0.1 Python-bytecode containment closure. D8.1 introduces the first
-versioned installable Stygnox distribution and a neutral installed `stygnox`
-command.
+and the D8.0.1 Python-bytecode containment closure. D8.1 introduced the first versioned installable Stygnox distribution and a
+neutral installed `stygnox` command. D8.2 adds the installed read-only
+bootstrap/admission preview, explicit confirmed handoff, reviewed tracked
+policy/configuration, and ignored controller-owned runtime boundary.
 
 The D8.1 installed command is intentionally a narrow product-identity boundary:
 it provides neutral `--help` and `--version` behaviour from an installed wheel
 without importing or delegating to legacy `ralph`/`ralph_*` controller modules,
 a target-project `scripts/ralph.py`, or a Stygnox source checkout.
 
-Controller/adoption commands are **not** claimed as installed-product capability
-at D8.1. The current source-tree controller entrypoints remain tracked
-compatibility/development surfaces until the later staged controller,
-admission, runtime, and migration closures qualify their replacements.
+D8.2 installs only the bounded `stygnox adopt` / `stygnox bootstrap` admission
+surface. The handoff authority is limited to the previewed tracked policy/config
+and ignored runtime initialization; autonomous controller execution remains
+disabled pending D8.3 and later controller-neutralisation stages. Current
+source-tree controller entrypoints remain compatibility/development surfaces.
 
 ## Installable product development
 
@@ -54,6 +56,15 @@ artifact into a fresh virtual environment, and checks command resolution and
 Ralph-decoy isolation from new, clean, and dirty Git fixtures.
 
 See `docs/d8-1-installed-product.md` for the exact D8.1 boundary and evidence.
+
+For the D8.2 bootstrap boundary, run:
+
+```bash
+python3 scripts/qualify_d8_2_bootstrap.py
+```
+
+See `docs/d8-2-bootstrap-boundary.md` for preview, confirmation, tracked policy,
+ignored runtime, dirty external-evidence, and stage-boundary semantics.
 
 ## Compatibility seams still intentionally retained
 
