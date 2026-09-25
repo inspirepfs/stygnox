@@ -240,6 +240,11 @@ def build_run_preview(
             "acceptance": list(step["acceptance"]),
             "test_change_policy": step["test_change_policy"],
             "approval_baseline_sha256": plan_context["approval_baseline_sha256"],
+            "step_authority_baseline_sha256": plan_context["step_authority_baseline_sha256"],
+            "human_direction": plan_context.get("human_direction"),
+            "resume_reason": plan_context.get("resume_reason"),
+            "allowed_new_tests": list(plan_context.get("allowed_new_tests") or []),
+            "resumed_from_gate": plan_context.get("resumed_from_gate"),
         }
     body: dict[str, Any] = {
         "schema": RUN_PREVIEW_SCHEMA,
@@ -280,11 +285,20 @@ def _prompt(preview: Mapping[str, Any]) -> str:
     plan_text = ""
     if binding is not None:
         acceptance = "\n".join(f"- {item}" for item in binding.get("acceptance", []))
+        steering = ""
+        if binding.get("human_direction"):
+            steering += f"Bounded human direction for this retry: {binding['human_direction']}\n"
+        if binding.get("resume_reason"):
+            steering += f"Human resume context: {binding['resume_reason']}\n"
+        allowed_tests = list(binding.get("allowed_new_tests") or [])
+        if allowed_tests:
+            steering += "Exact human-authorised new test paths: " + ", ".join(allowed_tests) + "\n"
         plan_text = (
             f"This turn is bound to approved plan {binding['plan_hash']}, "
             f"step {binding['current_step']} of {binding['total_steps']} ({binding['step_title']}). "
             f"The step test-change policy is {binding['test_change_policy']}. "
             "Do not perform work outside this exact approved step.\n"
+            f"{steering}"
             f"Acceptance criteria:\n{acceptance}\n\n"
         )
     return (
@@ -319,6 +333,11 @@ def run_controller(
         raise ControllerError("controller run preview is stale; authority, policy, objective, or project baseline changed")
     root = Path(preview["worktree"])
     before = adoption.capture_baseline(root).public()
+    plan_binding = preview.get("plan_binding") if isinstance(preview.get("plan_binding"), Mapping) else None
+    before_paths: set[str] = set()
+    if plan_binding is not None and preview["repository_authority"] == "write":
+        from . import human_control
+        before_paths = human_control.repository_paths(root)
     try:
         provider_result = provider_codex.execute(
             cwd=root,
@@ -348,6 +367,46 @@ def run_controller(
         provider_result=provider_result,
     )
     efficiency_result = efficiency.assess(provider_result, preview["execution_controls"])
+    human_gate = None
+    if plan_binding is not None:
+        from . import human_control
+        violations: list[str] = []
+        candidates: list[str] = []
+        if preview["repository_authority"] == "write":
+            violations, candidates = human_control.test_policy_violations(
+                attribution,
+                str(plan_binding.get("test_change_policy") or "none"),
+                before_paths,
+                plan_binding.get("allowed_new_tests") or [],
+            )
+        if violations:
+            reason = f"policy violation: test paths {violations!r}"
+            human_gate = human_control.open_gate(
+                root,
+                str(preview["operator"]),
+                plan_binding=plan_binding,
+                origin_preview_sha256=expected,
+                blocked_baseline=after,
+                kind="test-policy",
+                reason=reason,
+                human_resolvable=False,
+                allowed_new_test_candidates=candidates,
+            )
+        elif str(provider_result.get("status") or "") == "BLOCKED":
+            step_view = {
+                "objective": plan_binding.get("step_objective"),
+                "acceptance": list(plan_binding.get("acceptance") or []),
+            }
+            human_gate = human_control.open_gate(
+                root,
+                str(preview["operator"]),
+                plan_binding=plan_binding,
+                origin_preview_sha256=expected,
+                blocked_baseline=after,
+                kind="provider-blocked",
+                reason=str(provider_result.get("summary") or "provider blocked"),
+                human_resolvable=human_control.provider_block_human_resolvable(step_view, str(provider_result.get("summary") or "")),
+            )
     result: dict[str, Any] = {
         "schema": RUN_RESULT_SCHEMA,
         "product_version": PRODUCT.version,
@@ -365,8 +424,11 @@ def run_controller(
         "after_baseline_sha256": after["sha256"],
         "project_changed": before["sha256"] != after["sha256"],
         "change_attribution": attribution,
+        "human_gate": human_gate,
         "next_action": (
-            "qualification-required" if before["sha256"] != after["sha256"]
+            "human-gate-required" if human_gate is not None
+            else "turn-blocked" if str(provider_result.get("status") or "") == "BLOCKED"
+            else "qualification-required" if before["sha256"] != after["sha256"]
             else "efficiency-review-required" if efficiency_result["requires_review_before_automatic_continuation"]
             else "turn-complete"
         ),

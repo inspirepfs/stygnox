@@ -228,7 +228,7 @@ def build_proposal_preview(
 ) -> dict[str, Any]:
     root, active, tx, policy_status, name = _active_context(project, operator)
     existing = _record(root, required=False)
-    if existing and existing.get("status") in {"AWAITING_APPROVAL", "APPROVED"}:
+    if existing and existing.get("status") in {"AWAITING_APPROVAL", "APPROVED", "BLOCKED_HUMAN", "STEPS_COMPLETE"}:
         raise PlanningError(f"cannot propose while plan status={existing.get('status')}; reject/complete the active plan first")
     minimum, maximum = proposal_step_bounds(min_steps, max_steps)
     authority = _authority(repository_authority)
@@ -346,6 +346,14 @@ def propose_plan(
         "approval_baseline_sha256": None,
         "execution_authority_granted": False,
         "usage_record_sha256": usage_record["record_sha256"],
+        "step_authority_baseline_sha256": None,
+        "human_gate_sequence": 0,
+        "active_gate": None,
+        "human_gate_history": [],
+        "human_steering": [],
+        "human_resumes": [],
+        "human_gate_resolutions": [],
+        "step_resume": None,
     }
     return {**_write(root, state), "result": "PLAN_AWAITING_APPROVAL"}
 
@@ -370,6 +378,11 @@ def approved_step_context(project: Path, operator: str) -> dict[str, Any] | None
         return None
     if state.get("status") == "AWAITING_APPROVAL":
         raise PlanningError("plan is awaiting approval; controller execution authority is not granted")
+    if state.get("status") == "BLOCKED_HUMAN":
+        gate = state.get("active_gate") if isinstance(state.get("active_gate"), Mapping) else {}
+        raise PlanningError(f"plan is blocked at human gate {gate.get('gate_id') or "unknown"}; resolve, steer, or resume it before controller execution")
+    if state.get("status") == "STEPS_COMPLETE":
+        raise PlanningError("all approved plan steps are complete; qualification is required before further controller execution")
     if state.get("status") != "APPROVED":
         raise PlanningError(f"unsupported active plan status for execution: {state.get('status')!r}")
     if state.get("execution_authority_granted") is not True:
@@ -392,8 +405,9 @@ def approved_step_context(project: Path, operator: str) -> dict[str, Any] | None
         raise PlanningError("transaction recovery authority changed after plan approval")
 
     current = adoption.capture_baseline(root).public()
-    if current.get("sha256") != state.get("approval_baseline_sha256"):
-        raise PlanningError("approved plan baseline changed; qualification or recovery is required before another plan-bound turn")
+    authority_baseline = state.get("step_authority_baseline_sha256") or state.get("approval_baseline_sha256")
+    if current.get("sha256") != authority_baseline:
+        raise PlanningError("approved step authority baseline changed; qualification, gate decision, or recovery is required before another plan-bound turn")
 
     try:
         step_number = int(state.get("current_step"))
@@ -403,6 +417,7 @@ def approved_step_context(project: Path, operator: str) -> dict[str, Any] | None
     if step_number < 1 or step_number > len(steps):
         raise PlanningError("approved plan current_step is outside the plan bounds")
     step = dict(steps[step_number - 1])
+    resume = state.get("step_resume") if isinstance(state.get("step_resume"), Mapping) and int(state.get("step_resume", {}).get("step") or 0) == step_number else None
     return {
         "schema": "stygnox_approved_step_context_v1",
         "plan_hash": expected_hash,
@@ -412,6 +427,11 @@ def approved_step_context(project: Path, operator: str) -> dict[str, Any] | None
         "step": step,
         "repository_authority": plan["repository_authority"],
         "approval_baseline_sha256": state["approval_baseline_sha256"],
+        "step_authority_baseline_sha256": authority_baseline,
+        "human_direction": (resume or {}).get("direction"),
+        "resume_reason": (resume or {}).get("reason"),
+        "allowed_new_tests": list((resume or {}).get("allowed_new_tests") or []),
+        "resumed_from_gate": (resume or {}).get("gate_id"),
         "transaction_id": tx["transaction_id"],
     }
 
@@ -446,6 +466,7 @@ def approve_plan(project: Path, operator: str, plan_hash: str, confirmation: str
     updated["approval_baseline_sha256"] = current["sha256"]
     updated["approval_repository_evidence"] = current
     updated["transaction_recovery_baseline_sha256"] = tx.get("authority_baseline_sha256")
+    updated["step_authority_baseline_sha256"] = current["sha256"]
     updated["execution_authority_granted"] = True
     return {**_write(root, updated), "result": "PLAN_APPROVED"}
 
