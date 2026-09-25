@@ -362,6 +362,60 @@ def plan_status(project: Path) -> dict[str, Any]:
     }
 
 
+def approved_step_context(project: Path, operator: str) -> dict[str, Any] | None:
+    """Return exact current-step authority for an approved plan, or None when no plan governs execution."""
+    root = adoption.resolve_worktree(project)
+    state = _record(root, required=False)
+    if state is None or state.get("status") == "REJECTED":
+        return None
+    if state.get("status") == "AWAITING_APPROVAL":
+        raise PlanningError("plan is awaiting approval; controller execution authority is not granted")
+    if state.get("status") != "APPROVED":
+        raise PlanningError(f"unsupported active plan status for execution: {state.get('status')!r}")
+    if state.get("execution_authority_granted") is not True:
+        raise PlanningError("approved plan does not grant controller execution authority")
+
+    bound_root, active, tx, policy_status, name = _active_context(root, operator)
+    if bound_root != root:
+        raise PlanningError("approved plan worktree binding changed")
+    plan = _validate_plan(state.get("plan"))
+    expected_hash = _plan_hash(plan)
+    if state.get("plan_hash") != expected_hash:
+        raise PlanningError("approved plan hash does not match controller state")
+    if state.get("operator") != name or state.get("transaction_id") != tx.get("transaction_id"):
+        raise PlanningError("approved plan authority does not match the active transaction/operator")
+    if state.get("controller_record_sha256") != active.get("record_sha256"):
+        raise PlanningError("controller authority changed after plan approval")
+    if state.get("tracked_config_sha256") != policy_status.get("tracked_config_sha256") or state.get("review_sha256") != (policy_status.get("review") or {}).get("review_sha256"):
+        raise PlanningError("execution policy changed after plan approval")
+    if state.get("transaction_recovery_baseline_sha256") != tx.get("authority_baseline_sha256"):
+        raise PlanningError("transaction recovery authority changed after plan approval")
+
+    current = adoption.capture_baseline(root).public()
+    if current.get("sha256") != state.get("approval_baseline_sha256"):
+        raise PlanningError("approved plan baseline changed; qualification or recovery is required before another plan-bound turn")
+
+    try:
+        step_number = int(state.get("current_step"))
+    except (TypeError, ValueError) as exc:
+        raise PlanningError("approved plan current_step is invalid") from exc
+    steps = plan["steps"]
+    if step_number < 1 or step_number > len(steps):
+        raise PlanningError("approved plan current_step is outside the plan bounds")
+    step = dict(steps[step_number - 1])
+    return {
+        "schema": "stygnox_approved_step_context_v1",
+        "plan_hash": expected_hash,
+        "plan_record_sha256": state["record_sha256"],
+        "current_step": step_number,
+        "total_steps": len(steps),
+        "step": step,
+        "repository_authority": plan["repository_authority"],
+        "approval_baseline_sha256": state["approval_baseline_sha256"],
+        "transaction_id": tx["transaction_id"],
+    }
+
+
 def approve_plan(project: Path, operator: str, plan_hash: str, confirmation: str) -> dict[str, Any]:
     if confirmation != "APPROVE":
         raise PlanningError("explicit confirmation required: --confirm APPROVE")

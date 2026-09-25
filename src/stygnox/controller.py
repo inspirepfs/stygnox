@@ -215,6 +215,32 @@ def build_run_preview(
     if int(policy.get("max_loops") or 1) != 1:
         raise ControllerError("D8.5 installed controller executes exactly one reviewed loop; max_loops must be 1")
     current = adoption.capture_baseline(root).public()
+    objective_value = _objective(objective)
+    plan_binding = None
+    try:
+        from . import planning
+        plan_context = planning.approved_step_context(root, name)
+    except planning.PlanningError as exc:
+        raise ControllerError(str(exc)) from exc
+    if plan_context is not None:
+        step = plan_context["step"]
+        if objective_value != step["objective"]:
+            raise ControllerError("--objective must exactly match the current approved plan step objective")
+        if authority != plan_context["repository_authority"]:
+            raise ControllerError("--repository-authority must exactly match the approved plan authority")
+        plan_binding = {
+            "schema": "stygnox_controller_plan_binding_v1",
+            "plan_hash": plan_context["plan_hash"],
+            "plan_record_sha256": plan_context["plan_record_sha256"],
+            "current_step": plan_context["current_step"],
+            "total_steps": plan_context["total_steps"],
+            "step_id": step["id"],
+            "step_title": step["title"],
+            "step_objective": step["objective"],
+            "acceptance": list(step["acceptance"]),
+            "test_change_policy": step["test_change_policy"],
+            "approval_baseline_sha256": plan_context["approval_baseline_sha256"],
+        }
     body: dict[str, Any] = {
         "schema": RUN_PREVIEW_SCHEMA,
         "product_version": PRODUCT.version,
@@ -224,8 +250,9 @@ def build_run_preview(
         "transaction_id": tx["transaction_id"],
         "controller_record_sha256": controller["record_sha256"],
         "project_baseline": current,
-        "objective": _objective(objective),
+        "objective": objective_value,
         "repository_authority": authority,
+        "plan_binding": plan_binding,
         "provider": provider,
         "model": model,
         "effort": policy.get("effort"),
@@ -249,6 +276,17 @@ def _prompt(preview: Mapping[str, Any]) -> str:
     authority = preview["repository_authority"]
     controls = preview.get("execution_controls") if isinstance(preview.get("execution_controls"), Mapping) else {}
     budget = efficiency.mode_limits(controls).get("prompt_commands", 6)
+    binding = preview.get("plan_binding") if isinstance(preview.get("plan_binding"), Mapping) else None
+    plan_text = ""
+    if binding is not None:
+        acceptance = "\n".join(f"- {item}" for item in binding.get("acceptance", []))
+        plan_text = (
+            f"This turn is bound to approved plan {binding['plan_hash']}, "
+            f"step {binding['current_step']} of {binding['total_steps']} ({binding['step_title']}). "
+            f"The step test-change policy is {binding['test_change_policy']}. "
+            "Do not perform work outside this exact approved step.\n"
+            f"Acceptance criteria:\n{acceptance}\n\n"
+        )
     return (
         "You are an implementation worker invoked by the installed Stygnox controller. "
         "The controller, not you, owns authority and runtime evidence. "
@@ -258,6 +296,7 @@ def _prompt(preview: Mapping[str, Any]) -> str:
         "Report every repository file you inspected in files_inspected. "
         "Do not access secrets, credentials, or external production systems. "
         "Return only the requested structured result.\n\n"
+        f"{plan_text}"
         f"Objective:\n{preview['objective']}\n"
     )
 
@@ -318,6 +357,7 @@ def run_controller(
         "preview_sha256": expected,
         "profile": preview["profile"],
         "repository_authority": preview["repository_authority"],
+        "plan_binding": preview.get("plan_binding"),
         "provider_result": provider_result,
         "usage_record_sha256": usage_record["record_sha256"],
         "efficiency": efficiency_result,
