@@ -96,6 +96,16 @@ class StygnoxTuiTests(TestCase):
             through_tui["server"]["pid"] = 0
             self.assertEqual(direct, through_tui)
 
+
+    def test_render_exposes_operator_state_policy_attribution_and_evidence_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"
+            init_repo(repo)
+            rendered = tui.render_snapshot(operator.operator_snapshot(repo), color_mode="never", width=100, stream=io.StringIO())
+            for section in ("OPERATOR STATE", "EXECUTION POLICY", "CHANGE ATTRIBUTION", "EVIDENCE"):
+                with self.subTest(section=section):
+                    self.assertIn(section, rendered)
+
     def test_tui_refuses_unknown_action_without_legacy_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td) / "repo"

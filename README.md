@@ -121,19 +121,45 @@ activation, provider, and qualification boundary.
 
 ## D8.6A installed Web operator surface
 
-The installed product now provides a neutral, branded local operator console:
+The installed product provides a neutral, branded operator console. Loopback
+remains the default:
 
 ```bash
 stygnox web --project /path/to/project
 ```
 
+For direct LAN/mobile testing, configure one Web username/password for the
+project and then choose the bind address and port explicitly:
+
+```bash
+stygnox web-auth set --username peter --project /path/to/project
+stygnox web-auth status --project /path/to/project
+
+stygnox web \
+  --project /path/to/project \
+  --host 0.0.0.0 \
+  --port 8765
+```
+
+`web-auth set` prompts for the password twice without echoing it. Stygnox stores
+only a salted PBKDF2-SHA256 password digest in the controller-owned `.stygnox/`
+runtime with mode `0600`; the plaintext password is not persisted. Once Web
+authentication is configured, browsers receive the Stygnox login page and API
+clients may continue to use HTTP Basic authentication. A non-loopback bind
+refuses to start when credentials are absent. Plain HTTP is
+therefore suitable only for a trusted lab/LAN; put TLS in front when transport
+confidentiality is required. Remove credentials with:
+
+```bash
+stygnox web-auth clear --project /path/to/project
+```
+
 D8.6A uses the approved `branding/` design tokens and selected logo assets,
 projects only installed Stygnox state, and shares its action dispatcher with the
-future TUI.  CLI/Web adoption preview digests are qualified for parity.  The
-Web surface is deliberately loopback-only in D8.6A; non-loopback binding fails
-closed before authority.  Carry-forward/reconciliation attribution is visible
-as operator-baseline, Stygnox-native, runtime-only, external, or unresolved and
-never auto-adopts or silently reattributes prior material.
+TUI. CLI/Web adoption preview digests are qualified for parity. Carry-forward/
+reconciliation attribution is visible as operator-baseline, Stygnox-native,
+runtime-only, external, or unresolved and never auto-adopts or silently
+reattributes prior material.
 
 Run:
 
@@ -210,7 +236,7 @@ later-stage obligations:
 - source-tree `scripts/ralph.py` and legacy ZEN/RALPH compatibility surfaces;
 - persisted legacy schemas retained only where compatibility/evidence requires them;
 - source-tree `.ralph` and `scripts/ralph*.py` material is quarantined to migration, provenance, characterization, and source-review roles and is excluded from the installed wheel and normal operator path; and
-- D8.6A/D8.6B Web/TUI surfaces are installed and neutral; Web remains loopback-only pending an explicit future remote-access security policy.
+- D8.6A/D8.6B Web/TUI surfaces are installed and neutral; Web defaults to loopback and permits explicit authenticated LAN/container-style binds. RBAC remains a later roadmap capability.
 
 The staged roadmap and release acceptance baseline are documented in
 `docs/d8-0-roadmap-and-release-acceptance.md`.

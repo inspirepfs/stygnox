@@ -22,8 +22,10 @@ substitute for the installed command boundary.
   user-managed Python environment; and
 - no supported system-package-manager install path.
 
-The Web surface remains loopback-only. Wider network exposure has no D8.7
-security contract and is refused before server start.
+The Web surface defaults to loopback. Explicit non-loopback binding is supported
+when a Stygnox Web username/password has been configured for the project. Plain
+HTTP is intended only for trusted lab/LAN use; TLS can be added separately when
+transport confidentiality is required.
 
 ## Release-set verification and installation
 
@@ -168,6 +170,10 @@ The installed presentation-neutral operator model is available through:
 stygnox operator snapshot --project /path/to/project
 stygnox tui --project /path/to/project
 stygnox web --project /path/to/project --host 127.0.0.1 --port 8765
+
+# Optional direct LAN/mobile access
+stygnox web-auth set --username operator --project /path/to/project
+stygnox web --project /path/to/project --host 0.0.0.0 --port 8765
 ```
 
 CLI/Web/TUI share installed Stygnox semantics. Reconciliation presentation
@@ -175,7 +181,7 @@ separates operator baseline, Stygnox-native, runtime-only, external/foreign,
 and unresolved overlap. External/unresolved material requires a human decision;
 it is not automatically adopted or reattributed.
 
-Web mutations require the exact CSRF token and non-loopback binding is refused.
+Web mutations require the exact CSRF token. Non-loopback binding additionally requires configured Web authentication.
 The TUI uses the committed Stygnox plain/ANSI identity, switches to a compact
 identity on narrow terminals, and honours `NO_COLOR`.
 

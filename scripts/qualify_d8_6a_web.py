@@ -4,11 +4,12 @@
 Build the exact wheel, install it into an isolated venv, then exercise the
 installed Web surface against new/unborn, clean and dirty repositories.  The
 qualification proves CLI/Web preview parity, explicit refusal before dirty
-handoff authority, packaged branding, CSRF enforcement, loopback-only policy,
-change attribution, and no legacy Ralph/source-tree fallback.
+handoff authority, packaged branding, CSRF enforcement, authenticated explicit
+non-loopback binding, change attribution, and no legacy Ralph/source-tree fallback.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -89,11 +90,20 @@ def http_json(url: str, *, method: str = "GET", data: dict | None = None, csrf: 
     return value
 
 
-def fetch_bytes(url: str) -> bytes:
-    with urllib.request.urlopen(url, timeout=10) as response:
-        if response.status != 200:
-            raise RuntimeError(f"asset fetch failed: {url}: {response.status}")
-        return response.read()
+def fetch_bytes(url: str, *, authorization: str | None = None, expected: int = 200) -> bytes:
+    request = urllib.request.Request(url)
+    if authorization is not None:
+        request.add_header("Authorization", authorization)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            status = response.status
+            payload = response.read()
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        payload = exc.read()
+    if status != expected:
+        raise RuntimeError(f"asset fetch failed: {url}: got {status}, expected {expected}")
+    return payload
 
 
 def start_web(stygnox: Path, fixture: Path, env: dict[str, str]) -> tuple[subprocess.Popen[str], str, str]:
@@ -131,6 +141,55 @@ def start_web(stygnox: Path, fixture: Path, env: dict[str, str]) -> tuple[subpro
         process.terminate()
         raise RuntimeError("Web page did not expose bounded CSRF token")
     return process, base, csrf_match.group(1)
+
+
+def qualify_authenticated_remote_bind(stygnox: Path, python: Path, fixture: Path, env: dict[str, str]) -> dict:
+    username = "D8.6A-Remote"
+    password = "qualification-password"
+    code = (
+        "from pathlib import Path; import sys; "
+        "from stygnox.web import set_web_auth; "
+        "set_web_auth(Path(sys.argv[1]), sys.argv[2], sys.argv[3])"
+    )
+    run(str(python), "-c", code, str(fixture), username, password, cwd=fixture, env=env)
+    process = subprocess.Popen(
+        [str(stygnox), "web", "--project", str(fixture), "--host", "0.0.0.0", "--port", "0"],
+        cwd=fixture, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1,
+    )
+    try:
+        assert process.stdout is not None
+        deadline = time.time() + 15
+        line = ""
+        while time.time() < deadline:
+            line = process.stdout.readline().strip()
+            if line:
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        if not line:
+            stderr = process.stderr.read() if process.stderr else ""
+            raise RuntimeError(f"authenticated non-loopback Web did not start: {stderr}")
+        match = re.search(r"http://0\.0\.0\.0:(\d+)", line)
+        if not match or "auth=required" not in line:
+            raise RuntimeError(f"cannot parse authenticated non-loopback Web address: {line}")
+        base = f"http://127.0.0.1:{match.group(1)}"
+        login = fetch_bytes(base + "/").decode("utf-8")
+        if "Stygnox Login" not in login or "Sign in" not in login:
+            raise RuntimeError("unauthenticated browser route did not render the Stygnox login page")
+        fetch_bytes(base + "/api/snapshot", expected=401)
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        page = fetch_bytes(base + "/", authorization=f"Basic {token}").decode("utf-8")
+        if "Stygnox Operator Console" not in page:
+            raise RuntimeError("authenticated non-loopback Web did not serve the operator console")
+        return {"unauthenticated_request": "REFUSED", "authenticated_request": "PASS", "bind": "0.0.0.0", "result": "PASS"}
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def cli_json(stygnox: Path, fixture: Path, *args: str, env: dict[str, str]) -> dict:
@@ -242,8 +301,8 @@ def main() -> int:
         if version != f"stygnox {VERSION}":
             raise RuntimeError(f"unexpected installed version: {version}")
         nonloop = run(str(stygnox), "web", "--project", str(ROOT), "--host", "0.0.0.0", "--port", "0", env=env, check=False)
-        if nonloop.returncode != 2 or "loopback-only" not in nonloop.stderr:
-            raise RuntimeError("non-loopback Web binding did not fail closed before authority")
+        if nonloop.returncode != 2 or "requires credentials" not in nonloop.stderr:
+            raise RuntimeError("unauthenticated non-loopback Web binding did not fail closed")
 
         fixtures = work / "fixtures"
         new = fixtures / "new-unborn"
@@ -253,6 +312,9 @@ def main() -> int:
         init_repo(clean, commit=True)
         init_repo(dirty, commit=True)
         make_dirty(dirty)
+        remote = fixtures / "remote-auth"
+        init_repo(remote, commit=True)
+        remote_bind = qualify_authenticated_remote_bind(stygnox, python, remote, env)
 
         results = [
             qualify_fixture("new-unborn", new, stygnox, env),
@@ -276,7 +338,7 @@ def main() -> int:
             "cli_web_preview_parity": "PASS",
             "branding_authority": "PASS",
             "csrf_mutation_gate": "PASS",
-            "loopback_only_policy": "PASS",
+            "authenticated_remote_bind_policy": remote_bind,
             "legacy_ralph_web_fallback": "REFUSED",
             "carry_forward_auto_adopt": False,
             "next_stage": "D8.6B installed TUI, terminal identity, and final cross-surface parity",

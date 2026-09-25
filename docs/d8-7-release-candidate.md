@@ -24,7 +24,7 @@ evidence.
 | D9-G-09 untracked restoration | D8.3 dirty round trip covers untracked content, modes and empty directories and compares exact post-restore state. | CLOSE WHEN D8.7 PASS |
 | D9-G-10 extraction migration | D8.4 clean/dirty supported legacy migration, retained inventory, rollback and source-fallback isolation against the release wheel. | CLOSE WHEN D8.7 PASS |
 | D9-G-11 upgrade/uninstall | D8.4 support policy, upgrade compatibility, uninstall preparation, actual pip uninstall and retained-evidence readability. | CLOSE WHEN D8.7 PASS |
-| D9-G-12 Web/TUI | D8.6A/D8.6B installed Web/TUI/operator parity with loopback-only Web policy. | CLOSE WHEN D8.7 PASS |
+| D9-G-12 Web/TUI | D8.6A/D8.6B installed Web/TUI/operator parity with loopback-default and credential-gated explicit non-loopback Web policy. | CLOSE WHEN D8.7 PASS |
 | D9-G-13 reconciliation UX | D8.6 operator model exposes operator/native/runtime/external/unresolved attribution, human-decision stop, `auto_adopt=false`, `auto_reattribute=false`. | CLOSE WHEN D8.7 PASS |
 | D9-G-14 release docs | Release set contains the operator guide, closure map, post-extraction report, README, detailed stage docs and license. | CLOSE WHEN D8.7 PASS |
 | D9-G-15 exact artifact | D8.7 builds once and supplies the same wheel digest to every predecessor installed qualifier. | CLOSE WHEN D8.7 PASS |

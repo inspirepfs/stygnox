@@ -6,10 +6,14 @@ import os
 from pathlib import Path
 import runpy
 import tempfile
+import sys
 from unittest import TestCase, mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 SCRIPTS = ROOT / "scripts"
 VERSION = runpy.run_path(str(ROOT / "src/stygnox/_version.py"))["__version__"]
 

@@ -16,7 +16,7 @@ characterization and historical compatibility material.
 | Default profile | `stygnox-default` |
 | Controller | installed `stygnox controller` |
 | Execution policy | installed `stygnox execution-policy` |
-| Web | installed `stygnox web`, loopback-only |
+| Web | installed `stygnox web`, loopback-default; explicit non-loopback bind requires configured Web credentials |
 | TUI | installed `stygnox tui` |
 | Operator model | installed `stygnox operator` |
 | Supported install media | pip-installed wheel |

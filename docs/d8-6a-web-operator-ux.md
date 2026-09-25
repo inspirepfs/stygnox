@@ -31,10 +31,12 @@ or destructive state is always communicated with text in addition to colour.
 stygnox web --project /path/to/project --host 127.0.0.1 --port 8765
 ```
 
-D8.6A deliberately supports loopback only. Any non-loopback bind is refused
-before the server starts and before authority can be changed. A future wider
-binding policy, if retained, must be separately qualified at or after the full
-D8.6 cross-surface gate.
+The original D8.6A closure supported loopback only. WEB-001 fixes that overly
+restrictive invariant while retaining loopback as the default. Non-loopback
+binds are now explicit and require configured Stygnox Web credentials before
+the server starts. Configure credentials with `stygnox web-auth set`, then use
+`--host` and `--port` for LAN/mobile testing. Plain HTTP remains a trusted-lab
+transport choice; TLS can be provided separately when required.
 
 Every POST mutation requires the exact server CSRF token. Arbitrary Web routes
 and arbitrary action names fail closed.
@@ -101,7 +103,7 @@ fresh virtual environment, and checks:
 - Web handoff / transaction begin / neutral controller activation;
 - neutral provider execution refusal;
 - CSRF refusal for mutations;
-- non-loopback refusal before authority;
+- unauthenticated non-loopback refusal plus authenticated `0.0.0.0` bind/access;
 - packaged branding;
 - external/dirty attribution visibility; and
 - refusal to import a hostile repository-local `ralph_web.py`.
@@ -113,6 +115,6 @@ remain green before D8.6A is committed.
 
 - installed TUI and ASCII terminal branding;
 - final CLI/Web/TUI parity on full dirty recovery journeys;
-- any non-loopback Web authentication policy;
+- role-based access control beyond the single configured Web operator credential;
 - visual polish that is not required for semantic/accessibility parity;
 - D8.7 release packaging and final operator documentation.

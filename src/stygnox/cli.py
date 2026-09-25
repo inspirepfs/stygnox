@@ -69,6 +69,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if namespace.command in {"web", "serve"}:
         from .web import cli_main
         return cli_main(namespace.args)
+    if namespace.command == "web-auth":
+        from .web import auth_cli_main
+        return auth_cli_main(namespace.args)
     if namespace.command == "operator":
         from .operator import cli_main
         return cli_main(namespace.args)
