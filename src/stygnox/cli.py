@@ -1,9 +1,9 @@
 """Installed Stygnox command surface.
 
-D8.6A adds the neutral installed Web operator surface and shared presentation-
-neutral operator/reconciliation model. Legacy source-tree Web/controller
-modules are compatibility/development surfaces only and are never imported by
-the installed command.
+The installed command exposes the neutral Web, TUI and operator surfaces through
+the shared Stygnox authority model. Legacy source-tree Web/controller modules
+are compatibility/development surfaces only and are never imported by the
+installed command.
 """
 from __future__ import annotations
 

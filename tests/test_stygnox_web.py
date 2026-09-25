@@ -45,8 +45,10 @@ class StygnoxWebTests(TestCase):
         self.assertIn("Operator baseline", (SRC / "stygnox/web_assets/operator.js").read_text(encoding="utf-8"))
         self.assertNotIn("RALPH-Lite", page)
         self.assertNotIn("Zen Control", page)
+        self.assertNotIn("D8.6A", page)
+        self.assertNotIn("D8.6 cross-surface gate", (SRC / "stygnox/web.py").read_text(encoding="utf-8"))
 
-    def test_non_loopback_binding_is_explicitly_unsupported_in_d86a(self) -> None:
+    def test_non_loopback_binding_is_explicitly_unsupported(self) -> None:
         self.assertTrue(web._loopback("127.0.0.1"))
         self.assertTrue(web._loopback("::1"))
         self.assertTrue(web._loopback("localhost"))

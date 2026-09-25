@@ -1,4 +1,4 @@
-"""Installed neutral Stygnox Web operator console for D8.6A."""
+"""Installed neutral Stygnox Web operator console."""
 from __future__ import annotations
 
 import argparse
@@ -55,7 +55,7 @@ def _index_html(csrf: str) -> bytes:
 <div class="action-card"><h3>Controller authority</h3><div class="field"><label for="objective">One-turn objective</label><textarea id="objective" placeholder="Bounded implementation objective"></textarea></div><div class="field"><label for="repo-authority">Repository authority</label><select id="repo-authority"><option value="read-only">read-only</option><option value="write">write</option></select></div><div class="field"><label for="run-preview-input">Exact run preview SHA-256</label><input id="run-preview-input" autocomplete="off"></div><div class="button-row"><button class="sn-btn sn-btn--primary" onclick="stygnoxAction('controller.activate')">Activate</button><button class="sn-btn sn-btn--secondary" onclick="stygnoxAction('controller.run-preview')">Preview run</button><button class="sn-btn sn-btn--primary" onclick="stygnoxAction('controller.run')">Run confirmed turn</button><button class="sn-btn warn" onclick="stygnoxAction('controller.deactivate')">Deactivate</button></div></div>
 <div class="action-card"><h3>Action evidence</h3><div id="notice" class="notice" role="status" aria-live="polite"></div><pre id="action-result" class="evidence" aria-label="Latest action result">No action yet.</pre></div></div></article>
 <article class="panel span-12"><div class="panel-title"><h2>Runtime evidence summary</h2><span class="meta">controller-owned · ignored</span></div><pre id="evidence-json" class="evidence">{{}}</pre></article></section>
-<footer class="footer"><span>Stygnox · Plan · Execute · Evidence · Evolve</span><span>Web surface is loopback-only in D8.6A</span></footer></main><script src="/assets/operator.js"></script></body></html>'''
+<footer class="footer"><span>Stygnox · Plan · Execute · Evidence · Evolve</span><span>Web surface is loopback-only</span></footer></main><script src="/assets/operator.js"></script></body></html>'''
     return page.encode("utf-8")
 
 
@@ -147,7 +147,7 @@ def _loopback(host: str) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stygnox web", description="Installed neutral Stygnox Web operator console.")
     parser.add_argument("--project", type=Path, default=Path.cwd(), help="Git worktree")
-    parser.add_argument("--host", default="127.0.0.1", help="D8.6A supports loopback only")
+    parser.add_argument("--host", default="127.0.0.1", help="loopback host only; remote access requires an explicit security policy")
     parser.add_argument("--port", type=int, default=8765)
     return parser
 
@@ -156,7 +156,7 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
     import sys
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     if not _loopback(args.host):
-        print("stygnox: web refused: D8.6A Web is loopback-only; non-loopback binding is unsupported before the D8.6 cross-surface gate", file=sys.stderr)
+        print("stygnox: web refused: Web is loopback-only; non-loopback binding requires an explicit remote-access security policy", file=sys.stderr)
         return 2
     try:
         server = OperatorServer((args.host, args.port), args.project)

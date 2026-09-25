@@ -214,12 +214,6 @@ later-stage obligations:
 The staged roadmap and release acceptance baseline are documented in
 `docs/d8-0-roadmap-and-release-acceptance.md`.
 
-## Licensing snippet for the main README
-
-Copy/adapt the section below into the project's main `README.md`.
-
----
-
 ## Licence
 
 StygNox is available under the **GNU Affero General Public License v3.0 only (`AGPL-3.0-only`)**.
@@ -240,4 +234,25 @@ See:
 - [`CONTRIBUTING-LICENSING.md`](CONTRIBUTING-LICENSING.md)
 
 If StygNox is useful to you or your organisation, contributions and voluntary sponsorship are appreciated.
-`
+
+## D9 independent release hardening
+
+D9 keeps the candidate at `0.1.0.dev8` while independent release evidence is
+completed. The official wheel is assembled canonically by the project release
+builder rather than by the host setuptools/wheel implementation.
+
+Build the candidate release set:
+
+```bash
+python3 scripts/build_d8_7_release.py --output-dir /tmp/stygnox-d9-release
+```
+
+Run the independent pre-release review:
+
+```bash
+python3 scripts/qualify_d9_release_review.py
+```
+
+`READY_FOR_VERSION_PROMOTION` means the local release boundary passed. Promotion
+to `0.1.0` still requires the canonical dev8 wheel SHA-256 to match on an
+independent supported host. See `docs/d9-independent-release-review.md`.

@@ -25,15 +25,12 @@ def load_script(name: str):
 
 
 class StygnoxReleaseTests(TestCase):
-    def test_product_identity_marks_d87_release_closure(self) -> None:
+    def test_product_identity_marks_independent_release_candidate(self) -> None:
         namespace = runpy.run_path(str(ROOT / "src/stygnox/product.py"), run_name="stygnox.product")
         product = namespace["PRODUCT"]
         self.assertEqual("0.1.0.dev8", VERSION)
         self.assertEqual(VERSION, product.version)
-        self.assertEqual(
-            "D8.7 release packaging, documentation, and installed-artifact qualification",
-            product.stage,
-        )
+        self.assertEqual("independent release", product.stage)
 
     def test_release_source_selection_includes_closure_material_and_excludes_generated_state(self) -> None:
         builder = load_script("build_d8_7_release.py")
@@ -48,12 +45,25 @@ class StygnoxReleaseTests(TestCase):
             "tests/test_stygnox_release.py",
             "branding/docs/STYLE_GUIDE.md",
             "provenance/stygnox-extraction-seed.json",
+            "CLA.md",
+            "COMMERCIAL-LICENSING.md",
+            "CONTRIBUTING-LICENSING.md",
+            "CONTRIBUTORS.md",
+            "CREDITS.md",
+            "LICENSING.md",
+            "NOTICE.md",
+            "RECOGNITION.md",
+            "TRADEMARK.md",
+            "docs/legal/LICENSING-FRAMEWORK-NOTES.md",
+            "docs/d9-independent-release-review.md",
+            "scripts/qualify_d9_release_review.py",
         }
         self.assertTrue(required.issubset(names), sorted(required - names))
         self.assertFalse(any("/__pycache__/" in f"/{name}/" for name in names))
         self.assertFalse(any("/.stygnox/" in f"/{name}/" for name in names))
         self.assertFalse(any("/dist/" in f"/{name}/" or "/build/" in f"/{name}/" for name in names))
         self.assertFalse(any(".egg-info/" in name for name in names))
+        self.assertNotIn("APPLY.md", names)
 
     def test_source_review_archive_is_deterministic(self) -> None:
         builder = load_script("build_d8_7_release.py")

@@ -34,6 +34,10 @@ REQUIRED_RELEASE_FILES = {
     "RELEASE-CANDIDATE.md",
     "POST-EXTRACTION-REPORT.md",
     "LICENSE",
+    "NOTICE.md",
+    "TRADEMARK.md",
+    "LICENSING.md",
+    "CLA.md",
     "release-manifest.json",
     "SHA256SUMS",
 }
@@ -49,6 +53,18 @@ REQUIRED_SOURCE_MEMBERS = {
     "branding/docs/STYLE_GUIDE.md",
     "provenance/stygnox-extraction-seed.json",
     "tests/test_stygnox_release.py",
+    "CLA.md",
+    "COMMERCIAL-LICENSING.md",
+    "CONTRIBUTING-LICENSING.md",
+    "CONTRIBUTORS.md",
+    "CREDITS.md",
+    "LICENSING.md",
+    "NOTICE.md",
+    "RECOGNITION.md",
+    "TRADEMARK.md",
+    "docs/legal/LICENSING-FRAMEWORK-NOTES.md",
+    "docs/d9-independent-release-review.md",
+    "scripts/qualify_d9_release_review.py",
 }
 
 
@@ -125,7 +141,15 @@ def verify_source_archive(source: Path) -> dict[str, object]:
     ]
     if forbidden_generated:
         raise RuntimeError(f"source-review archive contains generated/runtime material: {forbidden_generated[:8]}")
-    return {"file_count": len(names), "required_material": "PASS", "generated_material_excluded": "PASS"}
+    if prefix + "APPLY.md" in names:
+        raise RuntimeError("source-review archive contains obsolete one-time licensing application scaffolding")
+    return {
+        "file_count": len(names),
+        "required_material": "PASS",
+        "generated_material_excluded": "PASS",
+        "governance_material": "PASS",
+        "apply_scaffolding": "ABSENT",
+    }
 
 
 def _legacy_imports(source: str, filename: str) -> list[str]:
@@ -162,6 +186,21 @@ def verify_wheel(wheel: Path) -> dict[str, object]:
         entry_text = archive.read(entry_points[0]).decode("utf-8")
         if "stygnox = stygnox.cli:main" not in entry_text:
             raise RuntimeError("wheel does not expose the neutral installed stygnox command")
+        wheel_meta = [name for name in names if name.endswith(".dist-info/WHEEL")]
+        if len(wheel_meta) != 1:
+            raise RuntimeError(f"wheel metadata is ambiguous: {wheel_meta}")
+        wheel_text = archive.read(wheel_meta[0]).decode("utf-8")
+        if "Generator: stygnox-release-builder/1" not in wheel_text:
+            raise RuntimeError("wheel was not produced by the canonical Stygnox release builder")
+        dist_prefix = wheel_meta[0].rsplit("/", 1)[0] + "/"
+        required_legal = {
+            dist_prefix + "LICENSE": ROOT / "LICENSE",
+            dist_prefix + "NOTICE": ROOT / "NOTICE.md",
+            dist_prefix + "TRADEMARK": ROOT / "TRADEMARK.md",
+        }
+        for member, authority in required_legal.items():
+            if member not in names or archive.read(member) != authority.read_bytes():
+                raise RuntimeError(f"wheel legal metadata mismatch: {member}")
         required_assets = {
             "stygnox/terminal_assets/stygnox-ascii.txt": ROOT / "branding/assets/ascii/stygnox-ascii.txt",
             "stygnox/terminal_assets/stygnox-ascii-ansi.txt": ROOT / "branding/assets/ascii/stygnox-ascii-ansi.txt",
@@ -180,6 +219,8 @@ def verify_wheel(wheel: Path) -> dict[str, object]:
         "legacy_source_paths": "ABSENT",
         "legacy_ralph_imports": "ABSENT",
         "branding_assets": "PASS",
+        "canonical_generator": "PASS",
+        "legal_metadata": "PASS",
     }
 
 
