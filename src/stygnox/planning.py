@@ -362,6 +362,11 @@ def propose_plan(
         "self_development_grant": None,
         "self_development_grant_history": [],
         "self_development_expirations": [],
+        "step_results": [],
+        "qualification_history": [],
+        "last_qualification_failure": None,
+        "final_qualification": None,
+        "qualified_at": None,
         "step_resume": None,
     }
     return {**_write(root, state), "result": "PLAN_AWAITING_APPROVAL"}
@@ -391,7 +396,11 @@ def approved_step_context(project: Path, operator: str) -> dict[str, Any] | None
         gate = state.get("active_gate") if isinstance(state.get("active_gate"), Mapping) else {}
         raise PlanningError(f"plan is blocked at human gate {gate.get('gate_id') or "unknown"}; resolve, steer, or resume it before controller execution")
     if state.get("status") == "STEPS_COMPLETE":
-        raise PlanningError("all approved plan steps are complete; qualification is required before further controller execution")
+        raise PlanningError("all approved plan steps are complete; final qualification is required before further controller execution")
+    if state.get("status") == "READY_TO_COMMIT":
+        raise PlanningError("plan is READY_TO_COMMIT; controller execution is closed unless requalification invalidates readiness")
+    if state.get("status") == "READ_ONLY_COMPLETE":
+        raise PlanningError("read-only plan is complete; controller execution is closed")
     if state.get("status") != "APPROVED":
         raise PlanningError(f"unsupported active plan status for execution: {state.get('status')!r}")
     if state.get("execution_authority_granted") is not True:
@@ -598,6 +607,8 @@ def approve_plan(project: Path, operator: str, plan_hash: str, confirmation: str
     updated["approved_at"] = _utc_now()
     updated["approval_baseline_sha256"] = current["sha256"]
     updated["approval_repository_evidence"] = current
+    from . import scheduler
+    updated["approval_repository_manifest"] = scheduler.repository_manifest(root)
     updated["transaction_recovery_baseline_sha256"] = tx.get("authority_baseline_sha256")
     updated["step_authority_baseline_sha256"] = current["sha256"]
     updated["execution_authority_granted"] = True

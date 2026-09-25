@@ -1,0 +1,6 @@
+schema = "stygnox_qualification_config_v1"
+
+[[gate]]
+name = "installed-tests"
+command = ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_stygnox_*.py", "-q"]
+timeout_seconds = 1800

@@ -149,6 +149,12 @@ def _classify_changes_raw(project: Path) -> dict[str, Any]:
             "repository_authority": receipt.get("repository_authority"),
         })
 
+    # Controller-created bootstrap authority files can appear in per-turn overlap
+    # evidence because they remain dirty relative to Git HEAD.  Their ownership is
+    # nevertheless explicit in the adoption handoff and must not be downgraded to
+    # unresolved carry-forward merely because a later controller turn observed them.
+    unresolved.difference_update(_handoff_native_paths(handoff))
+
     current_operator = current_paths & operator_paths
     current_native = current_paths & native_paths
     unresolved.update(current_operator & current_native)

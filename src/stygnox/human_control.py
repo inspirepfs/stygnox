@@ -436,6 +436,20 @@ def _apply_decision(preview: Mapping[str, Any], supplied_preview: str, confirmat
         }
         updated["human_gate_resolutions"] = [*resolutions[-49:], record]
         updated["step_resume"] = None
+        step_results = [dict(row) for row in updated.get("step_results") or [] if isinstance(row, Mapping)]
+        step_no = int(preview["current_step"])
+        if any(int(row.get("step") or 0) == step_no for row in step_results):
+            raise HumanControlError("human-confirmed step already has a durable completion result")
+        human_step = {
+            "step": step_no,
+            "result": "HUMAN_CONFIRMED",
+            "gate_id": preview["gate_id"],
+            "decision_sha256": decision["record_sha256"],
+            "qualified_baseline_sha256": preview["blocked_baseline_sha256"],
+            "resolved_at": now,
+        }
+        human_step["record_sha256"] = _digest(human_step)
+        updated["step_results"] = [*step_results, human_step]
         plan = planning._validate_plan(updated.get("plan"))
         next_step = int(preview["current_step"]) + 1
         updated["current_step"] = next_step

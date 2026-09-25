@@ -23,6 +23,7 @@ class InstalledProfile:
     runtime_directory: str = ".stygnox"
     tracked_config: str = "stygnox.toml"
     tracked_policy: str = "stygnox.policy.md"
+    qualification_config: str = "stygnox.qualification.toml"
     artifact_namespace: str = "stygnox"
     completion_commit_prefix: str = "chore(stygnox):"
     host_adapter: str | None = None

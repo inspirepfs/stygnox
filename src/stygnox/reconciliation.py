@@ -392,7 +392,7 @@ def overlay_attribution(project: Path, raw: Mapping[str, Any]) -> dict[str, Any]
     root = adoption.resolve_worktree(project)
     output = json.loads(json.dumps(dict(raw)))
     state = planning._record(root, required=False)
-    if not isinstance(state, Mapping) or state.get("status") not in {"APPROVED", "BLOCKED_HUMAN", "STEPS_COMPLETE"}:
+    if not isinstance(state, Mapping) or state.get("status") not in {"APPROVED", "BLOCKED_HUMAN", "STEPS_COMPLETE", "READY_TO_COMMIT", "READ_ONLY_COMPLETE"}:
         return output
     try:
         actions = _actions(state)
