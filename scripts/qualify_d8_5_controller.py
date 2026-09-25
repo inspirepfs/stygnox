@@ -19,6 +19,8 @@ import tempfile
 import venv
 
 ROOT = Path(__file__).resolve().parents[1]
+from stygnox_qualification_artifact import provided_build_result, provided_wheel
+
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -480,25 +482,29 @@ def main() -> int:
         dist.mkdir(parents=True, exist_ok=True)
         if args.output_dir and any(dist.iterdir()):
             raise SystemExit(f"refusing non-empty --output-dir: {dist}")
-        build = run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "wheel",
-                "--disable-pip-version-check",
-                "--no-deps",
-                "--no-build-isolation",
-                "--wheel-dir",
-                str(dist),
-                ".",
-            ],
-            cwd=ROOT,
-        )
-        wheels = sorted(dist.glob("stygnox-*.whl"))
-        if len(wheels) != 1:
-            raise RuntimeError(f"expected one Stygnox wheel, found: {wheels}")
-        wheel = wheels[0]
+        wheel = provided_wheel()
+        if wheel is None:
+            build = run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "wheel",
+                    "--disable-pip-version-check",
+                    "--no-deps",
+                    "--no-build-isolation",
+                    "--wheel-dir",
+                    str(dist),
+                    ".",
+                ],
+                cwd=ROOT,
+            )
+            wheels = sorted(dist.glob("stygnox-*.whl"))
+            if len(wheels) != 1:
+                raise RuntimeError(f"expected one Stygnox wheel, found: {wheels}")
+            wheel = wheels[0]
+        else:
+            build = provided_build_result(wheel)
 
         environment = work / "venv"
         venv.EnvBuilder(with_pip=True, clear=True).create(environment)

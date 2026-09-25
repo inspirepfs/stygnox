@@ -20,6 +20,8 @@ import tempfile
 import venv
 
 ROOT = Path(__file__).resolve().parents[1]
+from stygnox_qualification_artifact import provided_build_result, provided_wheel
+
 EXPECTED_VERSION = runpy.run_path(str(ROOT / "src" / "stygnox" / "_version.py"))["__version__"]
 OPERATOR_MANIFEST_SCHEMA = "stygnox_operator_recovery_manifest_v1"
 ATTESTATION_SCHEMA = "stygnox_dirty_recovery_attestation_v1"
@@ -384,14 +386,18 @@ def main() -> int:
         dist.mkdir(parents=True, exist_ok=True)
         if args.output_dir is not None and any(dist.iterdir()):
             raise SystemExit(f"refusing non-empty --output-dir: {dist}")
-        build = run(
-            [sys.executable, "-m", "pip", "wheel", "--disable-pip-version-check", "--no-deps", "--no-build-isolation", "--wheel-dir", str(dist), "."],
-            cwd=ROOT,
-        )
-        wheels = sorted(dist.glob("stygnox-*.whl"))
-        if len(wheels) != 1:
-            raise RuntimeError(f"expected one wheel, found {wheels}")
-        wheel = wheels[0]
+        wheel = provided_wheel()
+        if wheel is None:
+            build = run(
+                [sys.executable, "-m", "pip", "wheel", "--disable-pip-version-check", "--no-deps", "--no-build-isolation", "--wheel-dir", str(dist), "."],
+                cwd=ROOT,
+            )
+            wheels = sorted(dist.glob("stygnox-*.whl"))
+            if len(wheels) != 1:
+                raise RuntimeError(f"expected one wheel, found {wheels}")
+            wheel = wheels[0]
+        else:
+            build = provided_build_result(wheel)
         wheel_sha = sha256(wheel)
 
         environment = work / "venv"

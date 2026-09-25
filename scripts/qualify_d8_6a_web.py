@@ -25,6 +25,8 @@ import urllib.request
 import venv
 
 ROOT = Path(__file__).resolve().parents[1]
+from stygnox_qualification_artifact import provided_build_result, provided_wheel
+
 SCHEMA = "stygnox_d8_6a_web_qualification_v1"
 VERSION = runpy.run_path(str(ROOT / "src/stygnox/_version.py"))["__version__"]
 
@@ -216,11 +218,15 @@ def main() -> int:
         work = Path(td)
         dist = work / "dist"
         dist.mkdir()
-        build = run(sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", "--wheel-dir", str(dist), ".", cwd=ROOT)
-        wheels = list(dist.glob("stygnox-*.whl"))
-        if len(wheels) != 1:
-            raise RuntimeError(f"expected exactly one Stygnox wheel, found {wheels}")
-        wheel = wheels[0]
+        wheel = provided_wheel()
+        if wheel is None:
+            build = run(sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", "--wheel-dir", str(dist), ".", cwd=ROOT)
+            wheels = list(dist.glob("stygnox-*.whl"))
+            if len(wheels) != 1:
+                raise RuntimeError(f"expected exactly one Stygnox wheel, found {wheels}")
+            wheel = wheels[0]
+        else:
+            build = provided_build_result(wheel)
 
         venv_dir = work / "venv"
         venv.EnvBuilder(with_pip=True, clear=True).create(venv_dir)

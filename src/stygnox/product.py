@@ -19,5 +19,5 @@ PRODUCT = ProductIdentity(
     name="Stygnox",
     command="stygnox",
     version=__version__,
-    stage="D8.6B installed TUI, terminal identity, and cross-surface parity",
+    stage="D8.7 release packaging, documentation, and installed-artifact qualification",
 )

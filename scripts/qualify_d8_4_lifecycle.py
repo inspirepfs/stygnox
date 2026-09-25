@@ -22,6 +22,8 @@ import tempfile
 import venv
 
 ROOT = Path(__file__).resolve().parents[1]
+from stygnox_qualification_artifact import provided_build_result, provided_wheel
+
 EXPECTED_VERSION = runpy.run_path(str(ROOT / "src" / "stygnox" / "_version.py"))["__version__"]
 ATTESTATION_SCHEMA = "stygnox_dirty_recovery_attestation_v1"
 OPERATOR_MANIFEST_SCHEMA = "stygnox_operator_recovery_manifest_v1"
@@ -403,6 +405,10 @@ def qualify_uninstall(binary: Path, fixture: Path, env: dict[str, str], evidence
 
 def build_wheel(python: Path, dist: Path) -> tuple[Path, str]:
     dist.mkdir(parents=True, exist_ok=True)
+    provided = provided_wheel()
+    if provided is not None:
+        result = provided_build_result(provided)
+        return provided, result.stdout + result.stderr
     result = run(
         [str(python), "-m", "pip", "wheel", "--disable-pip-version-check", "--no-deps", "--no-build-isolation", "--wheel-dir", str(dist), "."],
         cwd=ROOT,

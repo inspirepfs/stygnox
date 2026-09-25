@@ -19,7 +19,10 @@ execution policy, reviewed provider/model/effort overrides, and an installed
 controller activation/run path bound to D8.3 transaction authority. D8.6A adds
 the installed branded Web/operator surface; D8.6B completes the operator UX
 with the installed TUI, authoritative terminal identity, and cross-surface
-semantic parity.
+semantic parity. D8.7 closes release packaging and documentation around one
+build-once immutable wheel, a deterministic source-review archive, explicit
+post-extraction quarantine reporting, and exact-artifact requalification of
+the D8.1-D8.6B installed gates.
 
 The D8.1 installed command is intentionally a narrow product-identity boundary:
 it provides neutral `--help` and `--version` behaviour from an installed wheel
@@ -166,6 +169,36 @@ preview parity, exact branding assets, terminal fallback behaviour and refusal
 of target-local legacy TUI fallbacks. See
 `docs/d8-6b-tui-terminal-parity.md` for the exact boundary.
 
+## D8.7 release packaging and exact-artifact qualification
+
+D8.7 creates a bounded release set whose supported install medium is the wheel.
+The release also carries a deterministic source-review archive, operator guide,
+release-candidate closure map, post-extraction report, licence, manifest and
+SHA-256 inventory.
+
+Build a release set without qualifying it:
+
+```bash
+python3 scripts/build_d8_7_release.py --output-dir /tmp/stygnox-release
+```
+
+Run the release gate and retain its evidence:
+
+```bash
+python3 scripts/qualify_d8_7_release.py \
+  --output-dir /tmp/stygnox-qualified-release
+```
+
+The D8.7 gate builds the release wheel once, records its SHA-256, and supplies
+that exact immutable wheel to every established D8.1-D8.6B installed-artifact
+qualifier through `STYGNOX_QUALIFICATION_WHEEL`. A second release set is built
+only to prove reproducibility and is never substituted into predecessor
+qualification. The normal standalone qualifier behaviour is unchanged when the
+environment variable is unset.
+
+See `docs/d8-7-operator-guide.md`, `docs/d8-7-release-candidate.md`, and
+`docs/d8-7-post-extraction-report.md` for the release/operator boundary.
+
 ## Compatibility seams still intentionally retained
 
 The following are not adopted as final Stygnox product identity and remain
@@ -175,8 +208,8 @@ later-stage obligations:
 - `.ralph` compatibility runtime/policy naming;
 - source-tree `scripts/ralph.py` and legacy ZEN/RALPH compatibility surfaces;
 - persisted legacy schemas retained only where compatibility/evidence requires them;
-- D8.6A/D8.6B Web/TUI surfaces are installed and neutral; Web remains loopback-only pending an explicit future remote-access security policy; and
-- release-wide installed-artifact/documentation closure.
+- source-tree `.ralph` and `scripts/ralph*.py` material is quarantined to migration, provenance, characterization, and source-review roles and is excluded from the installed wheel and normal operator path; and
+- D8.6A/D8.6B Web/TUI surfaces are installed and neutral; Web remains loopback-only pending an explicit future remote-access security policy.
 
 The staged roadmap and release acceptance baseline are documented in
 `docs/d8-0-roadmap-and-release-acceptance.md`.
