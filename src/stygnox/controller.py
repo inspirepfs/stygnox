@@ -16,7 +16,7 @@ from typing import Any, Mapping, Sequence
 from . import adoption, execution_policy, transactions
 from .product import PRODUCT
 from .profile import DEFAULT_PROFILE, profile_record
-from . import provider_codex
+from . import provider_codex, usage
 
 
 CONTROLLER_SCHEMA = "stygnox_controller_state_v1"
@@ -294,6 +294,13 @@ def run_controller(
         "overlap_unresolved_paths": [],
         "removed_preexisting_paths": [],
     }
+    usage_record = usage.record_controller_turn(
+        root,
+        preview_sha256=expected,
+        transaction_id=str(preview["transaction_id"]),
+        repository_authority=str(preview["repository_authority"]),
+        provider_result=provider_result,
+    )
     result: dict[str, Any] = {
         "schema": RUN_RESULT_SCHEMA,
         "product_version": PRODUCT.version,
@@ -304,6 +311,7 @@ def run_controller(
         "profile": preview["profile"],
         "repository_authority": preview["repository_authority"],
         "provider_result": provider_result,
+        "usage_record_sha256": usage_record["record_sha256"],
         "before_baseline_sha256": before["sha256"],
         "after_baseline_sha256": after["sha256"],
         "project_changed": before["sha256"] != after["sha256"],
