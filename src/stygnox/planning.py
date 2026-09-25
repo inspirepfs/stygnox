@@ -353,6 +353,8 @@ def propose_plan(
         "human_steering": [],
         "human_resumes": [],
         "human_gate_resolutions": [],
+        "continuation_history": [],
+        "interrupted_recoveries": [],
         "step_resume": None,
     }
     return {**_write(root, state), "result": "PLAN_AWAITING_APPROVAL"}
@@ -434,6 +436,129 @@ def approved_step_context(project: Path, operator: str) -> dict[str, Any] | None
         "resumed_from_gate": (resume or {}).get("gate_id"),
         "transaction_id": tx["transaction_id"],
     }
+
+
+def record_same_step_continuation(
+    project: Path,
+    operator: str,
+    *,
+    plan_binding: Mapping[str, Any],
+    origin_preview_sha256: str,
+    before_baseline_sha256: str,
+    after_baseline: Mapping[str, Any],
+    summary: str,
+) -> dict[str, Any]:
+    """Advance only the authority baseline for an explicit bounded same-step continuation."""
+    root, active, tx, policy_status, name = _active_context(project, operator)
+    state = _record(root)
+    assert state is not None
+    if state.get("status") != "APPROVED" or state.get("execution_authority_granted") is not True:
+        raise PlanningError("same-step continuation requires an approved executable plan")
+    plan = _validate_plan(state.get("plan"))
+    expected_hash = _plan_hash(plan)
+    step_no = int(state.get("current_step") or 0)
+    if (
+        plan_binding.get("plan_hash") != expected_hash
+        or plan_binding.get("plan_record_sha256") != state.get("record_sha256")
+        or int(plan_binding.get("current_step") or 0) != step_no
+    ):
+        raise PlanningError("same-step continuation source is stale for the approved plan")
+    if state.get("operator") != name or state.get("transaction_id") != tx.get("transaction_id"):
+        raise PlanningError("same-step continuation authority changed")
+    if state.get("controller_record_sha256") != active.get("record_sha256"):
+        raise PlanningError("controller authority changed before same-step continuation")
+    if (
+        state.get("tracked_config_sha256") != policy_status.get("tracked_config_sha256")
+        or state.get("review_sha256") != (policy_status.get("review") or {}).get("review_sha256")
+    ):
+        raise PlanningError("execution policy changed before same-step continuation")
+    authority_before = state.get("step_authority_baseline_sha256") or state.get("approval_baseline_sha256")
+    if authority_before != before_baseline_sha256:
+        raise PlanningError("same-step continuation baseline does not match current step authority")
+    after_sha = str(after_baseline.get("sha256") or "")
+    if not _HEX64.fullmatch(after_sha):
+        raise PlanningError("same-step continuation requires exact post-turn baseline evidence")
+    history = list(state.get("continuation_history") or [])
+    record = {
+        "plan_hash": expected_hash,
+        "step": step_no,
+        "origin_preview_sha256": str(origin_preview_sha256),
+        "before_baseline_sha256": before_baseline_sha256,
+        "after_baseline_sha256": after_sha,
+        "summary": " ".join(str(summary or "").split())[:1200],
+        "recorded_at": _utc_now(),
+    }
+    record["record_sha256"] = _digest(record)
+    updated = dict(state)
+    updated["step_authority_baseline_sha256"] = after_sha
+    updated["step_resume"] = None
+    updated["continuation_history"] = [*history[-99:], record]
+    written = _write(root, updated)
+    return {**record, "plan_record_sha256": written["record_sha256"]}
+
+
+def recover_interrupted_same_step(
+    project: Path,
+    operator: str,
+    *,
+    plan_hash: str,
+    step: int,
+    before_baseline_sha256: str,
+    recovered_baseline: Mapping[str, Any],
+    pending_paths: list[str],
+    scheduler_run_sha256: str,
+) -> dict[str, Any]:
+    """Preserve exact verified interrupted work and return the same step to APPROVED."""
+    root, active, tx, policy_status, name = _active_context(project, operator)
+    state = _record(root)
+    assert state is not None
+    if state.get("status") != "APPROVED" or state.get("execution_authority_granted") is not True:
+        raise PlanningError("interrupted recovery requires an approved executable plan")
+    plan = _validate_plan(state.get("plan"))
+    expected_hash = _plan_hash(plan)
+    if str(plan_hash) != expected_hash or state.get("plan_hash") != expected_hash:
+        raise PlanningError("interrupted recovery plan hash changed")
+    if int(state.get("current_step") or 0) != int(step):
+        raise PlanningError("interrupted recovery step changed")
+    if state.get("operator") != name or state.get("transaction_id") != tx.get("transaction_id"):
+        raise PlanningError("interrupted recovery transaction/operator authority changed")
+    if state.get("controller_record_sha256") != active.get("record_sha256"):
+        raise PlanningError("controller authority changed before interrupted recovery")
+    if (
+        state.get("tracked_config_sha256") != policy_status.get("tracked_config_sha256")
+        or state.get("review_sha256") != (policy_status.get("review") or {}).get("review_sha256")
+    ):
+        raise PlanningError("execution policy changed before interrupted recovery")
+    authority_before = state.get("step_authority_baseline_sha256") or state.get("approval_baseline_sha256")
+    if authority_before != before_baseline_sha256:
+        raise PlanningError("interrupted recovery baseline no longer matches step authority")
+    recovered_sha = str(recovered_baseline.get("sha256") or "")
+    if not _HEX64.fullmatch(recovered_sha):
+        raise PlanningError("interrupted recovery requires exact repository evidence")
+    history = list(state.get("interrupted_recoveries") or [])
+    record = {
+        "plan_hash": expected_hash,
+        "step": int(step),
+        "scheduler_run_sha256": str(scheduler_run_sha256),
+        "before_baseline_sha256": before_baseline_sha256,
+        "recovered_baseline_sha256": recovered_sha,
+        "pending_paths": list(pending_paths),
+        "recovered_at": _utc_now(),
+    }
+    record["record_sha256"] = _digest(record)
+    updated = dict(state)
+    updated["step_authority_baseline_sha256"] = recovered_sha
+    updated["step_resume"] = {
+        "step": int(step),
+        "gate_id": None,
+        "reason": "verified interrupted controller work recovered; continue the same approved step",
+        "allowed_new_tests": [],
+        "recorded_at": record["recovered_at"],
+        "decision_sha256": record["record_sha256"],
+    }
+    updated["interrupted_recoveries"] = [*history[-49:], record]
+    written = _write(root, updated)
+    return {**record, "plan_record_sha256": written["record_sha256"], "result": "INTERRUPTED_STEP_RECOVERED"}
 
 
 def approve_plan(project: Path, operator: str, plan_hash: str, confirmation: str) -> dict[str, Any]:

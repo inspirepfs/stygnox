@@ -187,6 +187,8 @@ def build_run_preview(
     operator: str,
     objective: str,
     repository_authority: str,
+    *,
+    _scheduler_authority: str | None = None,
 ) -> dict[str, Any]:
     root = adoption.resolve_worktree(project)
     controller = _controller(root)
@@ -199,6 +201,10 @@ def build_run_preview(
         raise ControllerError("run operator does not match active controller authority")
     if controller.get("transaction_id") != tx.get("transaction_id"):
         raise ControllerError("controller activation is stale for the active transaction")
+    from . import scheduler
+    scheduler_authority = scheduler.active_scheduler_authority(root)
+    if scheduler_authority is not None and _scheduler_authority != scheduler_authority.get("schedule_preview_sha256"):
+        raise ControllerError("active scheduler owns controller execution; direct turn bypass is refused")
     authority = str(repository_authority or "").strip().lower()
     if authority not in {"read-only", "write"}:
         raise ControllerError("--repository-authority must be read-only or write")
@@ -212,8 +218,6 @@ def build_run_preview(
         raise ControllerError(f"unsupported installed provider adapter: {provider!r}")
     if not policy_status.get("approved"):
         raise ControllerError("provider execution refused: non-neutral policy is not reviewer-approved")
-    if int(policy.get("max_loops") or 1) != 1:
-        raise ControllerError("D8.5 installed controller executes exactly one reviewed loop; max_loops must be 1")
     current = adoption.capture_baseline(root).public()
     objective_value = _objective(objective)
     plan_binding = None
@@ -270,6 +274,7 @@ def build_run_preview(
         },
         "tracked_config_sha256": policy_status["tracked_config_sha256"],
         "review_sha256": (policy_status.get("review") or {}).get("review_sha256"),
+        "scheduler_authority": _scheduler_authority,
         "requires_explicit_confirmation": True,
         "confirmation": "RUN",
     }
@@ -309,6 +314,9 @@ def _prompt(preview: Mapping[str, Any]) -> str:
         f"Use at most {budget} shell command executions for this reviewed turn. "
         "Report every repository file you inspected in files_inspected. "
         "Do not access secrets, credentials, or external production systems. "
+        "When safe work remains inside this exact approved step but cannot fit this turn, return status PASS with blocker_class continuation; "
+        "ordinary continuation is controller scheduling and must not be presented as human authority. "
+        "Use blocker_class human-decision or policy only for genuine authority boundaries. "
         "Return only the requested structured result.\n\n"
         f"{plan_text}"
         f"Objective:\n{preview['objective']}\n"
@@ -322,13 +330,17 @@ def run_controller(
     repository_authority: str,
     preview_sha256: str,
     confirmation: str,
+    *,
+    _scheduler_authority: str | None = None,
 ) -> dict[str, Any]:
     if confirmation != "RUN":
         raise ControllerError("explicit confirmation required: --confirm RUN")
     expected = str(preview_sha256 or "").strip().lower()
     if not _HEX64.fullmatch(expected):
         raise ControllerError("--preview must be the exact 64-character preview SHA-256")
-    preview = build_run_preview(project, operator, objective, repository_authority)
+    preview = build_run_preview(
+        project, operator, objective, repository_authority, _scheduler_authority=_scheduler_authority
+    )
     if preview["preview_sha256"] != expected:
         raise ControllerError("controller run preview is stale; authority, policy, objective, or project baseline changed")
     root = Path(preview["worktree"])
@@ -367,6 +379,7 @@ def run_controller(
         provider_result=provider_result,
     )
     efficiency_result = efficiency.assess(provider_result, preview["execution_controls"])
+    blocker_class = str(provider_result.get("blocker_class") or "none")
     human_gate = None
     if plan_binding is not None:
         from . import human_control
@@ -407,6 +420,27 @@ def run_controller(
                 reason=str(provider_result.get("summary") or "provider blocked"),
                 human_resolvable=human_control.provider_block_human_resolvable(step_view, str(provider_result.get("summary") or "")),
             )
+    continuation = None
+    if (
+        plan_binding is not None
+        and human_gate is None
+        and str(provider_result.get("status") or "") == "PASS"
+        and blocker_class == "continuation"
+        and not efficiency_result["requires_review_before_automatic_continuation"]
+    ):
+        try:
+            from . import planning
+            continuation = planning.record_same_step_continuation(
+                root,
+                str(preview["operator"]),
+                plan_binding=plan_binding,
+                origin_preview_sha256=expected,
+                before_baseline_sha256=before["sha256"],
+                after_baseline=after,
+                summary=str(provider_result.get("summary") or ""),
+            )
+        except planning.PlanningError as exc:
+            raise ControllerError(str(exc)) from exc
     result: dict[str, Any] = {
         "schema": RUN_RESULT_SCHEMA,
         "product_version": PRODUCT.version,
@@ -420,6 +454,8 @@ def run_controller(
         "provider_result": provider_result,
         "usage_record_sha256": usage_record["record_sha256"],
         "efficiency": efficiency_result,
+        "blocker_class": blocker_class,
+        "continuation": continuation,
         "before_baseline_sha256": before["sha256"],
         "after_baseline_sha256": after["sha256"],
         "project_changed": before["sha256"] != after["sha256"],
@@ -428,8 +464,9 @@ def run_controller(
         "next_action": (
             "human-gate-required" if human_gate is not None
             else "turn-blocked" if str(provider_result.get("status") or "") == "BLOCKED"
-            else "qualification-required" if before["sha256"] != after["sha256"]
             else "efficiency-review-required" if efficiency_result["requires_review_before_automatic_continuation"]
+            else "continue-same-step" if continuation is not None
+            else "qualification-required" if before["sha256"] != after["sha256"]
             else "turn-complete"
         ),
     }

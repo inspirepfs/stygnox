@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PRODUCT.command,
         description=(
             "Stygnox installed product with adoption, recovery, lifecycle, neutral execution-policy, "
-            "installed controller, bounded planning, human gates, usage accounting, Web, operator, and terminal TUI surfaces."
+            "installed controller, bounded planning, scheduler/recovery, human gates, usage accounting, Web, operator, and terminal TUI surfaces."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {PRODUCT.version}")
@@ -68,6 +68,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cli_main(namespace.args)
     if namespace.command == "usage":
         from .usage import cli_main
+        return cli_main(namespace.args)
+    if namespace.command == "scheduler":
+        from .scheduler import cli_main
         return cli_main(namespace.args)
     if namespace.command == "plan":
         from .planning import cli_main

@@ -21,9 +21,12 @@ _RESULT_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {"type": "string", "enum": ["PASS", "BLOCKED"]},
         "summary": {"type": "string"},
+        "blocker_class": {"type": "string", "enum": ["none", "validation-only", "continuation", "human-decision", "policy"]},
+        "blockers": {"type": "array", "maxItems": 16, "items": {"type": "string"}},
+        "validation_notes": {"type": "array", "maxItems": 16, "items": {"type": "string"}},
         "files_inspected": {"type": "array", "maxItems": 64, "items": {"type": "string"}},
     },
-    "required": ["status", "summary", "files_inspected"],
+    "required": ["status", "summary", "blocker_class", "blockers", "validation_notes", "files_inspected"],
 }
 
 
@@ -178,12 +181,28 @@ def execute(
     payload = structured["payload"]
     status = str(payload.get("status") or "")
     summary = str(payload.get("summary") or "").strip()
+    blocker_class = str(payload.get("blocker_class") or "")
+    raw_blockers = payload.get("blockers")
+    blockers = [str(item).strip() for item in raw_blockers] if isinstance(raw_blockers, list) else []
+    raw_validation = payload.get("validation_notes")
+    validation_notes = [str(item).strip() for item in raw_validation] if isinstance(raw_validation, list) else []
     raw_files = payload.get("files_inspected")
     files_inspected = [str(item).strip() for item in raw_files] if isinstance(raw_files, list) else []
-    if any(not item for item in files_inspected):
-        raise ProviderError("Codex structured output contains an empty files_inspected entry")
-    if status not in {"PASS", "BLOCKED"} or not summary or not isinstance(raw_files, list):
+    if any(not item for item in [*blockers, *validation_notes, *files_inspected]):
+        raise ProviderError("Codex structured output contains an empty list entry")
+    if (
+        status not in {"PASS", "BLOCKED"}
+        or not summary
+        or blocker_class not in {"none", "validation-only", "continuation", "human-decision", "policy"}
+        or not isinstance(raw_blockers, list)
+        or not isinstance(raw_validation, list)
+        or not isinstance(raw_files, list)
+    ):
         raise ProviderError("Codex structured output failed the Stygnox result contract")
+    if blocker_class == "continuation" and status != "PASS":
+        raise ProviderError("ordinary continuation must use status PASS and blocker_class continuation")
+    if status == "BLOCKED" and blocker_class == "continuation":
+        raise ProviderError("blocked provider results cannot claim ordinary continuation")
     metrics = dict(structured["metrics"])
     metrics["files_inspected"] = len(files_inspected)
     return {
@@ -193,6 +212,9 @@ def execute(
         "sandbox": structured["sandbox"],
         "status": status,
         "summary": summary,
+        "blocker_class": blocker_class,
+        "blockers": blockers,
+        "validation_notes": validation_notes,
         "files_inspected": files_inspected,
         "metrics": metrics,
     }

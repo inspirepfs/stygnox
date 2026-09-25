@@ -63,7 +63,7 @@ class InstalledCodexMetricTests(TestCase):
     def test_execute_returns_metrics_in_installed_provider_result(self) -> None:
         def fake_run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
             output_path = Path(args[args.index("-o") + 1])
-            output_path.write_text('{"status":"PASS","summary":"done","files_inspected":["src/a.py","tests/test_a.py"]}', encoding="utf-8")
+            output_path.write_text('{"status":"PASS","summary":"done","blocker_class":"none","blockers":[],"validation_notes":[],"files_inspected":["src/a.py","tests/test_a.py"]}', encoding="utf-8")
             stream = "\n".join(
                 (
                     json.dumps({"type": "item.completed", "item": {"type": "command_execution"}}),
@@ -97,6 +97,9 @@ class InstalledCodexMetricTests(TestCase):
 
         self.assertEqual("PASS", result["status"])
         self.assertEqual("done", result["summary"])
+        self.assertEqual("none", result["blocker_class"])
+        self.assertEqual([], result["blockers"])
+        self.assertEqual([], result["validation_notes"])
         self.assertEqual(["src/a.py", "tests/test_a.py"], result["files_inspected"])
         self.assertEqual(
             {
@@ -111,6 +114,30 @@ class InstalledCodexMetricTests(TestCase):
             },
             result["metrics"],
         )
+
+
+    def test_continuation_contract_is_explicit_and_never_a_human_block(self) -> None:
+        def fake_run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+            output_path = Path(args[args.index("-o") + 1])
+            output_path.write_text(
+                '{"status":"PASS","summary":"more bounded work remains","blocker_class":"continuation","blockers":[],"validation_notes":[],"files_inspected":[]}',
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(args, 0, json.dumps({"type": "turn.completed", "usage": {}}))
+
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(provider_codex, "_preflight"), \
+             mock.patch.object(provider_codex, "_run", side_effect=fake_run):
+            result = provider_codex.execute(
+                cwd=Path(td),
+                prompt="continue",
+                model="gpt-test",
+                effort="high",
+                repository_authority="write",
+            )
+
+        self.assertEqual("PASS", result["status"])
+        self.assertEqual("continuation", result["blocker_class"])
 
     def test_execute_structured_supports_planning_schema_without_changing_default_contract(self) -> None:
         custom_schema = {
