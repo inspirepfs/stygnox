@@ -63,7 +63,7 @@ class InstalledCodexMetricTests(TestCase):
     def test_execute_returns_metrics_in_installed_provider_result(self) -> None:
         def fake_run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
             output_path = Path(args[args.index("-o") + 1])
-            output_path.write_text('{"status":"PASS","summary":"done"}', encoding="utf-8")
+            output_path.write_text('{"status":"PASS","summary":"done","files_inspected":["src/a.py","tests/test_a.py"]}', encoding="utf-8")
             stream = "\n".join(
                 (
                     json.dumps({"type": "item.completed", "item": {"type": "command_execution"}}),
@@ -97,6 +97,7 @@ class InstalledCodexMetricTests(TestCase):
 
         self.assertEqual("PASS", result["status"])
         self.assertEqual("done", result["summary"])
+        self.assertEqual(["src/a.py", "tests/test_a.py"], result["files_inspected"])
         self.assertEqual(
             {
                 "commands_executed": 1,
@@ -106,6 +107,7 @@ class InstalledCodexMetricTests(TestCase):
                 "output_tokens": 9,
                 "reasoning_output_tokens": 6,
                 "codex_seconds": 2.5,
+                "files_inspected": 2,
             },
             result["metrics"],
         )

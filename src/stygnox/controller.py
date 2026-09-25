@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 
-from . import adoption, execution_policy, transactions
+from . import adoption, efficiency, execution_policy, transactions
 from .product import PRODUCT
 from .profile import DEFAULT_PROFILE, profile_record
 from . import provider_codex, usage
@@ -231,7 +231,10 @@ def build_run_preview(
         "effort": policy.get("effort"),
         "execution_controls": {
             key: policy[key]
-            for key in ("efficiency_mode", "reserve_percent", "wait_for_limits", "usage_poll_seconds", "max_loops")
+            for key in (
+                "efficiency_mode", "reserve_percent", "wait_for_limits", "usage_poll_seconds", "max_loops",
+                *efficiency.DETAIL_FIELDS,
+            )
         },
         "tracked_config_sha256": policy_status["tracked_config_sha256"],
         "review_sha256": (policy_status.get("review") or {}).get("review_sha256"),
@@ -244,11 +247,15 @@ def build_run_preview(
 
 def _prompt(preview: Mapping[str, Any]) -> str:
     authority = preview["repository_authority"]
+    controls = preview.get("execution_controls") if isinstance(preview.get("execution_controls"), Mapping) else {}
+    budget = efficiency.mode_limits(controls).get("prompt_commands", 6)
     return (
         "You are an implementation worker invoked by the installed Stygnox controller. "
         "The controller, not you, owns authority and runtime evidence. "
         "Never create, edit, delete, rename, or adopt content under .stygnox/. "
         f"Repository authority for this single reviewed turn is {authority}. "
+        f"Use at most {budget} shell command executions for this reviewed turn. "
+        "Report every repository file you inspected in files_inspected. "
         "Do not access secrets, credentials, or external production systems. "
         "Return only the requested structured result.\n\n"
         f"Objective:\n{preview['objective']}\n"
@@ -301,6 +308,7 @@ def run_controller(
         repository_authority=str(preview["repository_authority"]),
         provider_result=provider_result,
     )
+    efficiency_result = efficiency.assess(provider_result, preview["execution_controls"])
     result: dict[str, Any] = {
         "schema": RUN_RESULT_SCHEMA,
         "product_version": PRODUCT.version,
@@ -312,11 +320,16 @@ def run_controller(
         "repository_authority": preview["repository_authority"],
         "provider_result": provider_result,
         "usage_record_sha256": usage_record["record_sha256"],
+        "efficiency": efficiency_result,
         "before_baseline_sha256": before["sha256"],
         "after_baseline_sha256": after["sha256"],
         "project_changed": before["sha256"] != after["sha256"],
         "change_attribution": attribution,
-        "next_action": "qualification-required" if before["sha256"] != after["sha256"] else "turn-complete",
+        "next_action": (
+            "qualification-required" if before["sha256"] != after["sha256"]
+            else "efficiency-review-required" if efficiency_result["requires_review_before_automatic_continuation"]
+            else "turn-complete"
+        ),
     }
     result["record_sha256"] = _digest(result)
     adoption.write_runtime_record(root, f"controller-run-{expected[:16]}.json", result, actor="controller")

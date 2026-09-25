@@ -14,6 +14,7 @@ import re
 import tomllib
 from typing import Any, Mapping, Sequence
 
+from . import efficiency
 from .profile import DEFAULT_PROFILE, profile_record
 from .product import PRODUCT
 
@@ -115,6 +116,7 @@ def normalize_policy(
     usage_poll_seconds: int | str | None = None,
     max_loops: int | str | None = None,
     reviewer: str | None = None,
+    detailed_limits: Mapping[str, Any] | None = None,
     require_reviewer: bool = True,
 ) -> dict[str, Any]:
     selected_provider = _text(provider, "provider")
@@ -131,6 +133,10 @@ def normalize_policy(
     mode = str(efficiency_mode or DEFAULT_EXECUTION["efficiency_mode"]).strip().upper()
     if mode not in MODES:
         raise ExecutionPolicyError(f"efficiency_mode must be one of: {', '.join(MODES)}")
+    try:
+        details = efficiency.normalize_details(detailed_limits)
+    except efficiency.EfficiencyError as exc:
+        raise ExecutionPolicyError(str(exc)) from exc
     return {
         "provider": selected_provider,
         "model": selected_model,
@@ -144,6 +150,7 @@ def normalize_policy(
             usage_poll_seconds, "usage_poll_seconds", int(DEFAULT_EXECUTION["usage_poll_seconds"]), 3600
         ),
         "max_loops": _positive_int(max_loops, "max_loops", int(DEFAULT_EXECUTION["max_loops"]), 1000),
+        **details,
     }
 
 
@@ -166,6 +173,7 @@ def render_config(policy: Mapping[str, Any]) -> str:
         usage_poll_seconds=policy.get("usage_poll_seconds"),
         max_loops=policy.get("max_loops"),
         reviewer=policy.get("reviewer"),
+        detailed_limits=policy,
     )
     profile = DEFAULT_PROFILE
     return (
@@ -187,7 +195,8 @@ def render_config(policy: Mapping[str, Any]) -> str:
         f'wait_for_limits = {str(normalized["wait_for_limits"]).lower()}\n'
         f'usage_poll_seconds = {normalized["usage_poll_seconds"]}\n'
         f'max_loops = {normalized["max_loops"]}\n'
-        "\n[authority]\n"
+        + "".join(f'{key} = {normalized[key]}\n' for key in efficiency.DETAIL_FIELDS)
+        + "\n[authority]\n"
         'stage = "neutral-controller-authority"\n'
         "controller_execution = false\n"
     )
@@ -220,6 +229,7 @@ def config_policy(root: Path) -> dict[str, Any]:
         usage_poll_seconds=execution.get("usage_poll_seconds"),
         max_loops=execution.get("max_loops"),
         reviewer=None,
+        detailed_limits=execution,
         require_reviewer=False,
     )
 
@@ -240,7 +250,10 @@ def policy_review(policy: Mapping[str, Any], reviewer: str | None) -> dict[str, 
         "effort": policy.get("effort"),
         "execution": {
             key: policy[key]
-            for key in ("efficiency_mode", "reserve_percent", "wait_for_limits", "usage_poll_seconds", "max_loops")
+            for key in (
+                "efficiency_mode", "reserve_percent", "wait_for_limits", "usage_poll_seconds", "max_loops",
+                *efficiency.DETAIL_FIELDS,
+            )
         },
     }
     body["review_sha256"] = _digest(body)
@@ -299,6 +312,7 @@ def _merge_current(
     wait_for_limits: bool | None,
     usage_poll_seconds: int | None,
     max_loops: int | None,
+    detailed_limits: Mapping[str, Any] | None,
     reviewer: str | None,
     reset: bool,
 ) -> dict[str, Any]:
@@ -316,6 +330,10 @@ def _merge_current(
         wait_for_limits=current.get("wait_for_limits") if wait_for_limits is None else wait_for_limits,
         usage_poll_seconds=current.get("usage_poll_seconds") if usage_poll_seconds is None else usage_poll_seconds,
         max_loops=current.get("max_loops") if max_loops is None else max_loops,
+        detailed_limits={
+            key: (dict(detailed_limits or {}).get(key) if dict(detailed_limits or {}).get(key) is not None else current.get(key))
+            for key in efficiency.DETAIL_FIELDS
+        },
         reviewer=reviewer,
     )
 
@@ -333,6 +351,7 @@ def build_policy_preview(
     wait_for_limits: bool | None = None,
     usage_poll_seconds: int | None = None,
     max_loops: int | None = None,
+    detailed_limits: Mapping[str, Any] | None = None,
     reset: bool = False,
 ) -> dict[str, Any]:
     from . import adoption, transactions
@@ -362,6 +381,7 @@ def build_policy_preview(
         wait_for_limits=wait_for_limits,
         usage_poll_seconds=usage_poll_seconds,
         max_loops=max_loops,
+        detailed_limits=detailed_limits,
         reviewer=reviewer,
         reset=reset,
     )
@@ -457,6 +477,8 @@ def _add_policy_values(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(wait_for_limits=None)
     parser.add_argument("--usage-poll-seconds", type=int)
     parser.add_argument("--max-loops", type=int)
+    for key in efficiency.DETAIL_FIELDS:
+        parser.add_argument("--" + key.replace("_", "-"), dest=key, type=int)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -500,6 +522,7 @@ def _kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "wait_for_limits": getattr(args, "wait_for_limits", None),
         "usage_poll_seconds": getattr(args, "usage_poll_seconds", None),
         "max_loops": getattr(args, "max_loops", None),
+        "detailed_limits": {key: getattr(args, key, None) for key in efficiency.DETAIL_FIELDS},
     }
 
 

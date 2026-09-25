@@ -21,8 +21,9 @@ _RESULT_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {"type": "string", "enum": ["PASS", "BLOCKED"]},
         "summary": {"type": "string"},
+        "files_inspected": {"type": "array", "maxItems": 64, "items": {"type": "string"}},
     },
-    "required": ["status", "summary"],
+    "required": ["status", "summary", "files_inspected"],
 }
 
 
@@ -146,8 +147,13 @@ def execute(
             raise ProviderError("Codex structured output must be a JSON object")
         status = str(payload.get("status") or "")
         summary = str(payload.get("summary") or "").strip()
-        if status not in {"PASS", "BLOCKED"} or not summary:
+        raw_files = payload.get("files_inspected")
+        files_inspected = [str(item).strip() for item in raw_files] if isinstance(raw_files, list) else []
+        if any(not item for item in files_inspected):
+            raise ProviderError("Codex structured output contains an empty files_inspected entry")
+        if status not in {"PASS", "BLOCKED"} or not summary or not isinstance(raw_files, list):
             raise ProviderError("Codex structured output failed the Stygnox result contract")
+        metrics["files_inspected"] = len(files_inspected)
         return {
             "provider": PROVIDER_NAME,
             "model": model,
@@ -155,5 +161,6 @@ def execute(
             "sandbox": sandbox,
             "status": status,
             "summary": summary,
+            "files_inspected": files_inspected,
             "metrics": metrics,
         }

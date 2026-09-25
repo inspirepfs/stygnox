@@ -72,6 +72,7 @@ def _normalise_metrics(value: Mapping[str, Any] | None) -> dict[str, int | float
     metrics = dict(value or {})
     output: dict[str, int | float] = {
         "commands_executed": max(0, int(metrics.get("commands_executed") or 0)),
+        "files_inspected": max(0, int(metrics.get("files_inspected") or 0)),
         "codex_seconds": max(0.0, float(metrics.get("codex_seconds") or 0.0)),
     }
     for key in _TOKEN_KEYS:
@@ -191,6 +192,7 @@ def _sum_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, int | float]:
     total: dict[str, int | float] = {
         "turns": 0,
         "commands_executed": 0,
+        "files_inspected": 0,
         "input_tokens": 0,
         "cached_input_tokens": 0,
         "cache_write_input_tokens": 0,
@@ -201,6 +203,7 @@ def _sum_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, int | float]:
     for row in rows:
         total["turns"] = int(total["turns"]) + 1
         total["commands_executed"] = int(total["commands_executed"]) + max(0, int(row.get("commands_executed") or 0))
+        total["files_inspected"] = int(total["files_inspected"]) + max(0, int(row.get("files_inspected") or 0))
         for key in _TOKEN_KEYS:
             total[key] = int(total[key]) + max(0, int(row.get(key) or 0))
         total["codex_seconds"] = float(total["codex_seconds"]) + max(0.0, float(row.get("codex_seconds") or 0.0))
