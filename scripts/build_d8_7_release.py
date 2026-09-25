@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the deterministic Stygnox D9 release-candidate set.
+"""Build the deterministic Stygnox independent release set.
 
 The supported installation medium is the wheel. The wheel is assembled by
 Stygnox itself using only the Python standard library so its bytes do not
@@ -64,6 +64,7 @@ VISIBLE_DOCS = {
     "CREDITS.md": "CREDITS.md",
     "NOTICE.md": "NOTICE.md",
     "TRADEMARK.md": "TRADEMARK.md",
+    "D9-RELEASE-REVIEW.md": "docs/d9-independent-release-review.md",
 }
 
 
@@ -183,7 +184,7 @@ def _zipinfo(name: str, *, executable: bool = False) -> zipfile.ZipInfo:
 
 def _metadata(release_version: str) -> bytes:
     classifiers = [
-        "Development Status :: 2 - Pre-Alpha",
+        "Development Status :: 3 - Alpha",
         "Environment :: Console",
         "License :: OSI Approved :: GNU Affero General Public License v3",
         "Operating System :: POSIX :: Linux",
@@ -296,7 +297,8 @@ def write_release(output_dir: Path) -> dict[str, object]:
         visible.append({
             "name": target.name,
             "role": "operator-documentation" if target_name in {
-                "OPERATOR-GUIDE.md", "RELEASE-CANDIDATE.md", "POST-EXTRACTION-REPORT.md"
+                "OPERATOR-GUIDE.md", "RELEASE-CANDIDATE.md", "POST-EXTRACTION-REPORT.md",
+                "D9-RELEASE-REVIEW.md",
             } else "project-governance",
             "sha256": sha256(target),
             "size": target.stat().st_size,
@@ -355,7 +357,7 @@ def main() -> int:
     result = write_release(args.output_dir)
     printable = dict(result)
     printable.pop("build_transcript", None)
-    print("D8.7 RELEASE BUILD PASS")
+    print("STYGNOX RELEASE BUILD PASS")
     print(json.dumps(printable, indent=2, sort_keys=True))
     return 0
 

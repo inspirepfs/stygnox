@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent D9 pre-release review for the hardened dev8 release candidate."""
+"""Independent D9 qualification for the Stygnox 0.1.0 release artifact."""
 from __future__ import annotations
 
 import hashlib
@@ -15,7 +15,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = runpy.run_path(str(ROOT / "src/stygnox/_version.py"))["__version__"]
-SCHEMA = "stygnox_d9_independent_release_review_v1"
+SCHEMA = "stygnox_d9_final_release_qualification_v1"
 
 
 def sha256(path: Path) -> str:
@@ -45,8 +45,8 @@ def release_digests(directory: Path) -> dict[str, str]:
 
 
 def main() -> int:
-    if VERSION != "0.1.0.dev8":
-        raise RuntimeError(f"D9 hardening review expects dev8 before version promotion, got {VERSION}")
+    if VERSION != "0.1.0":
+        raise RuntimeError(f"D9 final release qualification expects 0.1.0, got {VERSION}")
 
     with tempfile.TemporaryDirectory(prefix="stygnox-d9-review-") as td:
         root = Path(td)
@@ -102,7 +102,7 @@ def main() -> int:
         report = {
             "schema": SCHEMA,
             "version": VERSION,
-            "release_decision": "READY_FOR_VERSION_PROMOTION",
+            "release_decision": "QUALIFIED_FOR_TAGGING",
             "cross_host_requirement": "PENDING_INDEPENDENT_HOST_DIGEST_MATCH",
             "wheel": wheel.name,
             "wheel_sha256": sha256(wheel),
@@ -115,9 +115,9 @@ def main() -> int:
             "independent_install": "PASS",
             "unrelated_repository": "PASS",
             "operator_stage_hygiene": "PASS",
-            "next_action": "reproduce this dev8 wheel digest on an independent supported host before promoting to 0.1.0",
+            "next_action": "reproduce this 0.1.0 wheel digest on an independent supported host before tagging v0.1.0",
         }
-        print("D9 INDEPENDENT PRE-RELEASE REVIEW PASS")
+        print("D9 FINAL RELEASE QUALIFICATION PASS")
         print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 

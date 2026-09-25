@@ -25,10 +25,10 @@ def load_script(name: str):
 
 
 class StygnoxReleaseTests(TestCase):
-    def test_product_identity_marks_independent_release_candidate(self) -> None:
+    def test_product_identity_marks_independent_release(self) -> None:
         namespace = runpy.run_path(str(ROOT / "src/stygnox/product.py"), run_name="stygnox.product")
         product = namespace["PRODUCT"]
-        self.assertEqual("0.1.0.dev8", VERSION)
+        self.assertEqual("0.1.0", VERSION)
         self.assertEqual(VERSION, product.version)
         self.assertEqual("independent release", product.stage)
 
@@ -84,8 +84,8 @@ class StygnoxReleaseTests(TestCase):
             self.assertIsNone(helper.provided_wheel())
         with tempfile.TemporaryDirectory(prefix="stygnox-d87-wheel-helper-") as td:
             root = Path(td)
-            good = root / "stygnox-0.1.0.dev8-py3-none-any.whl"
-            bad = root / "stygnox-0.1.0.dev8.tar.gz"
+            good = root / "stygnox-0.1.0-py3-none-any.whl"
+            bad = root / "stygnox-0.1.0.tar.gz"
             good.write_bytes(b"wheel-placeholder")
             bad.write_bytes(b"source-placeholder")
             with mock.patch.dict(os.environ, {helper.ENV_NAME: str(good)}, clear=False):

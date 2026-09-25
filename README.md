@@ -1,7 +1,7 @@
 # Stygnox
 
-Stygnox is a standalone autonomous development-loop controller being hardened
-for independent installation and adoption across Git projects.
+Stygnox is a standalone autonomous development-loop controller for independent
+installation and adoption across Git projects.
 
 ## Current status
 
@@ -22,7 +22,9 @@ with the installed TUI, authoritative terminal identity, and cross-surface
 semantic parity. D8.7 closes release packaging and documentation around one
 build-once immutable wheel, a deterministic source-review archive, explicit
 post-extraction quarantine reporting, and exact-artifact requalification of
-the D8.1-D8.6B installed gates.
+the D8.1-D8.6B installed gates. D9 hardens the canonical release builder,
+independent-install review, licensing/governance packaging, and cross-host
+reproducibility for the first independent `0.1.0` release.
 
 The D8.1 installed command is intentionally a narrow product-identity boundary:
 it provides neutral `--help` and `--version` behaviour from an installed wheel
@@ -40,17 +42,16 @@ controller authority to an ACTIVE D8.3 transaction and the exact reviewed
 execution policy. Current source-tree controller entrypoints remain
 compatibility/development surfaces and are not installed fallbacks.
 
-## Installable product development
+## Installable product
 
-Build a wheel from a clean checkout with the local build toolchain:
+The supported release artifact is the canonical wheel produced by the project
+release builder. The official wheel does not depend on the host setuptools or
+`wheel` implementation for its byte representation.
+
+Build the release set from a clean checkout:
 
 ```bash
-python3 -m pip wheel \
-  --disable-pip-version-check \
-  --no-deps \
-  --no-build-isolation \
-  --wheel-dir dist \
-  .
+python3 scripts/build_d8_7_release.py --output-dir dist-release
 ```
 
 Install the resulting wheel into an isolated environment and use the installed
@@ -58,7 +59,7 @@ command:
 
 ```bash
 python3 -m venv /tmp/stygnox-venv
-/tmp/stygnox-venv/bin/python -m pip install --no-deps dist/stygnox-*.whl
+/tmp/stygnox-venv/bin/python -m pip install --no-deps dist-release/stygnox-0.1.0-py3-none-any.whl
 /tmp/stygnox-venv/bin/stygnox --version
 /tmp/stygnox-venv/bin/stygnox --help
 ```
@@ -235,24 +236,24 @@ See:
 
 If StygNox is useful to you or your organisation, contributions and voluntary sponsorship are appreciated.
 
-## D9 independent release hardening
+## D9 first independent release
 
-D9 keeps the candidate at `0.1.0.dev8` while independent release evidence is
-completed. The official wheel is assembled canonically by the project release
-builder rather than by the host setuptools/wheel implementation.
+D9 promotes the independently hardened candidate to `0.1.0`. The official
+wheel is assembled canonically by the project release builder rather than by
+the host setuptools/wheel implementation.
 
-Build the candidate release set:
+Build the final release set:
 
 ```bash
 python3 scripts/build_d8_7_release.py --output-dir /tmp/stygnox-d9-release
 ```
 
-Run the independent pre-release review:
+Run the final independent release qualification:
 
 ```bash
 python3 scripts/qualify_d9_release_review.py
 ```
 
-`READY_FOR_VERSION_PROMOTION` means the local release boundary passed. Promotion
-to `0.1.0` still requires the canonical dev8 wheel SHA-256 to match on an
+`QUALIFIED_FOR_TAGGING` means the local `0.1.0` release boundary passed. Before
+pushing the `v0.1.0` tag, reproduce the canonical `0.1.0` wheel SHA-256 on an
 independent supported host. See `docs/d9-independent-release-review.md`.

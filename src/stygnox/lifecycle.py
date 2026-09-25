@@ -29,6 +29,8 @@ UNINSTALL_SCHEMA = "stygnox_uninstall_preparation_v1"
 UPGRADE_RECORD = "upgrade.json"
 UNINSTALL_RECORD = "uninstall.json"
 _VERSION_RE = re.compile(r"^0\.1\.0\.dev(?P<dev>[0-9]+)$")
+_STABLE_VERSION = "0.1.0"
+_STABLE_COMPAT_DEV_CEILING = 8
 
 
 class LifecycleError(RuntimeError):
@@ -60,8 +62,27 @@ def _version_dev(value: str) -> int | None:
     return int(match.group("dev")) if match else None
 
 
+def _compatibility_dev_ceiling(value: str) -> int | None:
+    dev = _version_dev(value)
+    if dev is not None:
+        return dev
+    if value == _STABLE_VERSION:
+        return _STABLE_COMPAT_DEV_CEILING
+    return None
+
+
+def _package_upgrade_dev_max(value: str) -> int:
+    dev = _version_dev(value)
+    if dev is not None:
+        return max(0, dev - 1)
+    if value == _STABLE_VERSION:
+        return _STABLE_COMPAT_DEV_CEILING
+    return 0
+
+
 def support_policy() -> dict[str, Any]:
-    current_dev = _version_dev(PRODUCT.version)
+    current_dev = _compatibility_dev_ceiling(PRODUCT.version)
+    package_upgrade_dev_max = _package_upgrade_dev_max(PRODUCT.version)
     python_tuple = tuple(sys.version_info[:3])
     linux = sys.platform.startswith("linux")
     python_supported = (3, 11) <= python_tuple[:2] < (3, 14)
@@ -91,9 +112,12 @@ def support_policy() -> dict[str, Any]:
             "system_package_manager": False,
         },
         "project_state_compatibility": {
-            "package_only_upgrade_from": [f"0.1.0.dev{dev}" for dev in range(1, current_dev or 1)],
+            "package_only_upgrade_from": [
+                f"0.1.0.dev{dev}" for dev in range(1, package_upgrade_dev_max + 1)
+            ],
             "runtime_upgrade_from_dev_min": 2,
             "runtime_upgrade_through_dev": current_dev,
+            "runtime_upgrade_through_version": PRODUCT.version,
             "known_schemas": {
                 "adoption": adoption.HANDOFF_SCHEMA,
                 "transaction": transactions.TRANSACTION_SCHEMA,
@@ -188,7 +212,7 @@ def _authority_records(root: Path) -> dict[str, dict[str, Any] | None]:
 def _runtime_version_blockers(records: Mapping[str, dict[str, Any] | None]) -> tuple[list[str], list[str]]:
     blockers: list[str] = []
     versions: set[str] = set()
-    current_dev = _version_dev(PRODUCT.version)
+    current_dev = _compatibility_dev_ceiling(PRODUCT.version)
     assert current_dev is not None
     for name, record in records.items():
         if record is None:
@@ -197,6 +221,8 @@ def _runtime_version_blockers(records: Mapping[str, dict[str, Any] | None]) -> t
         if not version:
             continue
         versions.add(version)
+        if version == PRODUCT.version:
+            continue
         dev = _version_dev(version)
         if dev is None or dev < 2 or dev > current_dev:
             blockers.append(

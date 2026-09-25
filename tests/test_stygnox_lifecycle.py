@@ -67,6 +67,8 @@ class StygnoxLifecycleTests(unittest.TestCase):
         self.assertIn("0.1.0.dev5", policy["project_state_compatibility"]["package_only_upgrade_from"])
         self.assertIn("0.1.0.dev6", policy["project_state_compatibility"]["package_only_upgrade_from"])
         self.assertIn("0.1.0.dev7", policy["project_state_compatibility"]["package_only_upgrade_from"])
+        self.assertIn("0.1.0.dev8", policy["project_state_compatibility"]["package_only_upgrade_from"])
+        self.assertEqual("0.1.0", policy["project_state_compatibility"]["runtime_upgrade_through_version"])
 
     def test_upgrade_refuses_active_transaction_then_accepts_stopped_state_without_tracked_change(self) -> None:
         with tempfile.TemporaryDirectory(prefix="stygnox-d84-upgrade-") as temp:
