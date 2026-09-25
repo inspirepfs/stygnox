@@ -355,6 +355,10 @@ def propose_plan(
         "human_gate_resolutions": [],
         "continuation_history": [],
         "interrupted_recoveries": [],
+        "reconciliation_actions": [],
+        "carry_forward_adopted_paths": [],
+        "carry_forward_outside_paths": [],
+        "carry_forward_rejected_paths": [],
         "step_resume": None,
     }
     return {**_write(root, state), "result": "PLAN_AWAITING_APPROVAL"}

@@ -106,13 +106,25 @@ def _handoff_native_paths(handoff: Mapping[str, Any] | None) -> set[str]:
     paths: set[str] = set()
     if not isinstance(handoff, Mapping):
         return paths
+    # Current installed adoption records exact tracked files rather than the
+    # older tracked_review presentation shape.  Both are accepted so operator
+    # attribution never misclassifies controller-created authority files as
+    # external carry-forward candidates.
+    tracked_files = handoff.get("tracked_files")
+    if isinstance(tracked_files, Mapping):
+        paths.update(str(path) for path in tracked_files if str(path).strip())
+    authority = handoff.get("authority") if isinstance(handoff.get("authority"), Mapping) else {}
+    for path in authority.get("paths") or []:
+        text = str(path or "").strip()
+        if text and not text.startswith(f"{adoption.RUNTIME_NAME}/"):
+            paths.add(text)
     for row in handoff.get("tracked_review") or []:
         if isinstance(row, Mapping) and row.get("path") and row.get("action") != "unchanged":
             paths.add(str(row["path"]))
     return paths
 
 
-def classify_changes(project: Path) -> dict[str, Any]:
+def _classify_changes_raw(project: Path) -> dict[str, Any]:
     root = adoption.resolve_worktree(project)
     current = adoption.capture_baseline(root).public()
     handoff = _runtime_json(root, "adoption.json")
@@ -159,6 +171,18 @@ def classify_changes(project: Path) -> dict[str, Any]:
         "auto_reattribute": False,
         "requires_human_decision": bool(categories["external"]["count"] or categories["unresolved"]["count"]),
     }
+
+
+def classify_changes(project: Path) -> dict[str, Any]:
+    raw = _classify_changes_raw(project)
+    try:
+        from . import reconciliation
+        return reconciliation.overlay_attribution(project, raw)
+    except Exception as exc:
+        # Attribution must never silently hide invalid reconciliation evidence.
+        raw["reconciliation_error"] = str(exc)
+        raw["requires_human_decision"] = True
+        return raw
 
 
 def operator_snapshot(project: Path, *, server_pid: int | None = None) -> dict[str, Any]:
@@ -250,9 +274,18 @@ def dispatch_action(project: Path, action: str, payload: Mapping[str, Any]) -> d
             result = controller.build_run_preview(root, operator_name, str(payload.get("objective") or ""), str(payload.get("repository_authority") or ""))
         elif name == "controller.run":
             result = controller.run_controller(root, operator_name, str(payload.get("objective") or ""), str(payload.get("repository_authority") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "reconciliation.inspect":
+            from . import reconciliation
+            result = reconciliation.reconciliation_snapshot(root, operator_name, str(payload.get("plan_hash") or ""))
+        elif name == "reconciliation.preview":
+            from . import reconciliation
+            result = reconciliation.build_action_preview(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("path") or ""), str(payload.get("disposition") or ""), reason=payload.get("reason"))
+        elif name == "reconciliation.apply":
+            from . import reconciliation
+            result = reconciliation.apply_action(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("path") or ""), str(payload.get("disposition") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""), reason=payload.get("reason"))
         else:
             raise OperatorSurfaceError(f"unsupported installed operator action: {name!r}")
-    except (adoption.AdoptionError, transactions.TransactionError, execution_policy.ExecutionPolicyError, controller.ControllerError, ValueError, PermissionError) as exc:
+    except (adoption.AdoptionError, transactions.TransactionError, execution_policy.ExecutionPolicyError, controller.ControllerError, RuntimeError, ValueError, PermissionError) as exc:
         raise OperatorSurfaceError(str(exc)) from exc
     return {"schema": ACTION_RESULT_SCHEMA, "action": name, "result": result}
 
