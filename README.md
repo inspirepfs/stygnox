@@ -213,3 +213,31 @@ later-stage obligations:
 
 The staged roadmap and release acceptance baseline are documented in
 `docs/d8-0-roadmap-and-release-acceptance.md`.
+
+## Licensing snippet for the main README
+
+Copy/adapt the section below into the project's main `README.md`.
+
+---
+
+## Licence
+
+StygNox is available under the **GNU Affero General Public License v3.0 only (`AGPL-3.0-only`)**.
+
+Commercial use is permitted under the AGPL. Organisations that need proprietary redistribution, closed-source derivatives, embedding rights or other terms incompatible with the AGPL can enquire about an **alternative commercial licence**.
+
+Contributions are welcome. Contributors retain ownership of their work, and StygNox uses a Contributor Licence Agreement to preserve both the open-source community edition and the project's ability to offer alternative commercial licensing.
+
+We also care about provenance: significant ideas, design work, implementation, testing and review should be credited through the project records and release notes.
+
+See:
+
+- [`LICENSE`](LICENSE)
+- [`LICENSING.md`](LICENSING.md)
+- [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md)
+- [`CLA.md`](CLA.md)
+- [`RECOGNITION.md`](RECOGNITION.md)
+- [`CONTRIBUTING-LICENSING.md`](CONTRIBUTING-LICENSING.md)
+
+If StygNox is useful to you or your organisation, contributions and voluntary sponsorship are appreciated.
+`
