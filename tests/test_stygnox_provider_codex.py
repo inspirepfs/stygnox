@@ -112,6 +112,35 @@ class InstalledCodexMetricTests(TestCase):
             result["metrics"],
         )
 
+    def test_execute_structured_supports_planning_schema_without_changing_default_contract(self) -> None:
+        custom_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"steps": {"type": "array"}},
+            "required": ["steps"],
+        }
+
+        def fake_run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+            output_path = Path(args[args.index("-o") + 1])
+            output_path.write_text('{"steps":[{"id":1}]}', encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, json.dumps({"type": "turn.completed", "usage": {"input_tokens": 7}}))
+
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(provider_codex, "_preflight"), \
+             mock.patch.object(provider_codex, "_run", side_effect=fake_run):
+            result = provider_codex.execute_structured(
+                cwd=Path(td),
+                prompt="plan",
+                model="gpt-test",
+                effort="high",
+                repository_authority="read-only",
+                result_schema=custom_schema,
+            )
+
+        self.assertEqual({"steps": [{"id": 1}]}, result["payload"])
+        self.assertEqual("read-only", result["sandbox"])
+        self.assertEqual(7, result["metrics"]["input_tokens"])
+
 
 if __name__ == "__main__":
     import unittest

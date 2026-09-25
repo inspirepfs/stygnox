@@ -105,19 +105,23 @@ def _append_jsonl(path: Path, row: Mapping[str, Any]) -> None:
             os.close(fd)
 
 
-def record_controller_turn(
+def record_provider_turn(
     project: Path,
     *,
-    preview_sha256: str,
+    evidence_sha256: str,
+    scope: str,
     transaction_id: str,
     repository_authority: str,
     provider_result: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Append one completed installed-provider turn to durable local accounting."""
     root = adoption.resolve_worktree(project)
-    preview = str(preview_sha256 or "").strip().lower()
-    if not _HEX64.fullmatch(preview):
-        raise UsageError("usage accounting requires the exact 64-character preview SHA-256")
+    evidence = str(evidence_sha256 or "").strip().lower()
+    if not _HEX64.fullmatch(evidence):
+        raise UsageError("usage accounting requires the exact 64-character evidence SHA-256")
+    selected_scope = str(scope or "").strip()
+    if not selected_scope or len(selected_scope) > 80:
+        raise UsageError("usage accounting scope must be 1-80 characters")
     recorded_ns = time.time_ns()
     metrics = _normalise_metrics(provider_result.get("metrics") if isinstance(provider_result, Mapping) else None)
     row: dict[str, Any] = {
@@ -125,7 +129,9 @@ def record_controller_turn(
         "product_version": PRODUCT.version,
         "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "recorded_ns": recorded_ns,
-        "preview_sha256": preview,
+        "scope": selected_scope,
+        "evidence_sha256": evidence,
+        "preview_sha256": evidence if selected_scope == "controller-turn" else None,
         "transaction_id": str(transaction_id or "") or None,
         "repository_authority": str(repository_authority or "") or None,
         "provider": str(provider_result.get("provider") or "") or None,
@@ -136,6 +142,25 @@ def record_controller_turn(
     row["record_sha256"] = _digest(row)
     _append_jsonl(_ledger_path(root, create_runtime=True), row)
     return row
+
+
+def record_controller_turn(
+    project: Path,
+    *,
+    preview_sha256: str,
+    transaction_id: str,
+    repository_authority: str,
+    provider_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Backward-compatible controller-turn wrapper over generic provider accounting."""
+    return record_provider_turn(
+        project,
+        evidence_sha256=preview_sha256,
+        scope="controller-turn",
+        transaction_id=transaction_id,
+        repository_authority=repository_authority,
+        provider_result=provider_result,
+    )
 
 
 def _reset_info(root: Path) -> dict[str, Any]:

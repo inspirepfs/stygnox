@@ -98,26 +98,29 @@ def _preflight(cwd: Path) -> None:
         raise ProviderError(f"Codex sandbox preflight failed: {detail}")
 
 
-def execute(
+def execute_structured(
     *,
     cwd: Path,
     prompt: str,
     model: str,
     effort: str | None,
     repository_authority: str,
+    result_schema: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Execute one explicitly-authorised Codex turn and return structured output."""
+    """Execute one explicitly-authorised Codex turn against a caller-owned JSON schema."""
     if repository_authority not in {"read-only", "write"}:
         raise ProviderError("repository authority must be read-only or write")
     if not str(model or "").strip():
         raise ProviderError("Codex execution requires an explicitly reviewed model")
+    if not isinstance(result_schema, Mapping):
+        raise ProviderError("Codex structured execution requires a JSON schema object")
     _preflight(cwd)
     sandbox = "read-only" if repository_authority == "read-only" else "workspace-write"
     with tempfile.TemporaryDirectory(prefix="stygnox-codex-") as temp:
         base = Path(temp)
         schema_path = base / "schema.json"
         output_path = base / "result.json"
-        schema_path.write_text(json.dumps(_RESULT_SCHEMA), encoding="utf-8")
+        schema_path.write_text(json.dumps(dict(result_schema)), encoding="utf-8")
         command = ["codex", "exec", "--model", model]
         if effort:
             command += ["--config", f'model_reasoning_effort="{effort}"']
@@ -145,22 +148,51 @@ def execute(
             raise ProviderError(f"Codex returned invalid structured output: {exc}") from exc
         if not isinstance(payload, Mapping):
             raise ProviderError("Codex structured output must be a JSON object")
-        status = str(payload.get("status") or "")
-        summary = str(payload.get("summary") or "").strip()
-        raw_files = payload.get("files_inspected")
-        files_inspected = [str(item).strip() for item in raw_files] if isinstance(raw_files, list) else []
-        if any(not item for item in files_inspected):
-            raise ProviderError("Codex structured output contains an empty files_inspected entry")
-        if status not in {"PASS", "BLOCKED"} or not summary or not isinstance(raw_files, list):
-            raise ProviderError("Codex structured output failed the Stygnox result contract")
-        metrics["files_inspected"] = len(files_inspected)
         return {
             "provider": PROVIDER_NAME,
             "model": model,
             "effort": effort,
             "sandbox": sandbox,
-            "status": status,
-            "summary": summary,
-            "files_inspected": files_inspected,
+            "payload": dict(payload),
             "metrics": metrics,
         }
+
+
+def execute(
+    *,
+    cwd: Path,
+    prompt: str,
+    model: str,
+    effort: str | None,
+    repository_authority: str,
+) -> dict[str, Any]:
+    """Execute one explicitly-authorised implementation turn and return the Stygnox result contract."""
+    structured = execute_structured(
+        cwd=cwd,
+        prompt=prompt,
+        model=model,
+        effort=effort,
+        repository_authority=repository_authority,
+        result_schema=_RESULT_SCHEMA,
+    )
+    payload = structured["payload"]
+    status = str(payload.get("status") or "")
+    summary = str(payload.get("summary") or "").strip()
+    raw_files = payload.get("files_inspected")
+    files_inspected = [str(item).strip() for item in raw_files] if isinstance(raw_files, list) else []
+    if any(not item for item in files_inspected):
+        raise ProviderError("Codex structured output contains an empty files_inspected entry")
+    if status not in {"PASS", "BLOCKED"} or not summary or not isinstance(raw_files, list):
+        raise ProviderError("Codex structured output failed the Stygnox result contract")
+    metrics = dict(structured["metrics"])
+    metrics["files_inspected"] = len(files_inspected)
+    return {
+        "provider": structured["provider"],
+        "model": structured["model"],
+        "effort": structured["effort"],
+        "sandbox": structured["sandbox"],
+        "status": status,
+        "summary": summary,
+        "files_inspected": files_inspected,
+        "metrics": metrics,
+    }
