@@ -158,6 +158,7 @@ def open_gate(
     reason: str,
     human_resolvable: bool,
     allowed_new_test_candidates: Iterable[str] = (),
+    self_development_candidates: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Latch one exact human gate for the currently approved plan step."""
     root, active, tx, policy_status, name = planning._active_context(project, operator)
@@ -187,6 +188,16 @@ def open_gate(
     gate_id = f"HG-{sequence:04d}-{step_no:02d}"
     step = plan["steps"][step_no - 1]
     candidates = sorted({_normalize_repo_path(path) for path in allowed_new_test_candidates})
+    self_candidates: list[dict[str, Any]] = []
+    for raw in self_development_candidates:
+        if not isinstance(raw, Mapping):
+            raise HumanControlError("self-development gate candidate must be an evidence object")
+        row = dict(raw)
+        row["path"] = _normalize_repo_path(str(row.get("path") or ""))
+        if not str(row.get("candidate_sha256") or ""):
+            raise HumanControlError("self-development gate candidate lacks fingerprint evidence")
+        self_candidates.append(row)
+    self_candidates.sort(key=lambda row: str(row.get("path") or ""))
     gate: dict[str, Any] = {
         "schema": GATE_SCHEMA,
         "gate_id": gate_id,
@@ -204,6 +215,7 @@ def open_gate(
         "blocked_baseline_sha256": blocked_baseline["sha256"],
         "blocked_repository_evidence": dict(blocked_baseline),
         "allowed_new_test_candidates": candidates,
+        "self_development_candidates": self_candidates,
         "human_resolvable": bool(human_resolvable),
         "opened_at": _utc_now(),
     }
@@ -278,6 +290,8 @@ def _decision_preview(
     action = str(action).lower()
     if action not in {"steer", "resume", "resolve"}:
         raise HumanControlError(f"unsupported human decision action: {action}")
+    if gate.get("kind") == "self-development-authority":
+        raise HumanControlError("current tooling authority gate requires explicit self-development authorize; generic steer/resume/resolve cannot grant it")
     direction_text = _clean_text(direction, label="steering direction") if action == "steer" else None
     reason_text = _clean_text(reason, label=f"{action} reason") if action in {"resume", "resolve"} else None
     allowed: list[str] = []

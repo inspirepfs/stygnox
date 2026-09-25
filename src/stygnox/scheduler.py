@@ -425,6 +425,21 @@ def build_recovery_preview(project: Path, operator: str, pending_paths: Iterable
     policy_error = _policy_forbids_pending_tests(plan, int(state["current_step"]), before_manifest, declared)
     if policy_error:
         raise SchedulerError(policy_error)
+    self_development_grant_sha256 = None
+    from . import self_development
+    pending_self = [path for path in declared if self_development.is_self_development_path(root, path)]
+    if pending_self:
+        allowed, reason, grant = self_development.grant_allows_paths(
+            root,
+            plan_state,
+            plan_hash=str(state["plan_hash"]),
+            step=int(state["current_step"]),
+            baseline_sha256=str(state["turn_before_baseline_sha256"]),
+            paths=pending_self,
+        )
+        if not allowed:
+            raise SchedulerError(f"interrupted recovery refuses ungranted self-development delta: {reason}")
+        self_development_grant_sha256 = str((grant or {}).get("grant_sha256") or "")
     current = adoption.capture_baseline(root).public()
     body = {
         "schema": RECOVERY_PREVIEW_SCHEMA,
@@ -441,6 +456,7 @@ def build_recovery_preview(project: Path, operator: str, pending_paths: Iterable
         "pending_paths": declared,
         "pending_manifest_sha256": _digest(current_manifest),
         "recovered_baseline_sha256": current["sha256"],
+        "self_development_grant_sha256": self_development_grant_sha256,
         "requires_explicit_confirmation": True,
         "confirmation": "RECOVER",
     }
@@ -492,6 +508,17 @@ def recover_interrupted(project: Path, operator: str, pending_paths: Iterable[st
         )
     except planning.PlanningError as exc:
         raise SchedulerError(str(exc)) from exc
+    if preview.get("self_development_grant_sha256"):
+        from . import self_development
+        try:
+            self_development.expire_active_grant(
+                root,
+                operator,
+                expected_grant_sha256=str(preview["self_development_grant_sha256"]),
+                reason="interrupted self-development turn recovered",
+            )
+        except self_development.SelfDevelopmentError as exc:
+            raise SchedulerError(str(exc)) from exc
     state.update({
         "status": "RECOVERED_PARTIAL_TURN",
         "pid": None,

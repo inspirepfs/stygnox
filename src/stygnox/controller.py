@@ -249,7 +249,23 @@ def build_run_preview(
             "resume_reason": plan_context.get("resume_reason"),
             "allowed_new_tests": list(plan_context.get("allowed_new_tests") or []),
             "resumed_from_gate": plan_context.get("resumed_from_gate"),
+            "self_development_grant": dict(plan_context.get("self_development_grant")) if isinstance(plan_context.get("self_development_grant"), Mapping) else None,
         }
+        if plan_binding["self_development_grant"] is not None:
+            from . import self_development
+            state = planning._record(root)
+            assert state is not None
+            try:
+                grant = self_development.active_grant_for_context(
+                    root,
+                    state,
+                    plan_hash=str(plan_binding["plan_hash"]),
+                    step=int(plan_binding["current_step"]),
+                    baseline_sha256=str(plan_binding["step_authority_baseline_sha256"]),
+                )
+            except self_development.SelfDevelopmentError as exc:
+                raise ControllerError(str(exc)) from exc
+            plan_binding["self_development_grant"] = grant
     body: dict[str, Any] = {
         "schema": RUN_PREVIEW_SCHEMA,
         "product_version": PRODUCT.version,
@@ -298,6 +314,9 @@ def _prompt(preview: Mapping[str, Any]) -> str:
         allowed_tests = list(binding.get("allowed_new_tests") or [])
         if allowed_tests:
             steering += "Exact human-authorised new test paths: " + ", ".join(allowed_tests) + "\n"
+        self_grant = binding.get("self_development_grant") if isinstance(binding.get("self_development_grant"), Mapping) else None
+        if self_grant is not None:
+            steering += "Exact supervised Stygnox self-development paths for this retry only: " + ", ".join(self_grant.get("paths") or []) + "\n"
         plan_text = (
             f"This turn is bound to approved plan {binding['plan_hash']}, "
             f"step {binding['current_step']} of {binding['total_steps']} ({binding['step_title']}). "
@@ -347,9 +366,16 @@ def run_controller(
     before = adoption.capture_baseline(root).public()
     plan_binding = preview.get("plan_binding") if isinstance(preview.get("plan_binding"), Mapping) else None
     before_paths: set[str] = set()
-    if plan_binding is not None and preview["repository_authority"] == "write":
-        from . import human_control
-        before_paths = human_control.repository_paths(root)
+    before_manifest: dict[str, str] = {}
+    self_snapshot: dict[str, dict[str, Any]] = {}
+    active_self_grant = plan_binding.get("self_development_grant") if isinstance(plan_binding, Mapping) and isinstance(plan_binding.get("self_development_grant"), Mapping) else None
+    if preview["repository_authority"] == "write":
+        from . import scheduler, self_development
+        before_manifest = scheduler.repository_manifest(root)
+        self_snapshot = self_development.authority_snapshot(root)
+        if plan_binding is not None:
+            from . import human_control
+            before_paths = human_control.repository_paths(root)
     try:
         provider_result = provider_codex.execute(
             cwd=root,
@@ -360,9 +386,62 @@ def run_controller(
         )
     except provider_codex.ProviderError as exc:
         raise ControllerError(str(exc)) from exc
-    after = adoption.capture_baseline(root).public()
-    if preview["repository_authority"] == "read-only" and after.get("sha256") != before.get("sha256"):
+    attempted_after = adoption.capture_baseline(root).public()
+    if preview["repository_authority"] == "read-only" and attempted_after.get("sha256") != before.get("sha256"):
         raise ControllerError("read-only provider turn changed the project baseline")
+
+    self_development_evidence: dict[str, Any] | None = None
+    self_development_candidates: list[dict[str, Any]] = []
+    after = attempted_after
+    if preview["repository_authority"] == "write":
+        from . import scheduler, self_development
+        attempted_manifest = scheduler.repository_manifest(root)
+        self_development_candidates = self_development.candidate_evidence(root, before_manifest, attempted_manifest)
+        if self_development_candidates:
+            changed_self = [str(row["path"]) for row in self_development_candidates]
+            allowed = False
+            grant_reason = "no approved plan-bound self-development authority"
+            grant = None
+            if plan_binding is not None:
+                from . import planning as planning_module
+                state = planning_module._record(root)
+                assert state is not None
+                allowed, grant_reason, grant = self_development.grant_allows_paths(
+                    root,
+                    state,
+                    plan_hash=str(plan_binding["plan_hash"]),
+                    step=int(plan_binding["current_step"]),
+                    baseline_sha256=str(before["sha256"]),
+                    paths=changed_self,
+                )
+            if not allowed:
+                try:
+                    restored = self_development.restore_authority_snapshot(root, self_snapshot, changed_self)
+                except self_development.SelfDevelopmentError as exc:
+                    raise ControllerError(str(exc)) from exc
+                after = adoption.capture_baseline(root).public()
+                self_development_evidence = {
+                    "status": "RESTORED_UNAUTHORIZED",
+                    "changed_paths": changed_self,
+                    "restored_paths": restored,
+                    "grant_reason": grant_reason,
+                    "grant_sha256": grant.get("grant_sha256") if isinstance(grant, Mapping) else None,
+                    "candidates": self_development_candidates,
+                }
+                if plan_binding is None:
+                    raise ControllerError(
+                        "provider attempted Stygnox self-development without an approved plan/gate authority; original contents restored"
+                    )
+            else:
+                self_development_evidence = {
+                    "status": "AUTHORIZED",
+                    "changed_paths": changed_self,
+                    "restored_paths": [],
+                    "grant_reason": grant_reason,
+                    "grant_sha256": grant.get("grant_sha256") if isinstance(grant, Mapping) else None,
+                    "candidates": self_development_candidates,
+                }
+
     from .operator import status_attribution
 
     attribution = status_attribution(before, after) if preview["repository_authority"] == "write" else {
@@ -392,7 +471,19 @@ def run_controller(
                 before_paths,
                 plan_binding.get("allowed_new_tests") or [],
             )
-        if violations:
+        if self_development_evidence is not None and self_development_evidence.get("status") == "RESTORED_UNAUTHORIZED":
+            human_gate = human_control.open_gate(
+                root,
+                str(preview["operator"]),
+                plan_binding=plan_binding,
+                origin_preview_sha256=expected,
+                blocked_baseline=after,
+                kind="self-development-authority",
+                reason=f"provider attempted to change Stygnox controller/tooling authority: {self_development_evidence.get('changed_paths')!r}; original contents restored",
+                human_resolvable=False,
+                self_development_candidates=self_development_candidates,
+            )
+        elif violations:
             reason = f"policy violation: test paths {violations!r}"
             human_gate = human_control.open_gate(
                 root,
@@ -429,8 +520,8 @@ def run_controller(
         and not efficiency_result["requires_review_before_automatic_continuation"]
     ):
         try:
-            from . import planning
-            continuation = planning.record_same_step_continuation(
+            from . import planning as planning_module
+            continuation = planning_module.record_same_step_continuation(
                 root,
                 str(preview["operator"]),
                 plan_binding=plan_binding,
@@ -439,7 +530,19 @@ def run_controller(
                 after_baseline=after,
                 summary=str(provider_result.get("summary") or ""),
             )
-        except planning.PlanningError as exc:
+        except planning_module.PlanningError as exc:
+            raise ControllerError(str(exc)) from exc
+    self_development_expiration = None
+    if active_self_grant is not None:
+        from . import self_development
+        try:
+            self_development_expiration = self_development.expire_active_grant(
+                root,
+                str(preview["operator"]),
+                expected_grant_sha256=str(active_self_grant.get("grant_sha256") or ""),
+                reason="single reviewed controller retry completed",
+            )
+        except self_development.SelfDevelopmentError as exc:
             raise ControllerError(str(exc)) from exc
     result: dict[str, Any] = {
         "schema": RUN_RESULT_SCHEMA,
@@ -460,6 +563,8 @@ def run_controller(
         "after_baseline_sha256": after["sha256"],
         "project_changed": before["sha256"] != after["sha256"],
         "change_attribution": attribution,
+        "self_development": self_development_evidence,
+        "self_development_expiration": self_development_expiration,
         "human_gate": human_gate,
         "next_action": (
             "human-gate-required" if human_gate is not None

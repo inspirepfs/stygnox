@@ -70,6 +70,8 @@ def _active_authority(project: Path, operator_name: str, plan_hash: str | None =
     assert state is not None
     if state.get("status") != "APPROVED" or state.get("execution_authority_granted") is not True:
         raise ReconciliationError(f"reconciliation requires current APPROVED plan, found {state.get('status')}")
+    if state.get("self_development_grant") is not None:
+        raise ReconciliationError("reconciliation refuses an active self-development authority epoch; consume or expire it first")
     plan = planning._validate_plan(state.get("plan"))
     expected_hash = planning._plan_hash(plan)
     if state.get("plan_hash") != expected_hash:
@@ -185,15 +187,8 @@ def _runtime_or_protected(path: str) -> bool:
 
 
 def _self_development_path(root: Path, path: str) -> bool:
-    if not (root / "src" / "stygnox" / "product.py").is_file():
-        return False
-    return (
-        path == "pyproject.toml"
-        or path.startswith("src/stygnox/")
-        or path.startswith("tests/test_stygnox_")
-        or path == "scripts/ralph.py"
-        or path.startswith("scripts/stygnox")
-    )
+    from . import self_development
+    return self_development.is_self_development_path(root, path)
 
 
 def _validate_adoption(root: Path, state: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
@@ -201,7 +196,7 @@ def _validate_adoption(root: Path, state: Mapping[str, Any], candidate: Mapping[
     if _runtime_or_protected(path):
         raise ReconciliationError(f"carry-forward adoption refuses protected/runtime path: {path}")
     if _self_development_path(root, path):
-        raise ReconciliationError(f"carry-forward adoption of Stygnox tooling requires scoped self-development authority (CAP-011): {path}")
+        raise ReconciliationError(f"carry-forward adoption of Stygnox tooling remains outside ownership reconciliation; CAP-011 requires exact supervised controller self-development authority: {path}")
     plan = planning._validate_plan(state.get("plan"))
     step = plan["steps"][int(state["current_step"]) - 1]
     if _is_test_path(path):

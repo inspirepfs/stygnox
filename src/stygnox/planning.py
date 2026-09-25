@@ -359,6 +359,9 @@ def propose_plan(
         "carry_forward_adopted_paths": [],
         "carry_forward_outside_paths": [],
         "carry_forward_rejected_paths": [],
+        "self_development_grant": None,
+        "self_development_grant_history": [],
+        "self_development_expirations": [],
         "step_resume": None,
     }
     return {**_write(root, state), "result": "PLAN_AWAITING_APPROVAL"}
@@ -438,6 +441,7 @@ def approved_step_context(project: Path, operator: str) -> dict[str, Any] | None
         "resume_reason": (resume or {}).get("reason"),
         "allowed_new_tests": list((resume or {}).get("allowed_new_tests") or []),
         "resumed_from_gate": (resume or {}).get("gate_id"),
+        "self_development_grant": dict(state.get("self_development_grant")) if isinstance(state.get("self_development_grant"), Mapping) else None,
         "transaction_id": tx["transaction_id"],
     }
 
