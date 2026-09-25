@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any, Mapping
 
 
@@ -27,6 +28,53 @@ _RESULT_SCHEMA: dict[str, Any] = {
 
 class ProviderError(RuntimeError):
     """Fail-closed installed-provider error."""
+
+
+def _empty_metrics() -> dict[str, int | float]:
+    """Return the neutral metric shape retained from the historical provider boundary."""
+    return {
+        "commands_executed": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "codex_seconds": 0.0,
+    }
+
+
+def _update_metrics(metrics: dict[str, int | float], event: Mapping[str, Any]) -> None:
+    """Accumulate command count and latest completed-turn usage from one Codex event."""
+    event_type = str(event.get("type") or "")
+    item = event.get("item") if isinstance(event.get("item"), Mapping) else {}
+    if event_type == "item.completed" and str(item.get("type") or "") == "command_execution":
+        metrics["commands_executed"] = int(metrics.get("commands_executed") or 0) + 1
+    if event_type == "turn.completed":
+        usage = event.get("usage") if isinstance(event.get("usage"), Mapping) else {}
+        for key in (
+            "input_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        ):
+            metrics[key] = int(usage.get(key) or 0)
+
+
+def _metrics_from_jsonl(output: str) -> dict[str, int | float]:
+    """Parse Codex JSONL without allowing malformed operator output to break execution."""
+    metrics = _empty_metrics()
+    for raw in str(output or "").splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, Mapping):
+            _update_metrics(metrics, event)
+    return metrics
 
 
 def _run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -83,7 +131,10 @@ def execute(
             str(output_path),
             prompt,
         ]
+        started = time.monotonic()
         result = _run(command, cwd=cwd)
+        metrics = _metrics_from_jsonl(result.stdout)
+        metrics["codex_seconds"] = max(0.0, time.monotonic() - started)
         if result.returncode != 0:
             detail = result.stdout[-4000:].strip() or f"exit={result.returncode}"
             raise ProviderError(f"Codex execution failed: {detail}")
@@ -104,4 +155,5 @@ def execute(
             "sandbox": sandbox,
             "status": status,
             "summary": summary,
+            "metrics": metrics,
         }
