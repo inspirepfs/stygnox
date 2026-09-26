@@ -143,6 +143,20 @@ def start_web(stygnox: Path, fixture: Path, env: dict[str, str]) -> tuple[subpro
     return process, base, csrf_match.group(1)
 
 
+def qualify_unauthenticated_remote_bind(stygnox: Path, fixture: Path, env: dict[str, str]) -> dict:
+    """Prove remote Web binding fails closed from a real Git-backed project fixture."""
+    init_repo(fixture, commit=True)
+    refused = run(
+        str(stygnox), "web", "--project", str(fixture),
+        "--host", "0.0.0.0", "--port", "0", env=env, check=False,
+    )
+    if refused.returncode != 2 or "requires credentials" not in refused.stderr:
+        raise RuntimeError(
+            "unauthenticated non-loopback Web binding did not fail closed from a Git-backed project fixture"
+        )
+    return {"bind": "0.0.0.0", "credentials": "ABSENT", "result": "REFUSED"}
+
+
 def qualify_authenticated_remote_bind(stygnox: Path, python: Path, fixture: Path, env: dict[str, str]) -> dict:
     username = "D8.6A-Remote"
     password = "qualification-password"
@@ -300,11 +314,11 @@ def main() -> int:
         version = run(str(stygnox), "--version", env=env).stdout.strip()
         if version != f"stygnox {VERSION}":
             raise RuntimeError(f"unexpected installed version: {version}")
-        nonloop = run(str(stygnox), "web", "--project", str(ROOT), "--host", "0.0.0.0", "--port", "0", env=env, check=False)
-        if nonloop.returncode != 2 or "requires credentials" not in nonloop.stderr:
-            raise RuntimeError("unauthenticated non-loopback Web binding did not fail closed")
-
         fixtures = work / "fixtures"
+        unauthenticated_remote = qualify_unauthenticated_remote_bind(
+            stygnox, fixtures / "remote-unauthenticated", env
+        )
+
         new = fixtures / "new-unborn"
         clean = fixtures / "clean"
         dirty = fixtures / "dirty"
@@ -338,6 +352,7 @@ def main() -> int:
             "cli_web_preview_parity": "PASS",
             "branding_authority": "PASS",
             "csrf_mutation_gate": "PASS",
+            "unauthenticated_remote_bind_policy": unauthenticated_remote,
             "authenticated_remote_bind_policy": remote_bind,
             "legacy_ralph_web_fallback": "REFUSED",
             "carry_forward_auto_adopt": False,

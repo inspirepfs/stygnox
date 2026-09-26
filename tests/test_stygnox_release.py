@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
 import tempfile
 import sys
 from unittest import TestCase, mock
@@ -15,6 +17,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 VERSION = runpy.run_path(str(ROOT / "src/stygnox/_version.py"))["__version__"]
 
 
@@ -116,3 +120,82 @@ class StygnoxReleaseTests(TestCase):
         d86b = (SCRIPTS / "qualify_d8_6b_tui.py").read_text(encoding="utf-8")
         self.assertIn("_version.py", d86b)
         self.assertNotIn('VERSION = "0.1.0.dev7"', d86b)
+    def test_d85_fake_provider_tracks_current_metadata_and_result_contract(self) -> None:
+        qualifier = load_script("qualify_d8_5_controller.py")
+        with tempfile.TemporaryDirectory(prefix="stygnox-d85-fake-contract-") as td:
+            root = Path(td)
+            fakebin = root / "bin"
+            log = root / "fake-codex.jsonl"
+            codex = qualifier.make_fake_codex(fakebin, log)
+            env = os.environ.copy()
+            env["STYGNOX_FAKE_CODEX_LOG"] = str(log)
+
+            proc = subprocess.Popen(
+                [str(codex), "app-server", "--stdio"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1, env=env,
+            )
+            try:
+                assert proc.stdin is not None and proc.stdout is not None
+                for rid, method, params in (
+                    (1, "initialize", {"clientInfo": {"name": "test"}}),
+                    (2, "model/list", {"limit": 100, "cursor": None, "includeHidden": False}),
+                    (3, "account/rateLimits/read", None),
+                ):
+                    request = {"jsonrpc": "2.0", "id": rid, "method": method}
+                    if params is not None:
+                        request["params"] = params
+                    proc.stdin.write(json.dumps(request) + "\n")
+                    proc.stdin.flush()
+                    response = json.loads(proc.stdout.readline())
+                    self.assertEqual(rid, response["id"])
+                    result = response["result"]
+                    if method == "model/list":
+                        models = {row["model"]: row for row in result["data"]}
+                        self.assertIn("gpt-5.6-terra", models)
+                        efforts = {row["reasoningEffort"] for row in models["gpt-5.6-terra"]["supportedReasoningEfforts"]}
+                        self.assertIn("high", efforts)
+                    elif method == "account/rateLimits/read":
+                        self.assertIs(result["ordinaryUsageAllowed"], True)
+                        self.assertIn("codex", result["rateLimitsByLimitId"])
+                proc.stdin.close()
+                proc.wait(timeout=3)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                if proc.stdout is not None:
+                    proc.stdout.close()
+                if proc.stderr is not None:
+                    proc.stderr.close()
+
+            output = root / "result.json"
+            subprocess.run(
+                [str(codex), "exec", "--model", "gpt-5.6-terra", "-o", str(output), "qualification"],
+                env=env, check=True, text=True, capture_output=True,
+            )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {"status", "summary", "blocker_class", "blockers", "validation_notes", "files_inspected"},
+                set(payload),
+            )
+            self.assertEqual("PASS", payload["status"])
+            self.assertEqual("none", payload["blocker_class"])
+
+    def test_d86a_remote_auth_refusal_uses_git_backed_fixture_not_source_root(self) -> None:
+        qualifier = load_script("qualify_d8_6a_web.py")
+        with tempfile.TemporaryDirectory(prefix="stygnox-d86a-remote-fixture-") as td:
+            fixture = Path(td) / "project"
+            refused = subprocess.CompletedProcess(
+                args=["stygnox", "web"], returncode=2, stdout="",
+                stderr="stygnox: web refused: non-loopback binding requires credentials",
+            )
+            with mock.patch.object(qualifier, "init_repo") as init_repo, mock.patch.object(
+                qualifier, "run", return_value=refused
+            ) as run:
+                result = qualifier.qualify_unauthenticated_remote_bind(Path("/bin/stygnox"), fixture, {})
+            init_repo.assert_called_once_with(fixture, commit=True)
+            argv = run.call_args.args
+            self.assertIn(str(fixture), argv)
+            self.assertNotIn(str(ROOT), argv)
+            self.assertEqual("REFUSED", result["result"])

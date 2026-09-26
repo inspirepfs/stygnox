@@ -122,6 +122,7 @@ def assert_neutral_profile(stygnox: Path, fixture: Path, env: dict[str, str]) ->
 
 
 def make_fake_codex(fakebin: Path, log: Path) -> Path:
+    """Install a zero-model fake matching the current Codex metadata/result contract."""
     fakebin.mkdir(parents=True, exist_ok=True)
     path = fakebin / "codex"
     path.write_text(
@@ -131,12 +132,29 @@ def make_fake_codex(fakebin: Path, log: Path) -> Path:
         "args=sys.argv[1:]\n"
         "log=Path(os.environ['STYGNOX_FAKE_CODEX_LOG'])\n"
         "with log.open('a', encoding='utf-8') as f: f.write(json.dumps(args)+'\\n')\n"
+        "if args and args[0]=='app-server':\n"
+        "    for raw in sys.stdin:\n"
+        "        try: msg=json.loads(raw)\n"
+        "        except Exception: continue\n"
+        "        rid=msg.get('id')\n"
+        "        if rid is None: continue\n"
+        "        method=msg.get('method')\n"
+        "        if method=='initialize': result={}\n"
+        "        elif method=='model/list':\n"
+        "            result={'data':[{'model':'gpt-5.6-terra','displayName':'GPT-5.6 Terra','isDefault':True,'supportedReasoningEfforts':[{'reasoningEffort':x} for x in ['low','medium','high','xhigh','max','ultra']],'defaultReasoningEffort':'high'},{'model':'gpt-different','displayName':'Qualification Alternate','isDefault':False,'supportedReasoningEfforts':[{'reasoningEffort':'high'}],'defaultReasoningEffort':'high'}]}\n"
+        "        elif method=='account/rateLimits/read':\n"
+        "            result={'ordinaryUsageAllowed':True,'rateLimitsByLimitId':{'codex':{'planType':'qualification','primary':{'usedPercent':0,'windowDurationMins':300},'secondary':{'usedPercent':0,'windowDurationMins':10080}}},'rateLimitResetCredits':{'availableCount':0,'credits':[]}}\n"
+        "        elif method=='account/rateLimitResetCredit/consume': result={'outcome':'noCredit'}\n"
+        "        else: result={}\n"
+        "        print(json.dumps({'jsonrpc':'2.0','id':rid,'result':result}), flush=True)\n"
+        "    raise SystemExit(0)\n"
         "if args and args[0]=='sandbox': raise SystemExit(0)\n"
         "if not args or args[0] != 'exec': raise SystemExit(64)\n"
         "try: out=Path(args[args.index('-o')+1])\n"
         "except Exception: raise SystemExit(65)\n"
-        "out.write_text(json.dumps({'status':'PASS','summary':'D8.5 fake provider turn complete'}), encoding='utf-8')\n"
-        "print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}))\n"
+        "payload={'status':'PASS','summary':'D8.5 fake provider turn complete','blocker_class':'none','blockers':[],'validation_notes':['qualification fake provider'],'files_inspected':[]}\n"
+        "out.write_text(json.dumps(payload), encoding='utf-8')\n"
+        "print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'cached_input_tokens':0,'cache_write_input_tokens':0,'output_tokens':1,'reasoning_output_tokens':0}}))\n"
         "raise SystemExit(0)\n",
         encoding="utf-8",
     )
