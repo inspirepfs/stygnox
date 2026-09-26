@@ -186,7 +186,7 @@ def _blockers(*, lifecycle_errors: list[dict[str, Any]], phase: str, gate: Mappi
     return rows
 
 
-def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None, controller_state: Mapping[str, Any] | None, gate: Mapping[str, Any], sched: Mapping[str, Any], recon: Mapping[str, Any], qual: Mapping[str, Any], latest: Mapping[str, Any] | None, blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None, controller_state: Mapping[str, Any] | None, state: Mapping[str, Any] | None, gate: Mapping[str, Any], sched: Mapping[str, Any], recon: Mapping[str, Any], qual: Mapping[str, Any], latest: Mapping[str, Any] | None, blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if any(row.get("code") == "INVALID_EVIDENCE" for row in blockers):
         return []
     if not adopted:
@@ -197,7 +197,16 @@ def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None
         return [{"action": "recovery.preview", "reason": f"transaction state is {transaction.get('state')}"}]
     if not isinstance(controller_state, Mapping) or controller_state.get("enabled") is not True:
         return [{"action": "controller.activate", "reason": "transaction is active but controller authority is inactive"}]
-    if phase in {"CONTROLLER_READY", "REJECTED"}:
+    if phase in {"CONTROLLER_READY", "REJECTED", "IDLE"}:
+        if phase == "IDLE" and isinstance(state, Mapping):
+            history = state.get("retired_plans") if isinstance(state.get("retired_plans"), list) else []
+            latest_retirement = history[-1] if history and isinstance(history[-1], Mapping) else {}
+            if latest_retirement.get("disposition") == "RETIRED_WITH_CARRY_FORWARD":
+                return [{
+                    "action": "plan.propose-replacement-preview",
+                    "reason": "latest retired plan preserved carry-forward work that must be bound to a replacement plan",
+                    "retirement_record_id": latest_retirement.get("record_id"),
+                }]
         return [{"action": "plan.propose-preview", "reason": "no approved execution plan currently governs the repository"}]
     if phase == "AWAITING_APPROVAL":
         return [
@@ -214,6 +223,7 @@ def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None
             rows.append({"action": "gate.resolve-preview", "reason": "approved step explicitly delegates human-owned acceptance"})
         if str(active.get("kind") or "") == "self-development":
             rows.insert(0, {"action": "self-development.authorize-preview", "reason": "exact Stygnox tooling paths require supervised authority"})
+        rows.append({"action": "plan.retire-preview", "reason": "retire the exact blocked plan by rollback or carry-forward"})
         return rows
     if phase == "APPROVED":
         sched_state = sched.get("scheduler") if isinstance(sched.get("scheduler"), Mapping) else {}
@@ -226,15 +236,17 @@ def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None
         return [
             {"action": "scheduler.run-preview", "reason": "run bounded approved-plan continuation"},
             {"action": "controller.run-preview", "reason": "run one explicitly reviewed controller turn"},
+            {"action": "plan.retire-preview", "reason": "retire the exact active plan by rollback or carry-forward"},
         ]
     if phase == "STEPS_COMPLETE":
-        return [{"action": "qualification.preview", "reason": "all approved steps require terminal qualification"}]
+        return [{"action": "qualification.preview", "reason": "all approved steps require terminal qualification"}, {"action": "plan.retire-preview", "reason": "retire completed uncommitted plan work before finalization"}]
     if phase == "READY_TO_COMMIT":
         if qual.get("available") is True and qual.get("qualified_current_repository") is not True:
             return [{"action": "qualification.requalify-preview", "reason": "repository changed after qualification"}]
         return [
             {"action": "finalization.commit-preview", "reason": "qualified write plan is ready for controlled commit"},
             {"action": "qualification.requalify-preview", "reason": "explicitly refresh final qualification before commit"},
+            {"action": "plan.retire-preview", "reason": "retire qualified but uncommitted plan work"},
         ]
     if phase == "COMMITTED":
         return [{"action": "finalization.push-preview", "reason": "recorded qualified commit may be pushed after upstream revalidation"}]
@@ -275,6 +287,7 @@ def build_lifecycle_snapshot(
         adopted=adopted,
         transaction=transaction,
         controller_state=controller_state,
+        state=state,
         gate=gate,
         sched=sched,
         recon=recon,

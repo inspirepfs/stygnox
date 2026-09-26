@@ -84,7 +84,7 @@ class StygnoxOperatorStateTests(TestCase):
             self.assertEqual(100, life["progress"]["percent_complete"])
             self.assertTrue(life["qualification"]["qualified_current_repository"])
             self.assertEqual("READY_TO_COMMIT", life["finalization"]["plan_status"])
-            self.assertEqual(["finalization.commit-preview", "qualification.requalify-preview"], [row["action"] for row in life["next_actions"]])
+            self.assertEqual(["finalization.commit-preview", "qualification.requalify-preview", "plan.retire-preview"], [row["action"] for row in life["next_actions"]])
 
     def test_committed_and_pushed_phases_project_exact_git_closure(self) -> None:
         with tempfile.TemporaryDirectory() as td:

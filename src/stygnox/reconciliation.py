@@ -142,7 +142,32 @@ def _candidate_rows(root: Path, state: Mapping[str, Any], raw: Mapping[str, Any]
         }
         body["candidate_sha256"] = _digest(body)
         rows.append(body)
-    return rows
+
+    inherited = state.get("retirement_carry_forward_candidates") if isinstance(state.get("retirement_carry_forward_candidates"), list) else []
+    existing_paths = {row["path"] for row in rows}
+    for raw in inherited:
+        if not isinstance(raw, Mapping):
+            raise ReconciliationError("replacement retirement candidate evidence is malformed")
+        path = _normalize_path(str(raw.get("path") or ""))
+        if path in existing_paths:
+            rows = [row for row in rows if row["path"] != path]
+        expected = str(raw.get("retirement_fingerprint") or "")
+        current_fp = manifest.get(path, "missing")
+        body = {
+            "path": path,
+            "classification": "retired-carry-forward",
+            "status_code": status_codes.get(path, ""),
+            "content_fingerprint": current_fp,
+            "approval_presence": "present" if raw.get("approval_presence") == "present" else "absent",
+            "retirement_record_id": raw.get("retirement_record_id"),
+            "retirement_manifest_sha256": raw.get("retirement_manifest_sha256"),
+            "retirement_fingerprint": expected,
+            "inherited_fingerprint_matches": current_fp == expected,
+        }
+        body["candidate_sha256"] = _digest(body)
+        rows.append(body)
+        existing_paths.add(path)
+    return sorted(rows, key=lambda row: str(row.get("path") or ""))
 
 
 def _actions(state: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -193,6 +218,8 @@ def _self_development_path(root: Path, path: str) -> bool:
 
 def _validate_adoption(root: Path, state: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
     path = str(candidate["path"])
+    if candidate.get("classification") == "retired-carry-forward" and candidate.get("inherited_fingerprint_matches") is not True:
+        raise ReconciliationError(f"carry-forward candidate changed since retirement: {path}")
     if _runtime_or_protected(path):
         raise ReconciliationError(f"carry-forward adoption refuses protected/runtime path: {path}")
     if _self_development_path(root, path):
@@ -414,7 +441,7 @@ def overlay_attribution(project: Path, raw: Mapping[str, Any]) -> dict[str, Any]
             LEFT_OUTSIDE: "outside_plan",
             REJECTED: "rejected_external",
         }[str(action["disposition"])]
-        for source in ("operator_baseline", "external", "unresolved"):
+        for source in ("operator_baseline", "controller_native", "external", "unresolved"):
             block = categories.get(source)
             if isinstance(block, dict) and path in block.get("paths", []):
                 block["paths"] = [item for item in block["paths"] if item != path]

@@ -203,7 +203,10 @@ def _proposal_schema(minimum: int, maximum: int) -> dict[str, Any]:
     }
 
 
-def _planning_prompt(goal: str, minimum: int, maximum: int) -> str:
+def _planning_prompt(goal: str, minimum: int, maximum: int, retirement_context: Mapping[str, Any] | None = None) -> str:
+    carry = ""
+    if retirement_context:
+        carry = ("\n\nReplacement-plan retirement context (controller-owned evidence; retained paths require explicit reconciliation):\n" + json.dumps(dict(retirement_context), indent=2, sort_keys=True))
     return (
         "You are the read-only planning worker invoked by the installed Stygnox controller. "
         "The operator goal, planning bounds, repository authority, approval, and execution authority are controller-owned. "
@@ -214,22 +217,49 @@ def _planning_prompt(goal: str, minimum: int, maximum: int) -> str:
         "Do not execute implementation work and do not modify the repository. "
         "Report every repository file inspected in files_inspected.\n\n"
         f"Operator goal:\n{goal}\n"
+        + carry
     )
 
 
 def build_proposal_preview(
     project: Path,
     operator: str,
-    goal: str,
+    goal: str | None,
     repository_authority: str,
     *,
     min_steps: int | None = None,
     max_steps: int | None = None,
+    from_retirement: str | None = None,
 ) -> dict[str, Any]:
     root, active, tx, policy_status, name = _active_context(project, operator)
     existing = _record(root, required=False)
-    if existing and existing.get("status") in {"AWAITING_APPROVAL", "APPROVED", "BLOCKED_HUMAN", "STEPS_COMPLETE"}:
+    if existing and existing.get("status") in {"AWAITING_APPROVAL", "APPROVED", "BLOCKED_HUMAN", "STEPS_COMPLETE", "READY_TO_COMMIT", "COMMITTED", "PUSHED", "READ_ONLY_COMPLETE"}:
         raise PlanningError(f"cannot propose while plan status={existing.get('status')}; reject/complete the active plan first")
+    retirement_context = None
+    goal_value = str(goal or "").strip()
+    if existing and existing.get("status") == "IDLE" and not from_retirement:
+        history = existing.get("retired_plans") if isinstance(existing.get("retired_plans"), list) else []
+        latest = history[-1] if history and isinstance(history[-1], Mapping) else {}
+        if latest.get("disposition") == "RETIRED_WITH_CARRY_FORWARD":
+            raise PlanningError("latest retirement preserved carry-forward work; replacement proposal must use --from-retirement")
+    if from_retirement:
+        from . import retirement
+        if not existing or existing.get("status") != "IDLE":
+            raise PlanningError("replacement proposal requires an IDLE retired-plan state")
+        try:
+            manifest = retirement.latest_carry_forward_retirement(root, existing, str(from_retirement))
+        except retirement.RetirementError as exc:
+            raise PlanningError(str(exc)) from exc
+        if not goal_value:
+            goal_value = f"Continue from {manifest['record_id']} to resolve retirement condition: {manifest['reason']}"
+        retirement_context = {
+            "record_id": manifest["record_id"],
+            "manifest_sha256": manifest["manifest_sha256"],
+            "source_plan_hash": manifest["plan_hash"],
+            "reason": manifest["reason"],
+            "historical_goal": (manifest.get("planning_context") or {}).get("goal"),
+            "preserved_paths": list((manifest.get("operations") or {}).get("preserved") or []),
+        }
     minimum, maximum = proposal_step_bounds(min_steps, max_steps)
     authority = _authority(repository_authority)
     current = adoption.capture_baseline(root).public()
@@ -244,7 +274,8 @@ def build_proposal_preview(
         "transaction_id": tx["transaction_id"],
         "controller_record_sha256": active["record_sha256"],
         "project_baseline": current,
-        "goal": _goal(goal),
+        "goal": _goal(goal_value),
+        "retirement_context": retirement_context,
         "planning": {"min_steps": minimum, "max_steps": maximum},
         "repository_authority": authority,
         "provider": policy["provider"],
@@ -264,13 +295,14 @@ def build_proposal_preview(
 def propose_plan(
     project: Path,
     operator: str,
-    goal: str,
+    goal: str | None,
     repository_authority: str,
     preview_sha256: str,
     confirmation: str,
     *,
     min_steps: int | None = None,
     max_steps: int | None = None,
+    from_retirement: str | None = None,
 ) -> dict[str, Any]:
     if confirmation != "PROPOSE":
         raise PlanningError("explicit confirmation required: --confirm PROPOSE")
@@ -284,6 +316,7 @@ def propose_plan(
         repository_authority,
         min_steps=min_steps,
         max_steps=max_steps,
+        from_retirement=from_retirement,
     )
     if preview["preview_sha256"] != expected:
         raise PlanningError("plan proposal preview is stale; authority, policy, goal, bounds, or project baseline changed")
@@ -293,7 +326,7 @@ def propose_plan(
     try:
         provider = provider_codex.execute_structured(
             cwd=root,
-            prompt=_planning_prompt(str(preview["goal"]), minimum, maximum),
+            prompt=_planning_prompt(str(preview["goal"]), minimum, maximum, preview.get("retirement_context")),
             model=str(preview["model"]),
             effort=preview.get("effort"),
             repository_authority="read-only",
@@ -326,6 +359,23 @@ def propose_plan(
         repository_authority="read-only",
         provider_result=provider_result,
     )
+    previous = _record(root, required=False)
+    retired_history = [dict(row) for row in (previous.get("retired_plans") or []) if isinstance(row, Mapping)] if isinstance(previous, Mapping) else []
+    retirement_context = preview.get("retirement_context") if isinstance(preview.get("retirement_context"), Mapping) else None
+    retirement_candidates: list[dict[str, Any]] = []
+    if retirement_context:
+        from . import retirement
+        manifest = retirement.load_retirement(root, str(retirement_context["record_id"]), str(retirement_context["manifest_sha256"]))
+        for row in manifest.get("paths") or []:
+            if isinstance(row, Mapping) and row.get("action") == "preserve":
+                retirement_candidates.append({
+                    "path": row.get("path"),
+                    "source": row.get("source"),
+                    "approval_presence": row.get("approval_presence"),
+                    "retirement_fingerprint": (row.get("current") or {}).get("fingerprint") if isinstance(row.get("current"), Mapping) else None,
+                    "retirement_record_id": manifest["record_id"],
+                    "retirement_manifest_sha256": manifest["manifest_sha256"],
+                })
     state: dict[str, Any] = {
         "schema": PLAN_SCHEMA,
         "product_version": PRODUCT.version,
@@ -368,6 +418,12 @@ def propose_plan(
         "final_qualification": None,
         "qualified_at": None,
         "step_resume": None,
+        "retired_plans": retired_history,
+        "retirement_record_id": retirement_context.get("record_id") if retirement_context else None,
+        "retirement_manifest_sha256": retirement_context.get("manifest_sha256") if retirement_context else None,
+        "retirement_carry_forward_candidates": retirement_candidates,
+        "approval_rollback_snapshot": None,
+        "retirement_rollback_preview": None,
     }
     return {**_write(root, state), "result": "PLAN_AWAITING_APPROVAL"}
 
@@ -609,6 +665,11 @@ def approve_plan(project: Path, operator: str, plan_hash: str, confirmation: str
     updated["approval_repository_evidence"] = current
     from . import scheduler
     updated["approval_repository_manifest"] = scheduler.repository_manifest(root)
+    from . import retirement
+    try:
+        updated["approval_rollback_snapshot"] = retirement.capture_approval_snapshot(root, expected, updated["approval_repository_manifest"])
+    except retirement.RetirementError as exc:
+        raise PlanningError(str(exc)) from exc
     updated["transaction_recovery_baseline_sha256"] = tx.get("authority_baseline_sha256")
     updated["step_authority_baseline_sha256"] = current["sha256"]
     updated["execution_authority_granted"] = True
@@ -669,10 +730,11 @@ def build_parser() -> argparse.ArgumentParser:
     def proposal_args(command: argparse.ArgumentParser) -> None:
         command.add_argument("--project", type=Path, default=Path.cwd())
         command.add_argument("--operator", required=True)
-        command.add_argument("--goal", required=True)
+        command.add_argument("--goal")
         command.add_argument("--repository-authority", required=True, choices=sorted(_AUTHORITIES))
         command.add_argument("--min-steps", type=int, default=PLAN_MIN_STEPS_DEFAULT)
         command.add_argument("--max-steps", type=int, default=PLAN_MAX_STEPS_DEFAULT)
+        command.add_argument("--from-retirement")
 
     preview = sub.add_parser("propose-preview", help="preview one exact read-only planning request")
     proposal_args(preview)
@@ -706,13 +768,13 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
         elif args.action == "propose-preview":
             result = build_proposal_preview(
                 args.project, args.operator, args.goal, args.repository_authority,
-                min_steps=args.min_steps, max_steps=args.max_steps,
+                min_steps=args.min_steps, max_steps=args.max_steps, from_retirement=args.from_retirement,
             )
         elif args.action == "propose":
             result = propose_plan(
                 args.project, args.operator, args.goal, args.repository_authority,
                 args.preview, args.confirm,
-                min_steps=args.min_steps, max_steps=args.max_steps,
+                min_steps=args.min_steps, max_steps=args.max_steps, from_retirement=args.from_retirement,
             )
         elif args.action == "approve":
             result = approve_plan(args.project, args.operator, args.plan_hash, args.confirm)

@@ -228,6 +228,7 @@
 
   function lifecyclePayload(name){
     const {lifecycle,progress,gate,operator}=lifecycleIdentity();
+    const canonicalRow=(lifecycle?.next_actions||[]).find((row)=>row?.action===name) || {};
     const payload={operator};
     if(progress.plan_hash) payload.plan_hash=progress.plan_hash;
     if(gate.gate_id) payload.gate_id=gate.gate_id;
@@ -235,7 +236,9 @@
       payload.goal=val('lifecycle-goal'); payload.repository_authority=val('lifecycle-repo-authority')||'write';
       const min=numeric('lifecycle-min-steps'), max=numeric('lifecycle-max-steps');
       if(min!==undefined) payload.min_steps=min; if(max!==undefined) payload.max_steps=max;
+      if(name.startsWith('plan.propose-replacement')) payload.retirement_record_id=canonicalRow.retirement_record_id || lifecycle?.plan?.plan?.retirement_record_id || '';
     }
+    if(name.startsWith('plan.retire')){ payload.reason=val('lifecycle-reason'); payload.disposition=val('lifecycle-retirement-disposition')||'carry-forward'; }
     if(name.startsWith('gate.steer')){ payload.direction=val('lifecycle-direction'); payload.allow_new_tests=lines('lifecycle-allow-tests'); }
     if(name.startsWith('gate.resume') || name.startsWith('gate.resolve') || name==='plan.reject') payload.reason=val('lifecycle-reason');
     if(name.startsWith('self-development.')){ payload.paths=lines('lifecycle-paths'); payload.reason=val('lifecycle-reason'); }
@@ -255,6 +258,8 @@
     'adopt.preview':['adopt.handoff','HANDOFF'],
     'recovery.preview':['recovery.restore','RESTORE'],
     'plan.propose-preview':['plan.propose','PROPOSE'],
+    'plan.propose-replacement-preview':['plan.propose-replacement','PROPOSE'],
+    'plan.retire-preview':['plan.retire','CARRY_FORWARD'],
     'gate.steer-preview':['gate.steer','STEER'],
     'gate.resume-preview':['gate.resume','RESUME'],
     'gate.resolve-preview':['gate.resolve','RESOLVE'],

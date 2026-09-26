@@ -314,6 +314,18 @@ def dispatch_action(project: Path, action: str, payload: Mapping[str, Any]) -> d
         elif name == "plan.reject":
             from . import planning
             result = planning.reject_plan(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("reason") or ""), str(payload.get("confirm") or ""))
+        elif name == "plan.retire-preview":
+            from . import retirement
+            result = retirement.build_retirement_preview(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("reason") or ""), str(payload.get("disposition") or ""))
+        elif name == "plan.retire":
+            from . import retirement
+            result = retirement.retire_plan(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("reason") or ""), str(payload.get("disposition") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "plan.propose-replacement-preview":
+            from . import planning
+            result = planning.build_proposal_preview(root, operator_name, payload.get("goal"), str(payload.get("repository_authority") or "write"), min_steps=payload.get("min_steps"), max_steps=payload.get("max_steps"), from_retirement=str(payload.get("retirement_record_id") or ""))
+        elif name == "plan.propose-replacement":
+            from . import planning
+            result = planning.propose_plan(root, operator_name, payload.get("goal"), str(payload.get("repository_authority") or "write"), str(payload.get("preview") or ""), str(payload.get("confirm") or ""), min_steps=payload.get("min_steps"), max_steps=payload.get("max_steps"), from_retirement=str(payload.get("retirement_record_id") or ""))
         elif name == "gate.steer-preview":
             from . import human_control
             result = human_control.build_steer_preview(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("gate_id") or ""), str(payload.get("direction") or ""), payload.get("allow_new_tests") or [])

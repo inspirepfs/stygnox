@@ -75,6 +75,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if namespace.command == "plan":
         from .planning import cli_main
         return cli_main(namespace.args)
+    if namespace.command in {"retirement", "retire-plan"}:
+        from .retirement import cli_main
+        return cli_main(namespace.args)
     if namespace.command in {"gate", "human"}:
         from .human_control import cli_main
         return cli_main(namespace.args)
