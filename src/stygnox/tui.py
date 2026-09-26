@@ -185,6 +185,69 @@ def render_snapshot(snapshot: Mapping[str, Any], *, color_mode: str = "auto", wi
     ]
     lines += [""] + _section("EVIDENCE", evidence_rows, width=columns, color=enabled, tone="muted")
 
+    lifecycle = snapshot.get("lifecycle") if isinstance(snapshot.get("lifecycle"), Mapping) else {}
+    if lifecycle:
+        phase = str(lifecycle.get("phase") or "UNKNOWN")
+        attention = bool(lifecycle.get("attention_required"))
+        phase_tone = "warning" if attention else ("success" if phase in {"PUSHED", "READ_ONLY_COMPLETE"} else "info")
+        progress = lifecycle.get("progress") if isinstance(lifecycle.get("progress"), Mapping) else {}
+        current = progress.get("current") if isinstance(progress.get("current"), Mapping) else {}
+        lifecycle_rows = [
+            f"Phase      {_paint(phase, phase_tone, enabled)}",
+            f"Progress   {progress.get('completed_steps', 0)}/{progress.get('total_steps', 0)} · {progress.get('percent_complete', 0)}%",
+            f"Step       {progress.get('current_step') or '-'} · {_clip(current.get('title') or current.get('objective') or '-', max(12, columns - 18))}",
+            f"Attention  {'YES' if attention else 'NO'}",
+        ]
+        lines += [""] + _section("LIFECYCLE", lifecycle_rows, width=columns, color=enabled, tone="purple")
+
+        blockers = lifecycle.get("blockers") if isinstance(lifecycle.get("blockers"), list) else []
+        blocker_rows: list[str] = []
+        for item in blockers[:8]:
+            if isinstance(item, Mapping):
+                code = str(item.get("code") or "BLOCKER")
+                detail = item.get("detail") or item.get("gate_id") or item.get("pending_paths") or "operator attention required"
+                blocker_rows.extend(_wrap("• ", f"{code} · {detail}", columns))
+        if not blocker_rows:
+            blocker_rows = [_paint("[OK] no lifecycle blockers", "success", enabled)]
+        lines += [""] + _section("BLOCKERS", blocker_rows, width=columns, color=enabled, tone="warning" if blockers else "success")
+
+        actions = lifecycle.get("next_actions") if isinstance(lifecycle.get("next_actions"), list) else []
+        action_rows: list[str] = []
+        for item in actions[:10]:
+            if isinstance(item, Mapping):
+                action_rows.extend(_wrap("• ", f"{item.get('action', '-')} · {item.get('reason', '')}", columns))
+        if not action_rows:
+            action_rows = [_paint("[NONE] no authority-valid next action", "muted", enabled)]
+        lines += [""] + _section("NEXT ACTIONS", action_rows, width=columns, color=enabled, tone="info")
+
+        recon = lifecycle.get("reconciliation") if isinstance(lifecycle.get("reconciliation"), Mapping) else {}
+        gate = lifecycle.get("human_gate") if isinstance(lifecycle.get("human_gate"), Mapping) else {}
+        gate_record = gate.get("gate") if isinstance(gate.get("gate"), Mapping) else {}
+        selfdev = lifecycle.get("self_development") if isinstance(lifecycle.get("self_development"), Mapping) else {}
+        recovery = lifecycle.get("recovery") if isinstance(lifecycle.get("recovery"), Mapping) else {}
+        authority_rows = [
+            f"Gate       {gate_record.get('gate_id') or '-'} · {gate_record.get('kind') or '-'}",
+            f"Recovery   {'REQUIRED' if recovery.get('required') else 'clear'} · transaction {recovery.get('transaction_state') or '-'}",
+            f"Reconcile  pending {len(recon.get('pending_paths') or [])} · stale {len(recon.get('stale_paths') or [])}",
+            f"Self-dev   {'ACTIVE' if selfdev.get('active_grant') else 'none'} · history {selfdev.get('grant_history_count', 0)}",
+        ]
+        lines += [""] + _section("AUTHORITY & RECOVERY", authority_rows, width=columns, color=enabled, tone="info")
+
+        qual = lifecycle.get("qualification") if isinstance(lifecycle.get("qualification"), Mapping) else {}
+        fin = lifecycle.get("finalization") if isinstance(lifecycle.get("finalization"), Mapping) else {}
+        usage = lifecycle.get("usage") if isinstance(lifecycle.get("usage"), Mapping) else {}
+        eff = lifecycle.get("efficiency") if isinstance(lifecycle.get("efficiency"), Mapping) else {}
+        fin_status = fin.get("plan_status") if fin.get("available") is not False else "-"
+        qual_status = qual.get("plan_status") if qual.get("available") is not False else "-"
+        summary = usage.get("summary") if isinstance(usage.get("summary"), Mapping) else {}
+        runtime_rows = [
+            f"Qualification {qual_status or '-'} · current {'YES' if qual.get('qualified_current_repository') else 'NO'}",
+            f"Finalization {fin_status or '-'} · commit {fin.get('commit_sha') or '-'}",
+            f"Efficiency    {eff.get('mode') or '-'} · latest {_state(eff.get('latest') if isinstance(eff.get('latest'), Mapping) else None)}",
+            f"Usage         turns {summary.get('turn_count', summary.get('records', 0))} · input {summary.get('input_tokens', 0)} · output {summary.get('output_tokens', 0)}",
+        ]
+        lines += [""] + _section("QUALIFICATION / FINALIZATION", runtime_rows, width=columns, color=enabled, tone="purple")
+
     decisions = attribution.get("human_decisions") if isinstance(attribution, Mapping) else None
     if isinstance(decisions, list) and decisions:
         rows: list[str] = []

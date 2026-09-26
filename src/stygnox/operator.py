@@ -302,6 +302,90 @@ def dispatch_action(project: Path, action: str, payload: Mapping[str, Any]) -> d
         elif name == "reconciliation.apply":
             from . import reconciliation
             result = reconciliation.apply_action(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("path") or ""), str(payload.get("disposition") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""), reason=payload.get("reason"))
+        elif name == "plan.propose-preview":
+            from . import planning
+            result = planning.build_proposal_preview(root, operator_name, str(payload.get("goal") or ""), str(payload.get("repository_authority") or "write"), min_steps=payload.get("min_steps"), max_steps=payload.get("max_steps"))
+        elif name == "plan.propose":
+            from . import planning
+            result = planning.propose_plan(root, operator_name, str(payload.get("goal") or ""), str(payload.get("repository_authority") or "write"), str(payload.get("preview") or ""), str(payload.get("confirm") or ""), min_steps=payload.get("min_steps"), max_steps=payload.get("max_steps"))
+        elif name == "plan.approve":
+            from . import planning
+            result = planning.approve_plan(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("confirm") or ""))
+        elif name == "plan.reject":
+            from . import planning
+            result = planning.reject_plan(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("reason") or ""), str(payload.get("confirm") or ""))
+        elif name == "gate.steer-preview":
+            from . import human_control
+            result = human_control.build_steer_preview(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("gate_id") or ""), str(payload.get("direction") or ""), payload.get("allow_new_tests") or [])
+        elif name == "gate.steer":
+            from . import human_control
+            result = human_control.steer(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("gate_id") or ""), str(payload.get("direction") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""), payload.get("allow_new_tests") or [])
+        elif name == "gate.resume-preview":
+            from . import human_control
+            result = human_control.build_resume_preview(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("gate_id") or ""), str(payload.get("reason") or ""))
+        elif name == "gate.resume":
+            from . import human_control
+            result = human_control.resume(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("gate_id") or ""), str(payload.get("reason") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "gate.resolve-preview":
+            from . import human_control
+            result = human_control.build_resolve_preview(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("gate_id") or ""), str(payload.get("reason") or ""))
+        elif name == "gate.resolve":
+            from . import human_control
+            result = human_control.resolve(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("gate_id") or ""), str(payload.get("reason") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "scheduler.run-preview":
+            from . import scheduler
+            result = scheduler.build_schedule_preview(root, operator_name)
+        elif name == "scheduler.run":
+            from . import scheduler
+            result = scheduler.run_schedule(root, operator_name, str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "scheduler.recover-preview":
+            from . import scheduler
+            result = scheduler.build_recovery_preview(root, operator_name, payload.get("pending_paths") or [])
+        elif name == "scheduler.recover":
+            from . import scheduler
+            result = scheduler.recover_interrupted(root, operator_name, payload.get("pending_paths") or [], str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "self-development.authorize-preview":
+            from . import self_development
+            result = self_development.build_authorize_preview(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("gate_id") or ""), payload.get("paths") or [], str(payload.get("reason") or ""))
+        elif name == "self-development.authorize":
+            from . import self_development
+            result = self_development.authorize(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("gate_id") or ""), payload.get("paths") or [], str(payload.get("reason") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "qualification.preview":
+            from . import qualification
+            result = qualification.build_preview(root, operator_name, str(payload.get("plan_hash") or ""))
+        elif name == "qualification.run":
+            from . import qualification
+            result = qualification.run_qualification(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "qualification.requalify-preview":
+            from . import qualification
+            result = qualification.build_requalify_preview(root, operator_name, str(payload.get("plan_hash") or ""))
+        elif name == "qualification.requalify":
+            from . import qualification
+            result = qualification.run_qualification(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""), requalify=True)
+        elif name == "finalization.commit-preview":
+            from . import finalization
+            result = finalization.build_commit_preview(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("message") or ""))
+        elif name == "finalization.commit":
+            from . import finalization
+            result = finalization.commit(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("message") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "finalization.push-preview":
+            from . import finalization
+            result = finalization.build_push_preview(root, operator_name, str(payload.get("plan_hash") or ""))
+        elif name == "finalization.push":
+            from . import finalization
+            result = finalization.push(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "finalization.reconcile-commit-preview":
+            from . import finalization
+            result = finalization.build_reconcile_commit_preview(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("commit_sha") or ""), str(payload.get("reason") or ""))
+        elif name == "finalization.reconcile-commit":
+            from . import finalization
+            result = finalization.reconcile_commit(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("commit_sha") or ""), str(payload.get("reason") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
+        elif name == "finalization.reconcile-push-preview":
+            from . import finalization
+            result = finalization.build_reconcile_push_preview(root, operator_name, str(payload.get("plan_hash") or ""))
+        elif name == "finalization.reconcile-push":
+            from . import finalization
+            result = finalization.reconcile_push(root, operator_name, str(payload.get("plan_hash") or ""), str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
         else:
             raise OperatorSurfaceError(f"unsupported installed operator action: {name!r}")
     except (adoption.AdoptionError, transactions.TransactionError, execution_policy.ExecutionPolicyError, controller.ControllerError, RuntimeError, ValueError, PermissionError) as exc:
