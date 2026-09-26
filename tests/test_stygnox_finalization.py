@@ -6,14 +6,14 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from stygnox import adoption, cli, finalization, planning, qualification  # noqa: E402
+from stygnox import adoption, cli, finalization, planning, provider_codex, qualification  # noqa: E402
 from tests.test_stygnox_qualification import (  # noqa: E402
     active_reviewed,
     approve,
@@ -41,8 +41,14 @@ def ready_repo(root: Path, *, remote: bool = False, read_only: bool = False):
     result = qualify(repo, approved["plan_hash"])
     return repo, approved, result, remote_path
 
+from tests.provider_catalog_fixture import test_catalog  # noqa: E402
+
 
 class StygnoxFinalizationTests(TestCase):
+    def setUp(self) -> None:
+        self._provider_catalog_patch = mock.patch.object(provider_codex, "model_catalog", return_value=test_catalog())
+        self._provider_catalog_patch.start()
+        self.addCleanup(self._provider_catalog_patch.stop)
     def test_qualification_binds_git_finalization_evidence_and_cli_route_is_installed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo, approved, _result, _remote = ready_repo(Path(td))

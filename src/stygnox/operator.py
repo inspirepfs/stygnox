@@ -277,6 +277,8 @@ def dispatch_action(project: Path, action: str, payload: Mapping[str, Any]) -> d
             result = transactions.build_recovery_preview(root, operator_name, str(payload.get("post_handoff_disposition") or ""))
         elif name == "recovery.restore":
             result = transactions.restore_baseline(root, operator_name, str(payload.get("preview") or ""), str(payload.get("confirm") or ""), str(payload.get("post_handoff_disposition") or ""))
+        elif name == "policy.catalog":
+            result = execution_policy.show_provider_catalog(root)
         elif name == "policy.preview":
             kwargs = _policy_kwargs(payload)
             kwargs["reset"] = bool(payload.get("reset"))

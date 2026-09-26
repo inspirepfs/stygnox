@@ -407,7 +407,10 @@ def build_preview(
             usage_poll_seconds=usage_poll_seconds,
             max_loops=max_loops,
         )
-        review = execution_policy.policy_review(selected_policy, selected_policy.get("reviewer"))
+        selected_policy, provider_evidence = execution_policy.bind_provider_catalog(baseline.worktree, selected_policy)
+        review = execution_policy.policy_review(
+            selected_policy, selected_policy.get("reviewer"), provider_evidence=provider_evidence
+        )
     except execution_policy.ExecutionPolicyError as exc:
         raise AdoptionError(str(exc)) from exc
     tracked, conflicts = _planned_tracked_files(baseline.worktree, operator_name, selected_policy, review)

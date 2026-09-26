@@ -5,8 +5,10 @@ policy.  Importing Stygnox never selects Codex, a model, or an effort level.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+import selectors
 import shutil
 import subprocess
 import tempfile
@@ -15,6 +17,8 @@ from typing import Any, Mapping
 
 
 PROVIDER_NAME = "codex"
+MODEL_CATALOG_SCHEMA = "stygnox_codex_model_catalog_v1"
+APP_SERVER_TIMEOUT_SECONDS = 15.0
 _RESULT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -32,6 +36,167 @@ _RESULT_SCHEMA: dict[str, Any] = {
 
 class ProviderError(RuntimeError):
     """Fail-closed installed-provider error."""
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+def _app_server_send(handle: Any, payload: Mapping[str, Any]) -> None:
+    handle.write(json.dumps(dict(payload), separators=(",", ":")) + "\n")
+    handle.flush()
+
+
+def _app_server_read_response(proc: subprocess.Popen[str], request_id: int, timeout: float) -> dict[str, Any]:
+    if proc.stdout is None:
+        raise ProviderError("Codex app-server stdout is unavailable")
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            events = selector.select(max(0.0, deadline - time.monotonic()))
+            if not events:
+                break
+            line = proc.stdout.readline()
+            if not line:
+                break
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(message, Mapping) or message.get("id") != request_id:
+                continue
+            if message.get("error"):
+                raise ProviderError(f"Codex app-server request failed: {message['error']}")
+            result = message.get("result")
+            if not isinstance(result, Mapping):
+                raise ProviderError("Codex app-server returned an invalid result")
+            return dict(result)
+    finally:
+        selector.close()
+    stderr = ""
+    if proc.poll() is not None and proc.stderr is not None:
+        try:
+            stderr = proc.stderr.read()[-1200:].strip()
+        except OSError:
+            pass
+    detail = f": {stderr}" if stderr else ""
+    raise ProviderError(f"timed out waiting for Codex app-server response{detail}")
+
+
+def _normalise_model_catalog(raw: Mapping[str, Any]) -> dict[str, Any]:
+    data = raw.get("data") if isinstance(raw.get("data"), list) else []
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, Mapping):
+            continue
+        model_id = str(item.get("model") or item.get("id") or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        efforts: list[str] = []
+        for option in item.get("supportedReasoningEfforts") or []:
+            if isinstance(option, Mapping):
+                effort = str(option.get("reasoningEffort") or "").strip().lower()
+                if effort and effort not in efforts:
+                    efforts.append(effort)
+        default_effort = item.get("defaultReasoningEffort")
+        default_effort = str(default_effort).strip().lower() if default_effort is not None else None
+        models.append({
+            "id": model_id,
+            "display_name": str(item.get("displayName") or model_id),
+            "description": str(item.get("description") or ""),
+            "is_default": bool(item.get("isDefault")),
+            "reasoning_efforts": efforts,
+            "default_reasoning_effort": default_effort or None,
+        })
+        seen.add(model_id)
+    models.sort(key=lambda row: row["id"])
+    if not models:
+        raise ProviderError("Codex model catalogue is empty or invalid")
+    body = {"schema": MODEL_CATALOG_SCHEMA, "provider": PROVIDER_NAME, "models": models}
+    body["catalog_sha256"] = _digest(body)
+    return body
+
+
+def model_catalog(cwd: Path, *, timeout: float = APP_SERVER_TIMEOUT_SECONDS) -> dict[str, Any]:
+    """Read the supported Codex model/effort catalogue without executing a model turn."""
+    codex = shutil.which("codex")
+    if not codex:
+        raise ProviderError("reviewed provider 'codex' is not installed or not on PATH")
+    proc = subprocess.Popen(
+        [codex, "app-server", "--stdio"],
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    try:
+        if proc.stdin is None:
+            raise ProviderError("Codex app-server stdin is unavailable")
+        _app_server_send(proc.stdin, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "stygnox", "title": "Stygnox", "version": "13B-1"},
+                "capabilities": {"experimentalApi": True},
+            },
+        })
+        _app_server_read_response(proc, 1, timeout)
+        _app_server_send(proc.stdin, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        _app_server_send(proc.stdin, {
+            "jsonrpc": "2.0", "id": 2, "method": "model/list",
+            "params": {"limit": 100, "cursor": None, "includeHidden": False},
+        })
+        raw = _app_server_read_response(proc, 2, timeout)
+        return _normalise_model_catalog(raw)
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+
+def selection_from_catalog(catalog: Mapping[str, Any], model: str, effort: str | None) -> dict[str, Any]:
+    """Validate one model/effort pair against already-read provider metadata."""
+    if catalog.get("schema") != MODEL_CATALOG_SCHEMA or catalog.get("provider") != PROVIDER_NAME:
+        raise ProviderError("Codex model catalogue has an unsupported schema or provider")
+    models = catalog.get("models") if isinstance(catalog.get("models"), list) else []
+    matches = [row for row in models if isinstance(row, Mapping) and row.get("id") == model]
+    if len(matches) != 1:
+        raise ProviderError(f"Codex model is not advertised by the current catalogue: {model}")
+    selected = dict(matches[0])
+    efforts = [str(value).lower() for value in selected.get("reasoning_efforts") or []]
+    selected_effort = str(effort or "").strip().lower() or None
+    if selected_effort and not efforts:
+        raise ProviderError(f"Codex model {model} advertises no selectable reasoning efforts")
+    if selected_effort and selected_effort not in efforts:
+        raise ProviderError(
+            f"Codex effort {selected_effort!r} is not supported by model {model}; supported: {', '.join(efforts)}"
+        )
+    return {
+        "schema": "stygnox_codex_model_selection_v1",
+        "provider": PROVIDER_NAME,
+        "catalog_sha256": catalog["catalog_sha256"],
+        "model": selected,
+        "selected_model": model,
+        "selected_effort": selected_effort,
+    }
+
+
+def validate_model_selection(cwd: Path, model: str, effort: str | None) -> dict[str, Any]:
+    """Bind an exact Codex model/effort selection to current provider metadata."""
+    return selection_from_catalog(model_catalog(cwd), model, effort)
 
 
 def _empty_metrics() -> dict[str, int | float]:
@@ -117,6 +282,10 @@ def execute_structured(
         raise ProviderError("Codex execution requires an explicitly reviewed model")
     if not isinstance(result_schema, Mapping):
         raise ProviderError("Codex structured execution requires a JSON schema object")
+    # Provider metadata is revalidated immediately before execution.  A tracked
+    # review never grants permanent authority to a model/effort pair that the
+    # current Codex installation no longer advertises.
+    validate_model_selection(cwd, model, effort)
     _preflight(cwd)
     sandbox = "read-only" if repository_authority == "read-only" else "workspace-write"
     with tempfile.TemporaryDirectory(prefix="stygnox-codex-") as temp:

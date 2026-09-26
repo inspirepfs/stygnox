@@ -198,6 +198,7 @@ class StygnoxWebTests(TestCase):
             "product-name", "product-version", "profile-name", "project-path", "authority-summary",
             "transaction-summary", "provider", "policy-model", "policy-effort", "efficiency",
             "reserve", "wait-limits", "usage-poll", "max-loops", "policy-reviewer",
+            "policy-catalog", "policy-supported-efforts", "policy-model-options", "policy-effort-options",
             "runtime-directory", "runtime-count", "controller-receipts", "source-tree-fallback",
             "legacy-delegate", "authority-evidence",
         ):
@@ -207,7 +208,7 @@ class StygnoxWebTests(TestCase):
             "adopt.preview", "adopt.abort", "adopt.handoff",
             "transaction.begin", "transaction.stop",
             "recovery.preview", "recovery.restore",
-            "policy.preview", "policy.set", "policy.reset",
+            "policy.catalog", "policy.preview", "policy.set", "policy.reset",
             "controller.activate", "controller.deactivate", "controller.run-preview", "controller.run",
         ):
             with self.subTest(action=action):

@@ -14,7 +14,7 @@ import re
 import tomllib
 from typing import Any, Mapping, Sequence
 
-from . import efficiency
+from . import efficiency, provider_codex
 from .profile import DEFAULT_PROFILE, profile_record
 from .product import PRODUCT
 
@@ -158,6 +158,58 @@ def neutral_policy() -> dict[str, Any]:
     return normalize_policy()
 
 
+def bind_provider_catalog(
+    root: Path,
+    policy: Mapping[str, Any],
+    *,
+    clear_inherited_unsupported_effort: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Bind non-neutral policy to current supported provider model metadata.
+
+    The catalogue query is metadata-only and performs no model turn.  An
+    explicitly requested unsupported effort always fails closed.  A model
+    change may clear an inherited effort that the new model no longer
+    advertises; that clearing is included in the reviewed preview.
+    """
+    desired = dict(policy)
+    provider = desired.get("provider")
+    if not provider:
+        return desired, None
+    if provider != provider_codex.PROVIDER_NAME:
+        raise ExecutionPolicyError(f"unsupported execution provider: {provider}")
+    model = str(desired.get("model") or "").strip()
+    effort = str(desired.get("effort") or "").strip().lower() or None
+    try:
+        catalog = provider_codex.model_catalog(root)
+        try:
+            selection = provider_codex.selection_from_catalog(catalog, model, effort)
+        except provider_codex.ProviderError:
+            if not (clear_inherited_unsupported_effort and effort):
+                raise
+            desired["effort"] = None
+            selection = provider_codex.selection_from_catalog(catalog, model, None)
+    except provider_codex.ProviderError as exc:
+        raise ExecutionPolicyError(str(exc)) from exc
+    return desired, selection
+
+
+def show_provider_catalog(project: Path) -> dict[str, Any]:
+    from . import adoption
+
+    root = adoption.resolve_worktree(project)
+    try:
+        catalog = provider_codex.model_catalog(root)
+    except provider_codex.ProviderError as exc:
+        raise ExecutionPolicyError(str(exc)) from exc
+    return {
+        "schema": "stygnox_execution_policy_catalog_v1",
+        "product_version": PRODUCT.version,
+        "worktree": str(root),
+        "catalog": catalog,
+        "model_turn_executed": False,
+    }
+
+
 def _toml_string(value: str | None) -> str:
     return json.dumps(value or "", ensure_ascii=False)
 
@@ -234,7 +286,9 @@ def config_policy(root: Path) -> dict[str, Any]:
     )
 
 
-def policy_review(policy: Mapping[str, Any], reviewer: str | None) -> dict[str, Any]:
+def policy_review(
+    policy: Mapping[str, Any], reviewer: str | None, *, provider_evidence: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     selected_reviewer = _reviewer(reviewer)
     non_neutral = any(policy.get(key) for key in ("provider", "model", "effort"))
     if non_neutral and not selected_reviewer:
@@ -248,6 +302,7 @@ def policy_review(policy: Mapping[str, Any], reviewer: str | None) -> dict[str, 
         "provider": policy.get("provider"),
         "model": policy.get("model"),
         "effort": policy.get("effort"),
+        "provider_catalog": dict(provider_evidence) if isinstance(provider_evidence, Mapping) else None,
         "execution": {
             key: policy[key]
             for key in (
@@ -284,10 +339,19 @@ def show_policy(project: Path) -> dict[str, Any]:
     runtime_record = _load_runtime_json(root / adoption.RUNTIME_NAME / POLICY_RECORD)
     review = runtime_record or (adoption_record or {}).get("execution_policy_review")
     approved = False
+    provider_catalog_bound = policy.get("provider") is None
     if isinstance(review, dict) and review.get("schema") == POLICY_REVIEW_SCHEMA:
         approved = all(review.get(key) == policy.get(key) for key in ("provider", "model", "effort"))
         if policy.get("provider") and not review.get("reviewer"):
             approved = False
+        if policy.get("provider"):
+            evidence = review.get("provider_catalog") if isinstance(review.get("provider_catalog"), Mapping) else None
+            provider_catalog_bound = bool(
+                evidence
+                and evidence.get("provider") == policy.get("provider")
+                and evidence.get("selected_model") == policy.get("model")
+                and evidence.get("selected_effort") == policy.get("effort")
+            )
     return {
         "schema": "stygnox_execution_policy_status_v1",
         "product_version": PRODUCT.version,
@@ -297,6 +361,8 @@ def show_policy(project: Path) -> dict[str, Any]:
         "tracked_config_sha256": _sha256_text(config_text),
         "review": review,
         "approved": approved if policy.get("provider") else True,
+        "provider_catalog_bound": provider_catalog_bound,
+        "provider_execution_revalidates_catalog": True,
         "controller_execution_default": False,
     }
 
@@ -385,8 +451,16 @@ def build_policy_preview(
         reviewer=reviewer,
         reset=reset,
     )
+    provider_evidence = None
+    if not reset:
+        model_changed = model is not None and str(model).strip() != str(current.get("model") or "").strip()
+        desired, provider_evidence = bind_provider_catalog(
+            root,
+            desired,
+            clear_inherited_unsupported_effort=bool(model_changed and effort is None),
+        )
     selected_reviewer = None if reset else _reviewer(reviewer)
-    review = policy_review(desired, selected_reviewer)
+    review = policy_review(desired, selected_reviewer, provider_evidence=provider_evidence)
     before = (root / adoption.CONFIG_NAME).read_text(encoding="utf-8")
     after = render_config({**desired, "reviewer": selected_reviewer})
     body = {
@@ -490,6 +564,9 @@ def build_parser() -> argparse.ArgumentParser:
     show = sub.add_parser("show", help="show effective tracked execution policy and review binding")
     show.add_argument("--project", type=Path, default=Path.cwd())
 
+    catalog = sub.add_parser("catalog", help="read the current Codex model/effort catalogue without a model turn")
+    catalog.add_argument("--project", type=Path, default=Path.cwd())
+
     preview = sub.add_parser("preview", help="preview an atomic tracked policy set/reset without mutation")
     preview.add_argument("--project", type=Path, default=Path.cwd())
     preview.add_argument("--operator", required=True)
@@ -534,6 +611,8 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.action == "show":
             result = show_policy(args.project)
+        elif args.action == "catalog":
+            result = show_provider_catalog(args.project)
         elif args.action == "preview":
             result = build_policy_preview(args.project, args.operator, reset=args.reset, **_kwargs(args))
         elif args.action == "set":

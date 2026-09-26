@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
 
 from stygnox import cli, controller, human_control, planning, provider_codex, scheduler, self_development
 from tests.test_stygnox_scheduler import active_reviewed, approve, git, implementation_result, init_repo
+from tests.provider_catalog_fixture import test_catalog
 
 
 def init_stygnox_repo(path: Path) -> None:
@@ -64,6 +65,11 @@ def authorize_gate(repo: Path, approved: dict, gate: dict, paths: list[str]) -> 
 
 
 class StygnoxSelfDevelopmentTests(TestCase):
+    def setUp(self) -> None:
+        self._provider_catalog_patch = mock.patch.object(provider_codex, "model_catalog", return_value=test_catalog())
+        self._provider_catalog_patch.start()
+        self.addCleanup(self._provider_catalog_patch.stop)
+
     def test_unauthorized_self_development_is_restored_and_latches_exact_gate(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

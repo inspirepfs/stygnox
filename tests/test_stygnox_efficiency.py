@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from stygnox import adoption, controller, efficiency, execution_policy, provider_codex, transactions  # noqa: E402
+from tests.provider_catalog_fixture import test_catalog  # noqa: E402
 
 
 def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -63,6 +64,11 @@ def adopted_controller(repo: Path, external: Path, **policy_overrides: object) -
 
 
 class StygnoxEfficiencyTests(TestCase):
+    def setUp(self) -> None:
+        self._provider_catalog_patch = mock.patch.object(provider_codex, "model_catalog", return_value=test_catalog())
+        self._provider_catalog_patch.start()
+        self.addCleanup(self._provider_catalog_patch.stop)
+
     def test_historical_detailed_defaults_and_runaway_floor_are_preserved(self) -> None:
         policy = execution_policy.neutral_policy()
         self.assertEqual(4, policy["strict_prompt_command_budget"])

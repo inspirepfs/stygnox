@@ -115,6 +115,22 @@
     if(state.lifecyclePreview && state.lifecyclePreview.actionsIdentity!==nextActionIdentity(lifecycle)) clearLifecyclePreview();
   }
 
+  function renderProviderCatalog(catalog){
+    if(!catalog || !Array.isArray(catalog.models)) return;
+    state.providerCatalog=catalog;
+    const host=$('policy-model-options');
+    if(host) host.innerHTML=catalog.models.map((row)=>`<option value="${esc(row.id||'')}">${esc(row.display_name||row.id||'')}</option>`).join('');
+    renderEffortOptions();
+  }
+
+  function renderEffortOptions(){
+    const host=$('policy-effort-options'); if(!host) return;
+    const model=val('policy-model-input');
+    const row=(state.providerCatalog?.models||[]).find((item)=>item?.id===model);
+    const efforts=Array.isArray(row?.reasoning_efforts) ? row.reasoning_efforts : [];
+    host.innerHTML=efforts.map((effort)=>`<option value="${esc(effort)}"></option>`).join('');
+  }
+
   function seedPolicyInputs(effective, policy){
     if(state.policySeeded) return;
     setValue('policy-provider', effective.provider || '');
@@ -162,6 +178,10 @@
     text('usage-poll', effective.usage_poll_seconds == null ? '—' : `${effective.usage_poll_seconds}s`);
     text('max-loops', effective.max_loops ?? '—');
     text('policy-reviewer', policy?.review?.reviewer || effective.reviewer || '—');
+    const catalogReview=policy?.review?.provider_catalog || {};
+    const catalogModel=catalogReview?.model || {};
+    text('policy-catalog', catalogReview.catalog_sha256 ? `${String(catalogReview.catalog_sha256).slice(0,12)}… · ${catalogReview.selected_model||'—'}` : (effective.provider ? (policy?.provider_catalog_bound ? 'bound' : 'legacy review · revalidated at execution') : 'neutral'));
+    text('policy-supported-efforts', Array.isArray(catalogModel.reasoning_efforts) && catalogModel.reasoning_efforts.length ? catalogModel.reasoning_efforts.join(', ') : '—');
     text('policy-approved', policy?.error ? `ERROR: ${policy.error}` : (policy?.approved == null ? '—' : String(Boolean(policy.approved))));
     seedPolicyInputs(effective, policy);
 
@@ -205,6 +225,7 @@
     setNotice(`${name}: PASS`,'success');
     const out=$('action-result'); if(out) out.textContent=JSON.stringify(j.result,null,2);
     capturePreview(name, j.result);
+    if(name==='policy.catalog') renderProviderCatalog(j.result?.catalog);
     await refresh(); return j.result;
   }
 
@@ -318,6 +339,7 @@
     if(name==='transaction.stop') return action(name,{operator,reason:val('stop-reason')||'operator-abort',confirm:'STOP'});
     if(name==='recovery.preview') return action(name,{operator,post_handoff_disposition:'discard'});
     if(name==='recovery.restore') return action(name,{operator,preview:val('recovery-preview-input'),confirm:'RESTORE',post_handoff_disposition:'discard'});
+    if(name==='policy.catalog') return action(name,{});
     if(name==='policy.preview') return action(name,policyPayload(operator));
     if(name==='policy.set') return action(name,{...policyPayload(operator),preview:val('policy-preview-input'),confirm:'SET'});
     if(name==='policy.preview-reset') return action(name,{operator,reset:true},'policy.preview');
@@ -328,5 +350,5 @@
     if(name==='controller.run') return action(name,{operator,objective:val('objective'),repository_authority:val('repo-authority')||'read-only',preview:val('run-preview-input'),confirm:'RUN'});
   };
 
-  window.addEventListener('DOMContentLoaded',()=>{ refresh(); setInterval(refresh,5000); });
+  window.addEventListener('DOMContentLoaded',()=>{ const model=$('policy-model-input'); if(model) model.addEventListener('input',renderEffortOptions); refresh(); setInterval(refresh,5000); });
 })();

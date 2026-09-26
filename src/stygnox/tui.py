@@ -151,10 +151,16 @@ def render_snapshot(snapshot: Mapping[str, Any], *, color_mode: str = "auto", wi
     reserve = _value(policy, "policy", "reserve_percent", default=_value(policy, "reserve_percent", default="-"))
     wait_limits = _value(policy, "policy", "wait_for_limits", default=_value(policy, "wait_for_limits", default="-"))
     max_loops = _value(policy, "policy", "max_loops", default=_value(policy, "max_loops", default="-"))
+    review = policy.get("review") if isinstance(policy, Mapping) and isinstance(policy.get("review"), Mapping) else {}
+    catalog = review.get("provider_catalog") if isinstance(review.get("provider_catalog"), Mapping) else {}
+    catalog_model = catalog.get("model") if isinstance(catalog.get("model"), Mapping) else {}
+    catalog_digest = str(catalog.get("catalog_sha256") or "")
+    efforts = ",".join(str(value) for value in catalog_model.get("reasoning_efforts") or []) or "-"
     policy_rows = [
         f"Provider   {provider or 'neutral'}",
         f"Model      {model or 'neutral'}",
         f"Effort     {effort or 'neutral'}",
+        f"Catalogue  {(catalog_digest[:12] + '…') if catalog_digest else ('neutral' if not provider else 'unreviewed')} · efforts {efforts}",
         f"Efficiency {mode} · reserve {reserve}% · wait-limits {wait_limits} · max-loops {max_loops}",
     ]
     lines += [""] + _section("EXECUTION POLICY", policy_rows, width=columns, color=enabled, tone="info")

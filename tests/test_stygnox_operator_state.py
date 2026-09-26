@@ -18,9 +18,15 @@ from tests.test_stygnox_finalization import ready_repo
 from tests.test_stygnox_human_control import active_reviewed as gate_active, approve as gate_approve, init_repo as gate_init, open_provider_gate, step
 from tests.test_stygnox_qualification import active_reviewed, approve, execute_step, init_repo, qualify
 from tests.test_stygnox_scheduler import implementation_result as scheduler_result
+from tests.provider_catalog_fixture import test_catalog
 
 
 class StygnoxOperatorStateTests(TestCase):
+    def setUp(self) -> None:
+        self._provider_catalog_patch = mock.patch.object(provider_codex, "model_catalog", return_value=test_catalog())
+        self._provider_catalog_patch.start()
+        self.addCleanup(self._provider_catalog_patch.stop)
+
     def test_unadopted_snapshot_is_passive_and_exposes_canonical_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td) / "repo"

@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from stygnox import adoption, controller, provider_codex, transactions, usage  # noqa: E402
+from tests.provider_catalog_fixture import test_catalog  # noqa: E402
 
 
 def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -52,6 +53,11 @@ def adopted_transaction(repo: Path, external: Path) -> adoption.CommandIdentity:
 
 
 class StygnoxUsageTests(TestCase):
+    def setUp(self) -> None:
+        self._provider_catalog_patch = mock.patch.object(provider_codex, "model_catalog", return_value=test_catalog())
+        self._provider_catalog_patch.start()
+        self.addCleanup(self._provider_catalog_patch.stop)
+
     def test_controller_records_each_completed_turn_in_append_only_usage_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

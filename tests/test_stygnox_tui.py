@@ -105,6 +105,7 @@ class StygnoxTuiTests(TestCase):
             for section in ("OPERATOR STATE", "EXECUTION POLICY", "CHANGE ATTRIBUTION", "EVIDENCE"):
                 with self.subTest(section=section):
                     self.assertIn(section, rendered)
+            self.assertIn("Catalogue", rendered)
 
     def test_tui_refuses_unknown_action_without_legacy_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
