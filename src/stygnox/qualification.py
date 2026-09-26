@@ -12,7 +12,9 @@ from collections.abc import Mapping, Sequence
 import datetime as dt
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 import re
 import subprocess
 import sys
@@ -247,6 +249,34 @@ def _qualified_delta_sha256(manifest: Mapping[str, str], paths: Sequence[str]) -
     return _digest({"paths": {path: manifest.get(path, "missing") for path in sorted(set(paths))}})
 
 
+def _git_finalization_path_fingerprint(path: Path) -> str:
+    """Fingerprint a worktree path using only Git-representable mode semantics.
+
+    Scheduler/recovery manifests intentionally preserve full POSIX modes. Git trees do
+    not: regular blobs retain only executable vs non-executable state. Finalization
+    provenance therefore canonicalizes ordinary files to 0644/0755 so a normal
+    group-writable worktree created under umask 0002 verifies identically to Git's
+    100644 tree entry.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    digest = hashlib.sha256()
+    if stat.S_ISLNK(st.st_mode):
+        digest.update(b"symlink:777:")
+        digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+        return digest.hexdigest()
+    if not stat.S_ISREG(st.st_mode):
+        raise QualificationError(f"qualified Git path is not a regular file or symlink: {path}")
+    git_mode = 0o755 if (st.st_mode & 0o111) else 0o644
+    digest.update(f"file:{git_mode:o}:".encode())
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _build_preview(project: Path, operator: str, plan_hash: str, *, requalify: bool = False) -> dict[str, Any]:
     root, state, active, tx, policy_status, name = _validate_active_authority(project, operator, plan_hash)
     config = qualification_config(root)
@@ -444,7 +474,8 @@ def _write_completion_report(root: Path, state: Mapping[str, Any]) -> dict[str, 
 def _final_pass_state(root: Path, state: Mapping[str, Any], preview: Mapping[str, Any], gates: Sequence[Mapping[str, Any]], current_baseline: Mapping[str, Any], current_manifest: Mapping[str, str], *, requalified: bool) -> dict[str, Any]:
     plan = planning._validate_plan(state.get("plan"))
     plan_owned = list(preview.get("plan_owned_paths") or [])
-    qualified_delta = _qualified_delta_sha256(current_manifest, plan_owned)
+    git_fingerprints = {path: _git_finalization_path_fingerprint(root / path) for path in plan_owned}
+    qualified_delta = _qualified_delta_sha256(git_fingerprints, plan_owned)
     final = {
         "state": "PASS",
         "phase": "requalify-final" if requalified else "final",
@@ -453,9 +484,12 @@ def _final_pass_state(root: Path, state: Mapping[str, Any], preview: Mapping[str
         "qualification_preview_sha256": preview["preview_sha256"],
         "qualification_config_sha256": preview["qualification_config_sha256"],
         "repository_baseline_sha256": current_baseline["sha256"],
+        "qualified_head": current_baseline.get("head"),
+        "qualified_branch": current_baseline.get("branch"),
         "current_manifest_sha256": _digest(current_manifest),
         "approval_manifest_sha256": preview.get("approval_manifest_sha256"),
         "plan_owned_paths": plan_owned,
+        "qualified_path_fingerprints": git_fingerprints,
         "qualified_delta_sha256": qualified_delta,
         "gates": [dict(row) for row in gates],
         "completed_at": _utc_now(),
