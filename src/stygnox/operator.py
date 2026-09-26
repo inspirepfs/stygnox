@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import adoption, controller, execution_policy, transactions
+from . import operator_state
 from .product import PRODUCT
 from .profile import profile_record
 
@@ -204,8 +205,18 @@ def operator_snapshot(project: Path, *, server_pid: int | None = None) -> dict[s
         except Exception as exc:  # presentation must expose, not hide, invalid policy state
             policy = {"error": str(exc)}
     runtime = _runtime_inventory(root)
+    attribution = classify_changes(root)
+    lifecycle = operator_state.build_lifecycle_snapshot(
+        root,
+        adopted=bool(isinstance(handoff, dict) and handoff.get("schema") == adoption.HANDOFF_SCHEMA),
+        transaction=tx,
+        controller_state=ctl,
+        execution_policy=policy,
+        attribution=attribution,
+    )
     return {
         "schema": OPERATOR_SNAPSHOT_SCHEMA,
+        "snapshot_version": 2,
         "product_version": PRODUCT.version,
         "identity": PRODUCT.name,
         "profile": profile_record(),
@@ -217,7 +228,9 @@ def operator_snapshot(project: Path, *, server_pid: int | None = None) -> dict[s
         "controller": ctl,
         "execution_policy": policy,
         "current_baseline": current,
-        "attribution": classify_changes(root),
+        "attribution": attribution,
+        "lifecycle": lifecycle,
+        "next_actions": list(lifecycle["next_actions"]),
         "evidence_summary": {
             "runtime_directory": adoption.RUNTIME_NAME,
             "runtime_files": len(runtime),
