@@ -14,6 +14,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from . import adoption, efficiency, execution_policy, transactions
+from . import provider_usage
 from .product import PRODUCT
 from .profile import DEFAULT_PROFILE, profile_record
 from . import provider_codex, usage
@@ -28,6 +29,10 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 class ControllerError(RuntimeError):
     """Fail-closed neutral-controller error."""
+
+
+class ControllerUsageBlocked(ControllerError):
+    """Zero-model provider admission refused the turn without interrupting authority."""
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -363,8 +368,24 @@ def run_controller(
     if preview["preview_sha256"] != expected:
         raise ControllerError("controller run preview is stale; authority, policy, objective, or project baseline changed")
     root = Path(preview["worktree"])
-    before = adoption.capture_baseline(root).public()
     plan_binding = preview.get("plan_binding") if isinstance(preview.get("plan_binding"), Mapping) else None
+    controls = preview.get("execution_controls") if isinstance(preview.get("execution_controls"), Mapping) else {}
+    plan_state = None
+    if plan_binding is not None:
+        from . import planning as planning_module
+        plan_state = planning_module._record(root)
+    try:
+        provider_usage.ensure_capacity(
+            root,
+            plan_state=plan_state,
+            model=str(preview["model"]),
+            reserve_percent=float(controls.get("reserve_percent", 5.0)),
+            wait=bool(controls.get("wait_for_limits", True)),
+            poll_seconds=int(controls.get("usage_poll_seconds", 60)),
+        )
+    except provider_usage.ProviderUsageError as exc:
+        raise ControllerUsageBlocked(str(exc)) from exc
+    before = adoption.capture_baseline(root).public()
     before_paths: set[str] = set()
     before_manifest: dict[str, str] = {}
     self_snapshot: dict[str, dict[str, Any]] = {}

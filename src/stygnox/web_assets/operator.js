@@ -89,6 +89,11 @@
     const selfdev=lifecycle.self_development || {};
     const qual=lifecycle.qualification || {};
     const fin=lifecycle.finalization || {};
+    const providerUsage=lifecycle.provider_usage || {};
+    const providerState=providerUsage.state || {};
+    const providerQuota=providerState.quota || {};
+    const providerAdmission=providerState.admission || {};
+    const providerPause=providerState.pause || {};
     const usage=lifecycle.usage || {};
     const usageSummary=usage.summary || {};
     const eff=lifecycle.efficiency || {};
@@ -110,6 +115,9 @@
     text('lifecycle-qualification', `${qual.plan_status||'—'} · current ${qual.qualified_current_repository?'YES':'NO'}`);
     text('lifecycle-finalization', `${fin.plan_status||'—'} · commit ${fin.commit_sha ? String(fin.commit_sha).slice(0,12) : '—'}`);
     text('lifecycle-efficiency', `${eff.mode||'—'} · latest ${eff.latest?.status||latest.efficiency_status||'—'}`);
+    const quotaWindows=Array.isArray(providerQuota.windows)?providerQuota.windows:[];
+    const quotaText=quotaWindows.length?quotaWindows.map((w)=>`${w.name||w.slot}:${Number(w.remaining_percent||0).toFixed(1)}%`).join(' · '):'unavailable';
+    text('lifecycle-provider-usage', `${providerPause.guard ? 'PAUSED '+providerPause.guard : (providerAdmission.admitted ? 'ADMITTED' : 'not admitted')} · ${quotaText} · resets ${providerQuota.available_reset_credits ?? '—'}`);
     text('lifecycle-usage', `turns ${usageSummary.turn_count ?? usageSummary.records ?? 0} · input ${usageSummary.input_tokens||0} · output ${usageSummary.output_tokens||0}`);
     seedLifecycleContext(lifecycle);
     if(state.lifecyclePreview && state.lifecyclePreview.actionsIdentity!==nextActionIdentity(lifecycle)) clearLifecyclePreview();
@@ -292,7 +300,8 @@
     'finalization.commit-preview':['finalization.commit','COMMIT'],
     'finalization.push-preview':['finalization.push','PUSH'],
     'finalization.reconcile-commit-preview':['finalization.reconcile-commit','RECONCILE_COMMIT'],
-    'finalization.reconcile-push-preview':['finalization.reconcile-push','RECONCILE_PUSH']
+    'finalization.reconcile-push-preview':['finalization.reconcile-push','RECONCILE_PUSH'],
+    'provider.reset-preview':['provider.reset-redeem','REDEEM']
   };
   const directConfirm={
     'transaction.begin':'BEGIN','controller.activate':'ACTIVATE','plan.approve':'APPROVE','plan.reject':'REJECT'

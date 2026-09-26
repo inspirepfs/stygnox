@@ -290,6 +290,16 @@ def run_schedule(project: Path, operator: str, preview_sha256: str, confirmation
                     "RUN",
                     _scheduler_authority=expected,
                 )
+            except controller.ControllerUsageBlocked as exc:
+                state.update({
+                    "status": "STOPPED_USAGE_LIMIT",
+                    "pid": None,
+                    "finished_at": _utc_now(),
+                    "stop_reason": str(exc),
+                    "turn_before_manifest": None,
+                    "turn_before_manifest_sha256": None,
+                })
+                return _write(root, state)
             except (controller.ControllerError, planning.PlanningError, adoption.AdoptionError, OSError, ValueError) as exc:
                 state.update({
                     "status": "INTERRUPTED",

@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from . import adoption, finalization, human_control, planning, qualification, scheduler, usage
+from . import adoption, finalization, human_control, planning, provider_usage, qualification, scheduler, usage
 from .product import PRODUCT
 
 LIFECYCLE_SCHEMA = "stygnox_operator_lifecycle_v1"
@@ -165,7 +165,7 @@ def _phase(*, adopted: bool, transaction: Mapping[str, Any] | None, controller_s
     return "CONTROLLER_READY"
 
 
-def _blockers(*, lifecycle_errors: list[dict[str, Any]], phase: str, gate: Mapping[str, Any], sched: Mapping[str, Any], recon: Mapping[str, Any], qual: Mapping[str, Any], state: Mapping[str, Any] | None, latest: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+def _blockers(*, lifecycle_errors: list[dict[str, Any]], phase: str, gate: Mapping[str, Any], sched: Mapping[str, Any], recon: Mapping[str, Any], qual: Mapping[str, Any], provider_state: Mapping[str, Any] | None, state: Mapping[str, Any] | None, latest: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in lifecycle_errors:
         rows.append({"code": "INVALID_EVIDENCE", "section": item.get("section"), "detail": item.get("error")})
@@ -177,6 +177,9 @@ def _blockers(*, lifecycle_errors: list[dict[str, Any]], phase: str, gate: Mappi
         rows.append({"code": "INTERRUPTED_SCHEDULER", "detail": sched_state.get("stop_reason") or sched_state.get("status")})
     if recon.get("pending_paths") or recon.get("stale_paths"):
         rows.append({"code": "RECONCILIATION_REQUIRED", "pending_paths": list(recon.get("pending_paths") or []), "stale_paths": list(recon.get("stale_paths") or [])})
+    if isinstance(provider_state, Mapping) and isinstance(provider_state.get("pause"), Mapping):
+        pause = provider_state.get("pause") or {}
+        rows.append({"code": "PROVIDER_USAGE_LIMIT", "detail": "; ".join(str(x) for x in pause.get("findings") or []) or pause.get("guard") or "provider quota admission blocked"})
     if isinstance(state, Mapping) and state.get("last_qualification_failure"):
         rows.append({"code": "QUALIFICATION_FAILED", "detail": state.get("last_qualification_failure")})
     if phase == "READY_TO_COMMIT" and qual.get("available") is True and qual.get("qualified_current_repository") is not True:
@@ -186,7 +189,7 @@ def _blockers(*, lifecycle_errors: list[dict[str, Any]], phase: str, gate: Mappi
     return rows
 
 
-def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None, controller_state: Mapping[str, Any] | None, state: Mapping[str, Any] | None, gate: Mapping[str, Any], sched: Mapping[str, Any], recon: Mapping[str, Any], qual: Mapping[str, Any], latest: Mapping[str, Any] | None, blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None, controller_state: Mapping[str, Any] | None, state: Mapping[str, Any] | None, provider_state: Mapping[str, Any] | None, gate: Mapping[str, Any], sched: Mapping[str, Any], recon: Mapping[str, Any], qual: Mapping[str, Any], latest: Mapping[str, Any] | None, blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if any(row.get("code") == "INVALID_EVIDENCE" for row in blockers):
         return []
     if not adopted:
@@ -226,6 +229,15 @@ def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None
         rows.append({"action": "plan.retire-preview", "reason": "retire the exact blocked plan by rollback or carry-forward"})
         return rows
     if phase == "APPROVED":
+        if isinstance(provider_state, Mapping) and isinstance(provider_state.get("pause"), Mapping):
+            pause = provider_state.get("pause") or {}
+            quota = pause.get("quota_snapshot") if isinstance(pause.get("quota_snapshot"), Mapping) else {}
+            rows = [{"action": "provider.usage-refresh", "reason": "refresh zero-model Codex quota evidence before retry"}]
+            if int(quota.get("available_reset_credits") or 0) > 0:
+                rows.append({"action": "provider.reset-preview", "reason": "banked reset credit is available for explicit operator redemption"})
+            rows.append({"action": "scheduler.run-preview", "reason": "retry/wait according to the reviewed provider usage policy"})
+            rows.append({"action": "plan.retire-preview", "reason": "retire the exact active plan instead of waiting for quota"})
+            return rows
         sched_state = sched.get("scheduler") if isinstance(sched.get("scheduler"), Mapping) else {}
         if str(sched_state.get("status") or "") in {"INTERRUPTED", "TURN_RUNNING"}:
             return [{"action": "scheduler.recover-preview", "reason": "interrupted turn must be reconciled before execution continues"}]
@@ -269,9 +281,10 @@ def build_lifecycle_snapshot(
     gate_status = _safe("human_gate", lambda: human_control.gate_status(root))
     qual_status = _safe("qualification", lambda: qualification.qualification_status(root))
     fin_status = _safe("finalization", lambda: finalization.finalization_status(root))
+    provider_status = _safe("provider_usage", lambda: provider_usage.recorded_status(root))
     usage_status = _safe("usage", lambda: usage.usage_report(root))
 
-    errors = [row for row in (plan_status, sched_status, gate_status, qual_status, fin_status, usage_status) if row.get("available") is False]
+    errors = [row for row in (plan_status, sched_status, gate_status, qual_status, fin_status, provider_status, usage_status) if row.get("available") is False]
     state = plan_status.get("plan") if plan_status.get("available") is True and isinstance(plan_status.get("plan"), Mapping) else None
     latest_receipt = _latest_controller_receipt(root)
     latest = _turn_summary(latest_receipt)
@@ -281,13 +294,15 @@ def build_lifecycle_snapshot(
     selfdev = _self_development_summary(state)
     gate = gate_status if gate_status.get("available") is True else {"open": False, "gate": None}
     sched = sched_status if sched_status.get("available") is True else {"scheduler": None}
-    blockers = _blockers(lifecycle_errors=errors, phase=phase, gate=gate, sched=sched, recon=recon, qual=qual_status, state=state, latest=latest)
+    provider_state = provider_status.get("state") if provider_status.get("available") is True and isinstance(provider_status.get("state"), Mapping) else None
+    blockers = _blockers(lifecycle_errors=errors, phase=phase, gate=gate, sched=sched, recon=recon, qual=qual_status, provider_state=provider_state, state=state, latest=latest)
     next_actions = _actions(
         phase=phase,
         adopted=adopted,
         transaction=transaction,
         controller_state=controller_state,
         state=state,
+        provider_state=provider_state,
         gate=gate,
         sched=sched,
         recon=recon,
@@ -320,6 +335,7 @@ def build_lifecycle_snapshot(
             "mode": execution_policy.get("efficiency_mode") if isinstance(execution_policy, Mapping) else None,
             "latest": latest.get("efficiency") if isinstance(latest, Mapping) else None,
         },
+        "provider_usage": provider_status,
         "usage": usage_status,
         "latest_controller_turn": latest,
     }

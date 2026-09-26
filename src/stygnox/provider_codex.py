@@ -5,6 +5,7 @@ policy.  Importing Stygnox never selects Codex, a model, or an effort level.
 """
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 from pathlib import Path
@@ -13,11 +14,15 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from typing import Any, Mapping
 
 
 PROVIDER_NAME = "codex"
 MODEL_CATALOG_SCHEMA = "stygnox_codex_model_catalog_v1"
+RATE_LIMIT_SCHEMA = "stygnox_codex_rate_limits_v1"
+RESET_PREVIEW_SCHEMA = "stygnox_codex_reset_preview_v1"
+RESET_RESULT_SCHEMA = "stygnox_codex_reset_result_v1"
 APP_SERVER_TIMEOUT_SECONDS = 15.0
 _RESULT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -165,6 +170,217 @@ def model_catalog(cwd: Path, *, timeout: float = APP_SERVER_TIMEOUT_SECONDS) -> 
                 proc.kill()
             except OSError:
                 pass
+
+
+
+def _usage_window_name(minutes: int | None, fallback: str) -> str:
+    if minutes is None:
+        return fallback
+    if 285 <= minutes <= 315:
+        return "5h"
+    if 9576 <= minutes <= 10584:
+        return "weekly"
+    if 1368 <= minutes <= 1512:
+        return "daily"
+    return f"{minutes}m"
+
+
+def _normalise_rate_limits(raw: Mapping[str, Any], model: str | None = None) -> dict[str, Any]:
+    by_id = raw.get("rateLimitsByLimitId") if isinstance(raw.get("rateLimitsByLimitId"), Mapping) else {}
+    fallback = raw.get("rateLimits") if isinstance(raw.get("rateLimits"), Mapping) else None
+    if not by_id and fallback:
+        by_id = {str(fallback.get("limitId") or "codex"): fallback}
+    windows: list[dict[str, Any]] = []
+    plan_type = None
+    for limit_id, snapshot in by_id.items():
+        if not isinstance(snapshot, Mapping):
+            continue
+        if plan_type is None and snapshot.get("planType") is not None:
+            plan_type = str(snapshot.get("planType"))
+        relevant = str(limit_id).lower() == "codex"
+        if model:
+            relevant = relevant or snapshot.get("limitName") == model or snapshot.get("normalModelSlug") == model
+        if not relevant:
+            continue
+        for slot in ("primary", "secondary"):
+            window = snapshot.get(slot)
+            if not isinstance(window, Mapping) or window.get("usedPercent") is None:
+                continue
+            try:
+                used = max(0.0, min(100.0, float(window["usedPercent"])))
+            except (TypeError, ValueError):
+                continue
+            try:
+                minutes = int(window.get("windowDurationMins")) if window.get("windowDurationMins") is not None else None
+            except (TypeError, ValueError):
+                minutes = None
+            try:
+                reset = int(window.get("resetsAt")) if window.get("resetsAt") is not None else None
+            except (TypeError, ValueError):
+                reset = None
+            windows.append({
+                "limit_id": str(limit_id),
+                "name": _usage_window_name(minutes, slot),
+                "slot": slot,
+                "used_percent": used,
+                "remaining_percent": max(0.0, 100.0 - used),
+                "window_minutes": minutes,
+                "resets_at": reset,
+            })
+    windows.sort(key=lambda row: (row["limit_id"], row["slot"]))
+    resets = raw.get("rateLimitResetCredits") if isinstance(raw.get("rateLimitResetCredits"), Mapping) else {}
+    try:
+        available = int(resets.get("availableCount")) if resets.get("availableCount") is not None else None
+    except (TypeError, ValueError):
+        available = None
+    credits: list[dict[str, Any]] = []
+    for item in resets.get("credits") or []:
+        if not isinstance(item, Mapping):
+            continue
+        try:
+            granted = int(item.get("grantedAt")) if item.get("grantedAt") is not None else None
+        except (TypeError, ValueError):
+            granted = None
+        try:
+            expires = int(item.get("expiresAt")) if item.get("expiresAt") is not None else None
+        except (TypeError, ValueError):
+            expires = None
+        # The provider credit identifier is retained only as a one-way fingerprint.
+        # Redemption deliberately asks Codex to choose the currently available credit.
+        raw_id = str(item.get("id") or "")
+        credits.append({
+            "credit_ref": hashlib.sha256(raw_id.encode("utf-8")).hexdigest() if raw_id else None,
+            "status": str(item.get("status") or "unknown"),
+            "reset_type": str(item.get("resetType") or "unknown"),
+            "granted_at": granted,
+            "expires_at": expires,
+            "title": str(item.get("title") or "Banked reset"),
+            "description": str(item.get("description") or ""),
+        })
+    credits.sort(key=lambda row: (row.get("expires_at") is None, int(row.get("expires_at") or 2**62)))
+    body: dict[str, Any] = {
+        "schema": RATE_LIMIT_SCHEMA,
+        "provider": PROVIDER_NAME,
+        "model": model,
+        "plan_type": plan_type,
+        "ordinary_usage_allowed": raw.get("ordinaryUsageAllowed") if isinstance(raw.get("ordinaryUsageAllowed"), bool) else None,
+        "windows": windows,
+        "available_reset_credits": available,
+        "reset_credits": credits,
+    }
+    body["snapshot_sha256"] = _digest(body)
+    return body
+
+
+def _app_server_request(cwd: Path, method: str, *, params: Mapping[str, Any] | None = None, timeout: float = APP_SERVER_TIMEOUT_SECONDS) -> dict[str, Any]:
+    codex = shutil.which("codex")
+    if not codex:
+        raise ProviderError("reviewed provider 'codex' is not installed or not on PATH")
+    proc = subprocess.Popen(
+        [codex, "app-server", "--stdio"], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, bufsize=1,
+    )
+    try:
+        if proc.stdin is None:
+            raise ProviderError("Codex app-server stdin is unavailable")
+        _app_server_send(proc.stdin, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"clientInfo": {"name": "stygnox", "title": "Stygnox", "version": "13B-2"}, "capabilities": {"experimentalApi": True}},
+        })
+        _app_server_read_response(proc, 1, timeout)
+        _app_server_send(proc.stdin, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        request: dict[str, Any] = {"jsonrpc": "2.0", "id": 2, "method": method}
+        if params is not None:
+            request["params"] = dict(params)
+        _app_server_send(proc.stdin, request)
+        return _app_server_read_response(proc, 2, timeout)
+    finally:
+        try:
+            proc.terminate(); proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            try: proc.kill()
+            except OSError: pass
+
+
+def rate_limits(cwd: Path, model: str | None = None, *, timeout: float = APP_SERVER_TIMEOUT_SECONDS) -> dict[str, Any]:
+    """Read non-sensitive Codex quota/reset metadata without executing a model turn."""
+    return _normalise_rate_limits(_app_server_request(cwd, "account/rateLimits/read", timeout=timeout), model)
+
+
+def quota_guard(snapshot: Mapping[str, Any], reserve_percent: float, *, admitted: bool = False) -> tuple[str, list[str]]:
+    ordinary = snapshot.get("ordinary_usage_allowed")
+    windows = snapshot.get("windows") if isinstance(snapshot.get("windows"), list) else []
+    if ordinary is False:
+        return "PAUSE", ["backend ordinary usage is not allowed"]
+    if ordinary is None:
+        return "UNKNOWN", ["backend ordinaryUsageAllowed is unavailable"]
+    if not windows:
+        return "UNKNOWN", ["no relevant Codex rate-limit windows were returned"]
+    low = [row for row in windows if isinstance(row, Mapping) and float(row.get("remaining_percent", 100.0)) <= reserve_percent]
+    if low:
+        findings = [f"{row.get('name', 'usage')} remaining {float(row.get('remaining_percent', 0.0)):.1f}% <= {reserve_percent:.1f}% reserve" for row in low]
+        return ("ADMITTED", findings) if admitted else ("PAUSE", findings)
+    return "SAFE", []
+
+
+def minimum_remaining(snapshot: Mapping[str, Any]) -> float | None:
+    windows = snapshot.get("windows") if isinstance(snapshot.get("windows"), list) else []
+    values = [float(row.get("remaining_percent", 100.0)) for row in windows if isinstance(row, Mapping)]
+    return min(values) if values else None
+
+
+def quota_poll_delay(snapshot: Mapping[str, Any], default_seconds: int) -> int:
+    now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    resets = [int(row["resets_at"]) for row in snapshot.get("windows", []) if isinstance(row, Mapping) and isinstance(row.get("resets_at"), int) and int(row["resets_at"]) > now]
+    if not resets:
+        return max(15, int(default_seconds))
+    return max(15, min(int(default_seconds), min(resets) - now + 5))
+
+
+def reset_credit_preview(cwd: Path, operator: str) -> dict[str, Any]:
+    snapshot = rate_limits(cwd)
+    available = snapshot.get("available_reset_credits")
+    if not isinstance(available, int) or available < 1:
+        raise ProviderError("no banked Codex reset credit is currently available")
+    body = {
+        "schema": RESET_PREVIEW_SCHEMA,
+        "provider": PROVIDER_NAME,
+        "operator": str(operator or "").strip(),
+        "quota_snapshot_sha256": snapshot["snapshot_sha256"],
+        "available_reset_credits": available,
+        "reset_credits": snapshot.get("reset_credits") or [],
+        "requires_explicit_confirmation": True,
+        "confirmation": "REDEEM",
+    }
+    body["preview_sha256"] = _digest(body)
+    return body
+
+
+def redeem_reset_credit(cwd: Path, operator: str, preview_sha256: str, confirmation: str) -> dict[str, Any]:
+    if confirmation != "REDEEM":
+        raise ProviderError("explicit confirmation required: --confirm REDEEM")
+    preview = reset_credit_preview(cwd, operator)
+    if str(preview_sha256 or "").strip().lower() != preview["preview_sha256"]:
+        raise ProviderError("reset-credit preview is stale; provider quota/reset evidence changed")
+    result = _app_server_request(
+        cwd,
+        "account/rateLimitResetCredit/consume",
+        params={"idempotencyKey": str(uuid.uuid4())},
+    )
+    outcome = str(result.get("outcome") or "unknown")
+    if outcome not in {"reset", "nothingToReset", "noCredit", "alreadyRedeemed"}:
+        raise ProviderError(f"unexpected banked-reset outcome: {outcome}")
+    refreshed = rate_limits(cwd)
+    body = {
+        "schema": RESET_RESULT_SCHEMA,
+        "provider": PROVIDER_NAME,
+        "operator": str(operator or "").strip(),
+        "outcome": outcome,
+        "before_snapshot_sha256": preview["quota_snapshot_sha256"],
+        "after": refreshed,
+    }
+    body["result_sha256"] = _digest(body)
+    return body
 
 
 def selection_from_catalog(catalog: Mapping[str, Any], model: str, effort: str | None) -> dict[str, Any]:

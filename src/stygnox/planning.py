@@ -15,7 +15,7 @@ import re
 import sys
 from typing import Any, Mapping, Sequence
 
-from . import adoption, controller, provider_codex, usage
+from . import adoption, controller, provider_codex, provider_usage, usage
 from .product import PRODUCT
 
 
@@ -323,6 +323,19 @@ def propose_plan(
     root = Path(preview["worktree"])
     minimum = int(preview["planning"]["min_steps"])
     maximum = int(preview["planning"]["max_steps"])
+    policy_status = controller._policy_status(root)
+    controls = policy_status.get("policy") or {}
+    try:
+        provider_usage.ensure_capacity(
+            root,
+            plan_state=None,
+            model=str(preview["model"]),
+            reserve_percent=float(controls.get("reserve_percent", 5.0)),
+            wait=bool(controls.get("wait_for_limits", True)),
+            poll_seconds=int(controls.get("usage_poll_seconds", 60)),
+        )
+    except provider_usage.ProviderUsageError as exc:
+        raise PlanningError(str(exc)) from exc
     try:
         provider = provider_codex.execute_structured(
             cwd=root,

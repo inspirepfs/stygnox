@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from stygnox import provider_codex  # noqa: E402
-from tests.provider_catalog_fixture import test_catalog  # noqa: E402
+from tests.provider_catalog_fixture import safe_rate_limits, test_catalog  # noqa: E402
 
 
 class InstalledCodexMetricTests(TestCase):
@@ -21,6 +21,9 @@ class InstalledCodexMetricTests(TestCase):
         self._provider_catalog_patch = mock.patch.object(provider_codex, "model_catalog", return_value=test_catalog())
         self._provider_catalog_patch.start()
         self.addCleanup(self._provider_catalog_patch.stop)
+        self._provider_rate_patch = mock.patch.object(provider_codex, "rate_limits", return_value=safe_rate_limits())
+        self._provider_rate_patch.start()
+        self.addCleanup(self._provider_rate_patch.stop)
 
     def test_metric_parser_preserves_historical_metric_contract(self) -> None:
         output = "\n".join(

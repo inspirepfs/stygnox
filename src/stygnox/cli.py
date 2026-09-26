@@ -69,6 +69,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if namespace.command == "usage":
         from .usage import cli_main
         return cli_main(namespace.args)
+    if namespace.command in {"provider-usage", "quota"}:
+        from .provider_usage import cli_main
+        return cli_main(namespace.args)
     if namespace.command == "scheduler":
         from .scheduler import cli_main
         return cli_main(namespace.args)

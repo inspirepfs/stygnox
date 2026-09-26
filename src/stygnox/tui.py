@@ -241,6 +241,16 @@ def render_snapshot(snapshot: Mapping[str, Any], *, color_mode: str = "auto", wi
 
         qual = lifecycle.get("qualification") if isinstance(lifecycle.get("qualification"), Mapping) else {}
         fin = lifecycle.get("finalization") if isinstance(lifecycle.get("finalization"), Mapping) else {}
+        provider_usage = lifecycle.get("provider_usage") if isinstance(lifecycle.get("provider_usage"), Mapping) else {}
+        provider_state = provider_usage.get("state") if isinstance(provider_usage.get("state"), Mapping) else {}
+        provider_quota = provider_state.get("quota") if isinstance(provider_state.get("quota"), Mapping) else {}
+        provider_admission = provider_state.get("admission") if isinstance(provider_state.get("admission"), Mapping) else {}
+        provider_pause = provider_state.get("pause") if isinstance(provider_state.get("pause"), Mapping) else {}
+        provider_usage = lifecycle.get("provider_usage") if isinstance(lifecycle.get("provider_usage"), Mapping) else {}
+        provider_state = provider_usage.get("state") if isinstance(provider_usage.get("state"), Mapping) else {}
+        provider_quota = provider_state.get("quota") if isinstance(provider_state.get("quota"), Mapping) else {}
+        provider_admission = provider_state.get("admission") if isinstance(provider_state.get("admission"), Mapping) else {}
+        provider_pause = provider_state.get("pause") if isinstance(provider_state.get("pause"), Mapping) else {}
         usage = lifecycle.get("usage") if isinstance(lifecycle.get("usage"), Mapping) else {}
         eff = lifecycle.get("efficiency") if isinstance(lifecycle.get("efficiency"), Mapping) else {}
         fin_status = fin.get("plan_status") if fin.get("available") is not False else "-"
@@ -250,6 +260,7 @@ def render_snapshot(snapshot: Mapping[str, Any], *, color_mode: str = "auto", wi
             f"Qualification {qual_status or '-'} · current {'YES' if qual.get('qualified_current_repository') else 'NO'}",
             f"Finalization {fin_status or '-'} · commit {fin.get('commit_sha') or '-'}",
             f"Efficiency    {eff.get('mode') or '-'} · latest {_state(eff.get('latest') if isinstance(eff.get('latest'), Mapping) else None)}",
+            f"Provider      {'PAUSED '+str(provider_pause.get('guard')) if provider_pause else ('ADMITTED' if provider_admission.get('admitted') else 'not admitted')} · resets {provider_quota.get('available_reset_credits', '-')}",
             f"Usage         turns {summary.get('turn_count', summary.get('records', 0))} · input {summary.get('input_tokens', 0)} · output {summary.get('output_tokens', 0)}",
         ]
         lines += [""] + _section("QUALIFICATION / FINALIZATION", runtime_rows, width=columns, color=enabled, tone="purple")

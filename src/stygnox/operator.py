@@ -279,6 +279,16 @@ def dispatch_action(project: Path, action: str, payload: Mapping[str, Any]) -> d
             result = transactions.restore_baseline(root, operator_name, str(payload.get("preview") or ""), str(payload.get("confirm") or ""), str(payload.get("post_handoff_disposition") or ""))
         elif name == "policy.catalog":
             result = execution_policy.show_provider_catalog(root)
+        elif name == "provider.usage-refresh":
+            from . import provider_usage
+            policy = execution_policy.show_policy(root).get("policy") or {}
+            result = provider_usage.provider_status(root, policy.get("model"))
+        elif name == "provider.reset-preview":
+            from . import provider_usage
+            result = provider_usage.build_reset_preview(root, operator_name)
+        elif name == "provider.reset-redeem":
+            from . import provider_usage
+            result = provider_usage.redeem_reset(root, operator_name, str(payload.get("preview") or ""), str(payload.get("confirm") or ""))
         elif name == "policy.preview":
             kwargs = _policy_kwargs(payload)
             kwargs["reset"] = bool(payload.get("reset"))
