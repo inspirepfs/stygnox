@@ -111,6 +111,15 @@ def test_policy_violations(
     return violations, candidates
 
 
+def _approval_new_test_candidates(state: Mapping[str, Any], candidates: Iterable[str]) -> list[str]:
+    """Keep only exact test candidates absent from the canonical approval manifest."""
+    manifest = state.get("approval_repository_manifest")
+    if not isinstance(manifest, Mapping):
+        raise HumanControlError("approved plan lacks repository manifest evidence for new-test authority")
+    approval_paths = {_normalize_repo_path(path) for path in manifest}
+    return sorted({_normalize_repo_path(path) for path in candidates} - approval_paths)
+
+
 def approved_step_delegates_human_gate(step: Mapping[str, Any]) -> bool:
     acceptance = step.get("acceptance") if isinstance(step.get("acceptance"), list) else []
     text = " ".join((str(step.get("objective") or ""), *(str(item) for item in acceptance))).lower()
@@ -188,6 +197,8 @@ def open_gate(
     gate_id = f"HG-{sequence:04d}-{step_no:02d}"
     step = plan["steps"][step_no - 1]
     candidates = sorted({_normalize_repo_path(path) for path in allowed_new_test_candidates})
+    if kind == "test-policy":
+        candidates = _approval_new_test_candidates(state, candidates)
     self_candidates: list[dict[str, Any]] = []
     for raw in self_development_candidates:
         if not isinstance(raw, Mapping):
@@ -297,6 +308,8 @@ def _decision_preview(
     allowed: list[str] = []
     if action == "steer":
         candidates = set(gate.get("allowed_new_test_candidates") or [])
+        if gate.get("kind") == "test-policy":
+            candidates = set(_approval_new_test_candidates(state, candidates))
         for raw in allow_new_tests:
             path = _normalize_repo_path(raw)
             if not path.startswith("tests/"):
@@ -362,10 +375,27 @@ def _apply_decision(preview: Mapping[str, Any], supplied_preview: str, confirmat
     required = str(preview["action"]).upper()
     if confirmation != required:
         raise HumanControlError(f"explicit confirmation required: --confirm {required}")
-    root = Path(str(preview["worktree"]))
-    state = planning._record(root)
-    assert state is not None
-    gate = _validate_gate_object(state.get("active_gate"))
+
+    # Re-read the canonical blocked-gate authority immediately before any
+    # decision mutation.  The preview is an approval of this exact record,
+    # plan/step, gate, and repository baseline--not merely its own digest.
+    root, state, gate, current, name = _active_gate_context(
+        Path(str(preview["worktree"])),
+        str(preview["operator"]),
+        str(preview["plan_hash"]),
+        str(preview["gate_id"]),
+    )
+    if (
+        str(preview["worktree"]) != str(root)
+        or preview["operator"] != name
+        or preview["plan_record_sha256"] != state.get("record_sha256")
+        or preview["plan_hash"] != state.get("plan_hash")
+        or preview["current_step"] != int(state["current_step"])
+        or preview["gate_id"] != gate.get("gate_id")
+        or preview["gate_sha256"] != gate.get("gate_sha256")
+        or preview["blocked_baseline_sha256"] != current.get("sha256")
+    ):
+        raise HumanControlError("human decision preview is stale; gate, authority, baseline, or decision changed")
     action = str(preview["action"])
     now = _utc_now()
     decision = {
