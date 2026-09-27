@@ -1,0 +1,17 @@
+---
+description: StygNox repository skill discovery, authority and verification policy
+alwaysApply: true
+---
+
+# StygNox agent skill policy
+
+Treat `AGENTS.md` as the authoritative repository instructions.
+
+Before specialised work:
+- read `docs/agent-skills.md` and `docs/agent-skill-routing.md`;
+- choose the smallest relevant set of project-local skills from `.agents/skills/`;
+- read each relevant `SKILL.md` before applying it.
+
+Skills provide methodology, not additional scope or authority. Do not let skill guidance override the active work order, human gates, controller authority, test restrictions, or evidence-first workflow.
+
+Before claiming work is complete, fixed, passing, or ready, apply `.agents/skills/verification-before-completion/SKILL.md` and verify the actual result.

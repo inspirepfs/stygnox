@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "skills": {
+    "accessibility-audit": {
+      "source": "accesslint/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/accesslint/skills/accessibility-audit/SKILL.md",
+      "computedHash": "87e88d724a6f06d475e869055e1a231769e7c252c96a830fd0dbdabc6a006207"
+    },
+    "accessibility-diff": {
+      "source": "accesslint/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/accesslint/skills/accessibility-diff/SKILL.md",
+      "computedHash": "0fe35de7ad63c36fc8b5a28cff090e34a174e7e1200656e84feb9067f5db17c5"
+    },
+    "accessibility-fix": {
+      "source": "accesslint/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/accesslint/skills/accessibility-fix/SKILL.md",
+      "computedHash": "cad06115e62d45bd3c41f7c7c2dd7f8ed0549832fece57a031b48cdc1edf70cb"
+    },
+    "accessibility-inspect": {
+      "source": "accesslint/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/accesslint/skills/accessibility-inspect/SKILL.md",
+      "computedHash": "46b4327beb0d25829815e6da7476a91bb79720b0b8703f0fc47988e45d1036b9"
+    },
+    "accessibility-scan": {
+      "source": "accesslint/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/accesslint/skills/accessibility-scan/SKILL.md",
+      "computedHash": "6054f1cdbaa768e901f64fc3c45415335254c36cf8f44c0fd55adc3f7eaf268a"
+    },
+    "codemapper": {
+      "source": "zenobi-us/dotfiles",
+      "ref": "master",
+      "sourceType": "github",
+      "skillPath": "files/devtools/agent/bundles/developer/skills/devtools/codemapper/SKILL.md",
+      "computedHash": "fc926930642a5b61315760df3b5dd96a980c71322ea95c9d7cb9824cc4099558"
+    },
+    "contract-testing-builder": {
+      "source": "patricio0312rev/skills",
+      "sourceType": "github",
+      "skillPath": "testing/contract-testing-builder/SKILL.md",
+      "computedHash": "9caa30d22285b169ad8dc045101f516e0cb28773bc89bcebbe10c385ab58c67a"
+    },
+    "design-systems-frontend-architecture": {
+      "source": "hueyexe/frontend-agent-skills",
+      "sourceType": "github",
+      "skillPath": "design-systems-frontend-architecture/SKILL.md",
+      "computedHash": "7c9efa94af5ab8c50bdfb92928eb038f8176c7f3f1c8a8f47770bfa7000e7198"
+    },
+    "doc-author": {
+      "source": "mintlify/docs",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/doc-author/SKILL.md",
+      "computedHash": "ea13bf00af1086eff6839fd7ac0ab4d73469a6eed31b03d13e6d1977f0d22d03"
+    },
+    "fastapi": {
+      "source": "fastapi/fastapi",
+      "sourceType": "github",
+      "skillPath": "fastapi/.agents/skills/fastapi/SKILL.md",
+      "computedHash": "e85d9e223fbc3183b1a599bbe8b02d2edf275d046ff5bcfd14352c92cdff52b3"
+    },
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/frontend-design/SKILL.md",
+      "computedHash": "89496d5dd00f4810205f351759594fc2742bf8eea85a2f2b2d1de59f4bd91576"
+    },
+    "impeccable": {
+      "source": "pbakaus/impeccable",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/impeccable/SKILL.md",
+      "computedHash": "f7c4e03bef91154273d2dc3b62aff829cf4ab1b1f16e6b98c8c6a31be4405318"
+    },
+    "playwright-best-practices": {
+      "source": "currents-dev/playwright-best-practices-skill",
+      "sourceType": "github",
+      "skillPath": "playwright-best-practices/SKILL.md",
+      "computedHash": "7eb144f734450fee649dc1d209114775ddda07cbf45be84fe969d3d4f3971dce"
+    },
+    "state-management": {
+      "source": "akillness/jeo-skills",
+      "sourceType": "github",
+      "skillPath": ".agent-skills/state-management/SKILL.md",
+      "computedHash": "db6fece9c51b827f2e78c34dbd9283c77209873458a2ebe374139b2becd84cf7"
+    },
+    "testing-anti-patterns": {
+      "source": "bobmatnyc/claude-mpm-skills",
+      "sourceType": "github",
+      "skillPath": "universal/testing/testing-anti-patterns/SKILL.md",
+      "computedHash": "cef05129ee3cb3159716880f50b634cbcdcf1dff922985b1b575c18150c61a10"
+    },
+    "ui-ux-pro-max": {
+      "source": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/ui-ux-pro-max/SKILL.md",
+      "computedHash": "d600e554b3118672b5f82cf6f21352dc6b15374ed5976e14a64a4b3c6c131d6b"
+    },
+    "vercel-composition-patterns": {
+      "source": "vercel-labs/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/composition-patterns/SKILL.md",
+      "computedHash": "f98931159fa9c7fed043bcd18a891a46dcf89ababa38df13a4c5b7b30dc0ce07"
+    },
+    "vercel-react-best-practices": {
+      "source": "vercel-labs/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/react-best-practices/SKILL.md",
+      "computedHash": "3219a1944e404ffc14d1d9d6aef6dd2e3855b81387ee0a044ccbfe14d34c2357"
+    },
+    "verification-before-completion": {
+      "source": "obra/superpowers",
+      "sourceType": "github",
+      "skillPath": "skills/verification-before-completion/SKILL.md",
+      "computedHash": "b529822bdac4b197b180fe12225cff86b930b65910435103c10622df7f041651"
+    },
+    "web-design-guidelines": {
+      "source": "vercel-labs/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/web-design-guidelines/SKILL.md",
+      "computedHash": "a6a44d5498f7e8f68289902f3dedfc6f38ae0cee1e96527c80724cf27f727c2a"
+    },
+    "webapp-testing": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/webapp-testing/SKILL.md",
+      "computedHash": "ad5b1fc52807e9afa4635e59218a026b164dc58b6c3f41b0f7c644dcd6ccf572"
+    }
+  }
+}
