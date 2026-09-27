@@ -2,7 +2,7 @@
 
 This module aggregates controller-owned Stygnox evidence for presentation
 surfaces.  It never grants authority, mutates runtime state, or repairs invalid
-evidence.  Web/TUI/CLI may render this projection but must continue to invoke
+evidence. TUI/CLI and future presentation layers may render this projection but must continue to invoke
 explicit authority functions for every action.
 """
 from __future__ import annotations

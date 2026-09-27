@@ -160,6 +160,8 @@ model/effort override preview/approval.
 
 ## D8.6 — external Web/TUI, carry-forward/adoption, and operator UX
 
+**13D-R2 note:** the historical Web presentation portion of this stage is explicitly retired. The operator/TUI authority contract and reconciliation semantics remain; Web UI vNext is a ground-up successor consuming that contract.
+
 **Predecessors:** D8.2, D8.3, and D8.5 gates.
 
 **Bounded outcome:** Neutral installed CLI, Web, and TUI have equivalent

@@ -26,7 +26,6 @@ QUALIFIERS = [
     ("D8.3", "qualify_d8_3_transactions.py"),
     ("D8.4", "qualify_d8_4_lifecycle.py"),
     ("D8.5", "qualify_d8_5_controller.py"),
-    ("D8.6A", "qualify_d8_6a_web.py"),
     ("D8.6B", "qualify_d8_6b_tui.py"),
 ]
 REQUIRED_RELEASE_FILES = {
@@ -47,12 +46,14 @@ REQUIRED_SOURCE_MEMBERS = {
     "docs/d8-7-operator-guide.md",
     "docs/d8-7-release-candidate.md",
     "docs/d8-7-post-extraction-report.md",
+    "docs/web-ui-retirement.md",
     "scripts/build_d8_7_release.py",
     "scripts/qualify_d8_7_release.py",
     "scripts/stygnox_qualification_artifact.py",
     "branding/docs/STYLE_GUIDE.md",
     "provenance/stygnox-extraction-seed.json",
     "tests/test_stygnox_release.py",
+    "tests/test_stygnox_presentation_boundary.py",
     "CLA.md",
     "COMMERCIAL-LICENSING.md",
     "CONTRIBUTING-LICENSING.md",
@@ -143,12 +144,26 @@ def verify_source_archive(source: Path) -> dict[str, object]:
         raise RuntimeError(f"source-review archive contains generated/runtime material: {forbidden_generated[:8]}")
     if prefix + "APPLY.md" in names:
         raise RuntimeError("source-review archive contains obsolete one-time licensing application scaffolding")
+    retired_web_members = {
+        prefix + "src/stygnox/web.py",
+        prefix + "src/stygnox/web_brand.py",
+        prefix + "src/stygnox/web_assets/__init__.py",
+        prefix + "src/stygnox/web_assets/operator.js",
+        prefix + "scripts/stygnox_web.py",
+        prefix + "scripts/qualify_d8_6a_web.py",
+        prefix + "tests/test_stygnox_web.py",
+        prefix + "tests/test_stygnox_web_lifecycle.py",
+    }
+    leaked_web = sorted(retired_web_members & names)
+    if leaked_web:
+        raise RuntimeError(f"retired installed Web surface leaked into source-review archive: {leaked_web}")
     return {
         "file_count": len(names),
         "required_material": "PASS",
         "generated_material_excluded": "PASS",
         "governance_material": "PASS",
         "apply_scaffolding": "ABSENT",
+        "retired_installed_web_surface": "ABSENT",
     }
 
 
@@ -180,6 +195,18 @@ def verify_wheel(wheel: Path) -> dict[str, object]:
                 forbidden_paths.append(name)
             if name.endswith(".py") and name.startswith("stygnox/"):
                 legacy_imports.extend(_legacy_imports(archive.read(name).decode("utf-8"), name))
+        retired_web_members = {
+            "stygnox/web.py",
+            "stygnox/web_brand.py",
+            "stygnox/web_assets/__init__.py",
+            "stygnox/web_assets/operator.js",
+            "stygnox/web_assets/operator.css",
+            "stygnox/web_assets/design-tokens.css",
+            "stygnox/web_assets/components.css",
+        }
+        leaked_web = sorted(name for name in names if name in retired_web_members or name.startswith("stygnox/web_assets/"))
+        if leaked_web:
+            raise RuntimeError(f"retired installed Web surface leaked into wheel: {leaked_web}")
         entry_points = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
         if len(entry_points) != 1:
             raise RuntimeError(f"wheel entry-point metadata is ambiguous: {entry_points}")
@@ -204,8 +231,6 @@ def verify_wheel(wheel: Path) -> dict[str, object]:
         required_assets = {
             "stygnox/terminal_assets/stygnox-ascii.txt": ROOT / "branding/assets/ascii/stygnox-ascii.txt",
             "stygnox/terminal_assets/stygnox-ascii-ansi.txt": ROOT / "branding/assets/ascii/stygnox-ascii-ansi.txt",
-            "stygnox/web_assets/design-tokens.css": ROOT / "branding/css/design-tokens.css",
-            "stygnox/web_assets/components.css": ROOT / "branding/css/components.css",
         }
         for member, authority in required_assets.items():
             if member not in names or archive.read(member) != authority.read_bytes():
@@ -219,6 +244,7 @@ def verify_wheel(wheel: Path) -> dict[str, object]:
         "legacy_source_paths": "ABSENT",
         "legacy_ralph_imports": "ABSENT",
         "branding_assets": "PASS",
+        "retired_installed_web_surface": "ABSENT",
         "canonical_generator": "PASS",
         "legal_metadata": "PASS",
     }
@@ -235,7 +261,7 @@ def verify_docs(release_dir: Path) -> dict[str, str]:
         "Transaction authority, safe stop, and exact recovery",
         "Migration from supported legacy RALPH state",
         "Upgrade and uninstall",
-        "Web, TUI, and operator surfaces",
+        "TUI and operator surfaces",
         "Release qualification",
     ]
     absent = [phrase for phrase in required_phrases if phrase not in guide]

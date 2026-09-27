@@ -14,7 +14,7 @@ evidence.
 | D9 gate | D8.7 closure evidence | D8.7 disposition |
 | --- | --- | --- |
 | D9-G-01 installed command | One versioned wheel; exact SHA-256; D8.1 resolves `stygnox` outside new/clean/dirty worktrees. | CLOSE WHEN D8.7 PASS |
-| D9-G-02 neutral surfaces | Wheel import scan plus D8.1/D8.6A/D8.6B installed CLI/Web/TUI gates; no legacy Ralph import dependency. | CLOSE WHEN D8.7 PASS |
+| D9-G-02 neutral surfaces | Wheel import scan plus D8.1/D8.6B installed CLI/operator/TUI gates; no legacy Ralph import dependency. The Web UI is explicitly retired. | CLOSE WHEN D8.7 PASS |
 | D9-G-03 new bootstrap | D8.2/D8.3 new-unborn preview, handoff, interruption revalidation, safe stop and exact restore against the release wheel. | CLOSE WHEN D8.7 PASS |
 | D9-G-04 tracked/runtime boundary | D8.2/D8.3 prove tracked config/policy review and ignored controller-owned `.stygnox/` runtime. | CLOSE WHEN D8.7 PASS |
 | D9-G-05 neutral identity/controller | D8.5 neutral profile/policy/controller qualification against the release wheel. | CLOSE WHEN D8.7 PASS |
@@ -24,7 +24,7 @@ evidence.
 | D9-G-09 untracked restoration | D8.3 dirty round trip covers untracked content, modes and empty directories and compares exact post-restore state. | CLOSE WHEN D8.7 PASS |
 | D9-G-10 extraction migration | D8.4 clean/dirty supported legacy migration, retained inventory, rollback and source-fallback isolation against the release wheel. | CLOSE WHEN D8.7 PASS |
 | D9-G-11 upgrade/uninstall | D8.4 support policy, upgrade compatibility, uninstall preparation, actual pip uninstall and retained-evidence readability. | CLOSE WHEN D8.7 PASS |
-| D9-G-12 Web/TUI | D8.6A/D8.6B installed Web/TUI/operator parity with loopback-default and credential-gated explicit non-loopback Web policy. | CLOSE WHEN D8.7 PASS |
+| D9-G-12 presentation surfaces | D8.6B installed operator/TUI parity plus 13D-R2 evidence that the legacy Web UI is removed while its canonical operator boundary is preserved. | CLOSE WHEN D8.7 PASS |
 | D9-G-13 reconciliation UX | D8.6 operator model exposes operator/native/runtime/external/unresolved attribution, human-decision stop, `auto_adopt=false`, `auto_reattribute=false`. | CLOSE WHEN D8.7 PASS |
 | D9-G-14 release docs | Release set contains the operator guide, closure map, post-extraction report, README, detailed stage docs and license. | CLOSE WHEN D8.7 PASS |
 | D9-G-15 exact artifact | D8.7 builds once and supplies the same wheel digest to every predecessor installed qualifier. | CLOSE WHEN D8.7 PASS |
@@ -53,7 +53,7 @@ The wheel remains the install boundary declared by `stygnox support`.
 
 ## Build-once qualification
 
-Every D8.1–D8.6B qualifier retains standalone operation, but D8.7 supplies the
+Every retained D8.1–D8.5/D8.6B qualifier retains standalone operation, but D8.7 supplies the
 release wheel through `STYGNOX_QUALIFICATION_WHEEL`. Each qualifier must report
 the same wheel SHA-256. A mismatch is a release failure.
 
@@ -91,4 +91,4 @@ Do not promote to D9 if any predecessor qualifier reports a different wheel
 digest, any release checksum fails, deterministic rebuild differs, operator
 documentation is absent, an installed module imports legacy Ralph code, dirty
 restoration is not exact, unsupported legacy state mutates before refusal, or
-any D8.1–D8.6B gate is not green.
+any retained D8.1–D8.5 or D8.6B gate is not green.

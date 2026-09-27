@@ -22,11 +22,6 @@ substitute for the installed command boundary.
   user-managed Python environment; and
 - no supported system-package-manager install path.
 
-The Web surface defaults to loopback. Explicit non-loopback binding is supported
-when a Stygnox Web username/password has been configured for the project. Plain
-HTTP is intended only for trusted lab/LAN use; TLS can be added separately when
-transport confidentiality is required.
-
 ## Release-set verification and installation
 
 Verify the release directory before installation:
@@ -162,28 +157,29 @@ The built-in installed provider adapter is `codex`. D8.7 does not grant
 unreviewed provider selection or more than the currently qualified one-loop
 execution contract.
 
-## Web, TUI, and operator surfaces
+## TUI and operator surfaces
 
 The installed presentation-neutral operator model is available through:
 
 ```bash
 stygnox operator snapshot --project /path/to/project
+stygnox operator action --project /path/to/project --name <action> --payload-json '<json>'
 stygnox tui --project /path/to/project
-stygnox web --project /path/to/project --host 127.0.0.1 --port 8765
-
-# Optional direct LAN/mobile access
-stygnox web-auth set --username operator --project /path/to/project
-stygnox web --project /path/to/project --host 0.0.0.0 --port 8765
 ```
 
-CLI/Web/TUI share installed Stygnox semantics. Reconciliation presentation
-separates operator baseline, Stygnox-native, runtime-only, external/foreign,
-and unresolved overlap. External/unresolved material requires a human decision;
-it is not automatically adopted or reattributed.
+The D8.6A Web UI is retired and is not a supported installed surface. A future
+replacement frontend must consume the canonical operator snapshot/action
+contract and derive controls from canonical `next_actions`; it must not
+duplicate lifecycle or authority state in the presentation layer.
 
-Web mutations require the exact CSRF token. Non-loopback binding additionally requires configured Web authentication.
+Reconciliation presentation separates operator baseline, Stygnox-native,
+runtime-only, external/foreign, and unresolved overlap. External/unresolved
+material requires a human decision; it is not automatically adopted or
+reattributed.
+
 The TUI uses the committed Stygnox plain/ANSI identity, switches to a compact
-identity on narrow terminals, and honours `NO_COLOR`.
+identity on narrow terminals, and honours `NO_COLOR`. Authoritative Web/TUI
+branding sources remain under `branding/`; see `docs/web-ui-retirement.md`.
 
 ## Migration from supported legacy RALPH state
 
@@ -249,7 +245,7 @@ python3 scripts/qualify_d8_7_release.py --output-dir /tmp/stygnox-qualified-rele
 ```
 
 The D8.7 qualifier builds one release wheel once, records its digest, and forces
-D8.1 through D8.6B to qualify that same immutable wheel via
+the retained D8.1 through D8.5 and D8.6B gates to qualify that same immutable wheel via
 `STYGNOX_QUALIFICATION_WHEEL`. It also checks deterministic rebuilds, release
 contents, documentation presence, installed import isolation, and post-
 extraction legacy quarantine.

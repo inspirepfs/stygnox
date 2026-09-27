@@ -1,6 +1,6 @@
 """Presentation-neutral installed operator surface for D8.6.
 
-This module is the shared semantic adapter for Web/TUI/CLI parity. It reads only
+This module is the presentation-neutral semantic adapter for installed operator/TUI and future UI consumers. It reads only
 installed Stygnox state and dispatches only named, explicit installed-product
 actions.  It never imports or delegates to legacy Ralph/source-tree surfaces.
 """
@@ -256,7 +256,7 @@ def _policy_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def dispatch_action(project: Path, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Dispatch one exact installed-product action for Web/TUI parity."""
+    """Dispatch one exact presentation-neutral installed-product action."""
     if not isinstance(payload, Mapping):
         raise OperatorSurfaceError("action payload must be an object")
     root = adoption.resolve_worktree(project)

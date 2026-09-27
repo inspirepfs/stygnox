@@ -74,6 +74,12 @@ def main() -> int:
                 raise RuntimeError("canonical wheel generator marker is missing")
             if any(n.startswith(("scripts/", "tests/", "branding/", "provenance/")) for n in names):
                 raise RuntimeError("repository-only material leaked into installed wheel")
+            retired_web = sorted(
+                n for n in names
+                if n in {"stygnox/web.py", "stygnox/web_brand.py"} or n.startswith("stygnox/web_assets/")
+            )
+            if retired_web:
+                raise RuntimeError(f"retired installed Web surface leaked into wheel: {retired_web}")
 
         # Install the exact local wheel into an isolated venv and exercise it
         # from an unrelated repository with the source checkout absent from PATH.
@@ -90,9 +96,19 @@ def main() -> int:
         env.pop("PYTHONPATH", None)
         version_out = run([str(stygnox), "--version"], cwd=unrelated, env=env).stdout.strip()
         help_out = run([str(stygnox), "--help"], cwd=unrelated, env=env).stdout
-        web_help = run([str(stygnox), "web", "--help"], cwd=unrelated, env=env).stdout
         tui_help = run([str(stygnox), "tui", "--help"], cwd=unrelated, env=env).stdout
-        combined = "\n".join([help_out, web_help, tui_help])
+        for retired_command in ("web", "serve", "web-auth"):
+            retired = subprocess.run(
+                [str(stygnox), retired_command, "--help"],
+                cwd=unrelated, env=env, text=True, capture_output=True, check=False,
+            )
+            combined_retired = retired.stdout + retired.stderr
+            if retired.returncode == 0 or "unknown installed Stygnox command" not in combined_retired:
+                raise RuntimeError(
+                    f"retired Web command did not fail closed: {retired_command} "
+                    f"returncode={retired.returncode} output={combined_retired!r}"
+                )
+        combined = "\n".join([help_out, tui_help])
         if version_out != f"stygnox {VERSION}":
             raise RuntimeError(f"installed candidate reports unexpected version: {version_out!r}")
         if "D8.6" in combined or "D8.7 release packaging" in combined:
@@ -115,6 +131,7 @@ def main() -> int:
             "independent_install": "PASS",
             "unrelated_repository": "PASS",
             "operator_stage_hygiene": "PASS",
+            "retired_installed_web_surface": "ABSENT",
             "next_action": "reproduce this 0.1.0 wheel digest on an independent supported host before tagging v0.1.0",
         }
         print("D9 FINAL RELEASE QUALIFICATION PASS")

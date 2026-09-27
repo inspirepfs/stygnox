@@ -32,7 +32,7 @@ class StygnoxDistributionTests(TestCase):
             project["tool"]["setuptools"]["dynamic"]["version"]["attr"],
         )
         package_data = project["tool"]["setuptools"]["package-data"]["stygnox"]
-        self.assertIn("web_assets/*", package_data)
+        self.assertNotIn("web_assets/*", package_data)
         self.assertIn("terminal_assets/*", package_data)
 
     def test_installed_package_has_no_legacy_ralph_import(self) -> None:

@@ -592,7 +592,7 @@ def main() -> int:
             "provider_exec_invocations": exec_count,
             "legacy_source_fallback": "REFUSED",
             "fixtures": results,
-            "next_stage": "D8.6 external Web/TUI, carry-forward/adoption, and operator UX",
+            "next_stage": "D8.6B operator/TUI qualification; Web presentation retired by 13D-R2",
         }
         rendered = json.dumps(evidence, indent=2, sort_keys=True)
         if args.output_dir:

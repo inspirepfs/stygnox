@@ -1,4 +1,4 @@
-"""D8.6A presentation-neutral operator/reconciliation characterization tests."""
+"""Presentation-neutral operator/reconciliation contract tests."""
 from __future__ import annotations
 
 import json
@@ -23,7 +23,7 @@ def git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProces
 def init_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     git(path, "init", "-q")
-    git(path, "config", "user.name", "D8.6A Operator Test")
+    git(path, "config", "user.name", "Operator Surface Test")
     git(path, "config", "user.email", "test@example.invalid")
     (path / "README.md").write_text("baseline\n", encoding="utf-8")
     git(path, "add", "README.md")

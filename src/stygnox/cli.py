@@ -1,9 +1,8 @@
 """Installed Stygnox command surface.
 
-The installed command exposes the neutral Web, TUI and operator surfaces through
-the shared Stygnox authority model. Legacy source-tree Web/controller modules
-are compatibility/development surfaces only and are never imported by the
-installed command.
+The installed command exposes the neutral TUI and presentation-neutral operator
+surfaces through the shared Stygnox authority model. The retired Web UI and
+legacy source-tree Web/controller modules are not installed command surfaces.
 """
 from __future__ import annotations
 
@@ -24,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PRODUCT.command,
         description=(
             "Stygnox installed product with adoption, recovery, lifecycle, neutral execution-policy, "
-            "installed controller, bounded planning, scheduler/recovery, human gates, carry-forward reconciliation, scoped self-development authority, controller-owned qualification, controlled Git finalization/reconciliation, usage accounting, Web, operator, and terminal TUI surfaces."
+            "installed controller, bounded planning, scheduler/recovery, human gates, carry-forward reconciliation, scoped self-development authority, controller-owned qualification, controlled Git finalization/reconciliation, usage accounting, operator, and terminal TUI surfaces."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {PRODUCT.version}")
@@ -106,12 +105,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif namespace.command == "reconcile-push":
             args = ["reconcile-push", *args]
         return cli_main(args)
-    if namespace.command in {"web", "serve"}:
-        from .web import cli_main
-        return cli_main(namespace.args)
-    if namespace.command == "web-auth":
-        from .web import auth_cli_main
-        return auth_cli_main(namespace.args)
     if namespace.command == "operator":
         from .operator import cli_main
         return cli_main(namespace.args)

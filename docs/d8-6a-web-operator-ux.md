@@ -1,120 +1,60 @@
-# D8.6A — Installed Web operator UX and reconciliation projection
+# D8.6A — Installed Web operator UX — retired
 
-## Outcome
+## Historical status
 
-D8.6A moves the Web operator surface across the installed-product boundary.
-`stygnox web` is served by the wheel itself and never delegates to
-`scripts/ralph_web.py`, a target-local controller, or any ZEN/RALPH host
-adapter.
+D8.6A originally moved a Python-served Web operator console into the installed
+Stygnox package. 13D-R2 explicitly retires that presentation surface after
+operator use showed that it was not a viable foundation for the intended Web
+experience.
 
-This is the first half of D8.6. D8.6B owns the installed TUI, ANSI/plain terminal
-identity, final CLI/Web/TUI transcript parity, and the complete D8.6 release
-gate.
+The historical D8.6A work remains useful because it established the
+presentation-neutral operator boundary later shared by the TUI. The retired
+frontend itself is no longer a supported product surface.
 
-## Branding authority
+## 13D-R2 disposition
 
-The runtime Web assets are derived from and byte-checked against the approved
-brand source under `branding/`:
+The following installed Web material is retired:
 
-- `branding/css/design-tokens.css`;
-- `branding/css/components.css`;
-- `branding/assets/brand/stygnox-icon-128.png`;
-- `branding/assets/brand/stygnox-logo-800x300.png`.
+- `stygnox web` and `stygnox serve`;
+- `stygnox web-auth`;
+- the installed Python HTTP/HTML console;
+- package-local Web CSS/JavaScript/image copies;
+- the D8.6A installed-Web qualifier; and
+- Web tests whose purpose was to preserve the retired presentation or its
+  browser/login implementation.
 
-Operator-specific CSS follows the same dark-first, evidence-led rules. Purple
-is used for focus/brand energy rather than as a page fill. Critical authority
-or destructive state is always communicated with text in addition to colour.
+The following material is explicitly preserved:
 
-## Installed Web command
+- `stygnox.operator.operator_snapshot()`;
+- `stygnox.operator.dispatch_action()`;
+- the `stygnox operator snapshot` and `stygnox operator action` process
+  boundary;
+- canonical lifecycle/action schemas and controller-owned authority rules;
+- TUI consumption of the same operator surface; and
+- all authoritative branding sources under `branding/`.
 
-```bash
-stygnox web --project /path/to/project --host 127.0.0.1 --port 8765
-```
+The detailed replacement contract is documented in
+`docs/web-ui-retirement.md`.
 
-The original D8.6A closure supported loopback only. WEB-001 fixes that overly
-restrictive invariant while retaining loopback as the default. Non-loopback
-binds are now explicit and require configured Stygnox Web credentials before
-the server starts. Configure credentials with `stygnox web-auth set`, then use
-`--host` and `--port` for LAN/mobile testing. Plain HTTP remains a trusted-lab
-transport choice; TLS can be provided separately when required.
+## Why this is an explicit retirement rather than a repair
 
-Every POST mutation requires the exact server CSRF token. Arbitrary Web routes
-and arbitrary action names fail closed.
+The replacement Web UI is expected to be a ground-up implementation. It may be
+an independent frontend application so long as it consumes the canonical
+operator/controller boundary and does not create a competing authority model.
+Retaining the old frontend would make obsolete rendering, controls, polling,
+and browser tests an accidental compatibility contract.
 
-## Shared operator semantics
+Historical Ralph Web material remains source-only compatibility/evidence in
+13D-R2 and is not an installed Stygnox path.
 
-`stygnox.operator` is presentation-neutral. Web uses it now and D8.6B TUI will
-use the same adapter. Supported Web actions map directly onto installed product
-functions for:
+## Qualification after retirement
 
-- adoption preview / abort / handoff;
-- transaction begin / safe stop;
-- recovery preview / exact restore;
-- execution-policy preview / set / reset;
-- controller activate / deactivate;
-- controller run-preview / confirmed run.
+The Web-specific D8.6A runtime qualifier is removed. The surviving boundary is
+qualified through:
 
-No Web implementation is permitted to calculate weaker authority or bypass a
-preview digest / explicit confirmation already required by the installed CLI.
-
-## Carry-forward / reconciliation attribution
-
-D8.6A exposes five visible classes:
-
-1. **Operator baseline** — material already dirty before Stygnox authority.
-2. **Stygnox native** — tracked bootstrap material or newly appearing paths
-   attributed to a recorded write turn.
-3. **Runtime only** — controller-owned `.stygnox/` evidence; never native Git
-   product delta.
-4. **External / foreign** — current project changes not attributable to the
-   operator baseline or recorded Stygnox work.
-5. **Unresolved overlap** — pre-existing dirty material that overlaps a write
-   turn or otherwise cannot be safely attributed.
-
-The classifier is intentionally conservative. A path already dirty before a
-write turn is never silently reattributed to Stygnox. External and unresolved
-material set `requires_human_decision=true`. The model records
-`auto_adopt=false` and `auto_reattribute=false`.
-
-D8.6A only makes attribution visible. Any future carry-forward disposition that
-changes ownership remains a named human decision and is part of the final D8.6
-cross-surface work.
-
-## Controller receipt extension
-
-Write-turn receipts now carry a bounded `change_attribution` record containing:
-
-- newly appearing controller-native paths;
-- pre-existing operator-baseline paths;
-- unresolved overlapping paths; and
-- pre-existing paths removed during the turn.
-
-This is evidence, not automatic ownership. Read-only turns record an empty
-attribution set.
-
-## Qualification
-
-`python3 scripts/qualify_d8_6a_web.py` builds the exact wheel, installs it into a
-fresh virtual environment, and checks:
-
-- new/unborn CLI/Web adoption-preview parity;
-- clean CLI/Web adoption-preview parity;
-- dirty admission refusal before external recovery evidence;
-- Web handoff / transaction begin / neutral controller activation;
-- neutral provider execution refusal;
-- CSRF refusal for mutations;
-- unauthenticated non-loopback refusal plus authenticated `0.0.0.0` bind/access;
-- packaged branding;
-- external/dirty attribution visibility; and
-- refusal to import a hostile repository-local `ralph_web.py`.
-
-D8.1 through D8.5 installed qualifiers and the full regression population must
-remain green before D8.6A is committed.
-
-## Explicitly outside D8.6A
-
-- installed TUI and ASCII terminal branding;
-- final CLI/Web/TUI parity on full dirty recovery journeys;
-- role-based access control beyond the single configured Web operator credential;
-- visual polish that is not required for semantic/accessibility parity;
-- D8.7 release packaging and final operator documentation.
+- presentation-neutral operator regression tests;
+- TUI/operator parity qualification;
+- installed-package checks proving Web runtime/assets are absent; and
+- 13D-R2 presentation-boundary tests proving retired commands fail closed,
+  authoritative branding remains present, and the successor operator contract
+  remains usable.

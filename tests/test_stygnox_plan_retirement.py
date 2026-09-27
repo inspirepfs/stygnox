@@ -263,13 +263,6 @@ class StygnoxPlanRetirementTests(TestCase):
             self.assertEqual("ROLLED_BACK", result["result"])
             self.assertEqual("retained\n", (repo / "retained.py").read_text(encoding="utf-8"))
 
-    def test_web_assets_have_retirement_and_replacement_preview_confirmation_bridge(self) -> None:
-        js = (ROOT / "src" / "stygnox" / "web_assets" / "operator.js").read_text(encoding="utf-8")
-        html = (ROOT / "src" / "stygnox" / "web.py").read_text(encoding="utf-8")
-        self.assertIn("'plan.retire-preview':['plan.retire','CARRY_FORWARD']", js)
-        self.assertIn("'plan.propose-replacement-preview':['plan.propose-replacement','PROPOSE']", js)
-        self.assertIn("lifecycle-retirement-disposition", html)
-
     def test_cli_routes_retirement_and_approval_snapshot_is_integrity_bound(self) -> None:
         self.assertEqual("retirement", cli.build_parser().parse_args(["retirement"]).command)
         with tempfile.TemporaryDirectory() as td:

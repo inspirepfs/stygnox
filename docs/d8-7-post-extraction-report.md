@@ -16,12 +16,12 @@ characterization and historical compatibility material.
 | Default profile | `stygnox-default` |
 | Controller | installed `stygnox controller` |
 | Execution policy | installed `stygnox execution-policy` |
-| Web | installed `stygnox web`, loopback-default; explicit non-loopback bind requires configured Web credentials |
+| Web | retired in 13D-R2; no installed Web command or packaged frontend |
 | TUI | installed `stygnox tui` |
 | Operator model | installed `stygnox operator` |
 | Supported install media | pip-installed wheel |
 
-The wheel contains `stygnox.*` modules and approved Web/terminal assets. It does
+The wheel contains `stygnox.*` modules and approved terminal assets. It does
 not contain `scripts/ralph.py`, `scripts/ralph_web.py`, `scripts/ralph_tui.py`,
 `ralph_profile.py`, target-project scripts, tests, or source wrappers.
 
@@ -63,7 +63,9 @@ Unknown legacy state fails before migration mutation.
 source modules remain in the development/source-review archive because they are
 needed for historical characterization, extraction evidence and retained
 regression coverage. They are excluded from the installed wheel and cannot
-satisfy installed-command resolution for adoption.
+satisfy installed-command resolution for adoption. The source-only Ralph Web
+material is explicitly quarantined evidence, not a supported fallback for the
+retired Stygnox Web UI.
 
 Operator-facing D8.7 instructions invoke the installed `stygnox` command. A
 normal D8.7 workflow never instructs the operator to execute
@@ -92,8 +94,8 @@ covered by source regression tests. It does not become an installed fallback.
 
 D9-G-16 is satisfied only when `scripts/qualify_d8_7_release.py` reports:
 
-- exact-wheel predecessor gates D8.1 through D8.6B all PASS with one wheel
-  digest;
+- exact-wheel predecessor gates D8.1 through D8.5 and D8.6B all PASS with one
+  wheel digest;
 - wheel import scan PASS;
 - target/source Ralph fallback isolation PASS;
 - deterministic release rebuild PASS; and

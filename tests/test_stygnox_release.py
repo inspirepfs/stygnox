@@ -47,10 +47,12 @@ class StygnoxReleaseTests(TestCase):
             "docs/d8-7-operator-guide.md",
             "docs/d8-7-release-candidate.md",
             "docs/d8-7-post-extraction-report.md",
+            "docs/web-ui-retirement.md",
             "scripts/build_d8_7_release.py",
             "scripts/qualify_d8_7_release.py",
             "scripts/stygnox_qualification_artifact.py",
             "tests/test_stygnox_release.py",
+            "tests/test_stygnox_presentation_boundary.py",
             "branding/docs/STYLE_GUIDE.md",
             "provenance/stygnox-extraction-seed.json",
             "CLA.md",
@@ -72,6 +74,16 @@ class StygnoxReleaseTests(TestCase):
         self.assertFalse(any("/dist/" in f"/{name}/" or "/build/" in f"/{name}/" for name in names))
         self.assertFalse(any(".egg-info/" in name for name in names))
         self.assertNotIn("APPLY.md", names)
+        for retired in (
+            "src/stygnox/web.py",
+            "src/stygnox/web_brand.py",
+            "scripts/stygnox_web.py",
+            "scripts/qualify_d8_6a_web.py",
+            "tests/test_stygnox_web.py",
+            "tests/test_stygnox_web_lifecycle.py",
+        ):
+            self.assertNotIn(retired, names)
+        self.assertFalse(any(name.startswith("src/stygnox/web_assets/") for name in names))
 
     def test_source_review_archive_is_deterministic(self) -> None:
         builder = load_script("build_d8_7_release.py")
@@ -109,7 +121,6 @@ class StygnoxReleaseTests(TestCase):
             "qualify_d8_3_transactions.py",
             "qualify_d8_4_lifecycle.py",
             "qualify_d8_5_controller.py",
-            "qualify_d8_6a_web.py",
             "qualify_d8_6b_tui.py",
         ]
         for name in qualifier_names:
@@ -120,6 +131,17 @@ class StygnoxReleaseTests(TestCase):
         d86b = (SCRIPTS / "qualify_d8_6b_tui.py").read_text(encoding="utf-8")
         self.assertIn("_version.py", d86b)
         self.assertNotIn('VERSION = "0.1.0.dev7"', d86b)
+
+    def test_release_qualifiers_enforce_retired_web_boundary(self) -> None:
+        d87 = (SCRIPTS / "qualify_d8_7_release.py").read_text(encoding="utf-8")
+        d9 = (SCRIPTS / "qualify_d9_release_review.py").read_text(encoding="utf-8")
+        self.assertNotIn('("D8.6A", "qualify_d8_6a_web.py")', d87)
+        self.assertIn("retired installed Web surface leaked into wheel", d87)
+        self.assertIn("docs/web-ui-retirement.md", d87)
+        self.assertIn("unknown installed Stygnox command", d9)
+        self.assertIn('("web", "serve", "web-auth")', d9)
+        self.assertIn("retired installed Web surface leaked into wheel", d9)
+
     def test_d85_fake_provider_tracks_current_metadata_and_result_contract(self) -> None:
         qualifier = load_script("qualify_d8_5_controller.py")
         with tempfile.TemporaryDirectory(prefix="stygnox-d85-fake-contract-") as td:
@@ -181,21 +203,3 @@ class StygnoxReleaseTests(TestCase):
             )
             self.assertEqual("PASS", payload["status"])
             self.assertEqual("none", payload["blocker_class"])
-
-    def test_d86a_remote_auth_refusal_uses_git_backed_fixture_not_source_root(self) -> None:
-        qualifier = load_script("qualify_d8_6a_web.py")
-        with tempfile.TemporaryDirectory(prefix="stygnox-d86a-remote-fixture-") as td:
-            fixture = Path(td) / "project"
-            refused = subprocess.CompletedProcess(
-                args=["stygnox", "web"], returncode=2, stdout="",
-                stderr="stygnox: web refused: non-loopback binding requires credentials",
-            )
-            with mock.patch.object(qualifier, "init_repo") as init_repo, mock.patch.object(
-                qualifier, "run", return_value=refused
-            ) as run:
-                result = qualifier.qualify_unauthenticated_remote_bind(Path("/bin/stygnox"), fixture, {})
-            init_repo.assert_called_once_with(fixture, commit=True)
-            argv = run.call_args.args
-            self.assertIn(str(fixture), argv)
-            self.assertNotIn(str(ROOT), argv)
-            self.assertEqual("REFUSED", result["result"])

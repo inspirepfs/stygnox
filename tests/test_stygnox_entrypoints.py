@@ -37,17 +37,6 @@ class StygnoxEntrypointTests(unittest.TestCase):
         delegate.assert_called_once_with()
         self.assertEqual(["stygnox_cli.py", "status", "--json"], observed_argv)
 
-    def test_web_loads_and_forwards_arguments(self):
-        entrypoint = load_entrypoint("stygnox_web.py")
-        delegate = mock.Mock(return_value=19)
-
-        with mock.patch.dict(sys.modules, {"ralph_web": SimpleNamespace(main=delegate)}), mock.patch.object(
-            sys, "argv", ["stygnox_web.py", "--host", "127.0.0.1", "--port", "8765", "--allow-lan"]
-        ):
-            self.assertEqual(19, entrypoint.main())
-
-        delegate.assert_called_once_with(["--host", "127.0.0.1", "--port", "8765", "--allow-lan"])
-
     def test_script_execution_uses_delegate_exit_code(self):
         delegate = mock.Mock(return_value=23)
 

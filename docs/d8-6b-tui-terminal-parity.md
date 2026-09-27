@@ -1,9 +1,10 @@
 # D8.6B — Installed TUI, terminal identity, and cross-surface parity
 
-D8.6B completes the D8.6 operator-surface migration by adding an installed,
-zero-dependency `stygnox tui` terminal surface and a presentation-neutral
-`stygnox operator` CLI. Both surfaces consume the same installed
-`stygnox.operator` snapshot and action dispatcher used by D8.6A Web.
+D8.6B adds an installed, zero-dependency `stygnox tui` terminal surface and a
+presentation-neutral `stygnox operator` CLI. Both surfaces consume the same
+installed `stygnox.operator` snapshot and action dispatcher. The historical
+D8.6A Web presentation was later retired by 13D-R2; this operator/TUI contract
+remains authoritative for a future replacement frontend.
 
 ## Product boundary
 
@@ -44,18 +45,16 @@ Status and authority are never colour-only: textual markers such as `ADOPTED`,
 
 ## Shared operator semantics
 
-`stygnox operator snapshot`, `stygnox tui --json`, and the D8.6A Web
-`/api/snapshot` endpoint expose the same `stygnox_operator_surface_v1` semantic
-snapshot. Process-local server PIDs are presentation metadata and are excluded
-from semantic parity comparisons.
+`stygnox operator snapshot` and `stygnox tui --json` expose the same
+`stygnox_operator_surface_v1` semantic snapshot. A future Web transport must
+consume this same presentation-neutral contract rather than define a separate
+state model.
 
 Non-mutating adoption preview is qualified across:
 
 1. direct installed CLI (`stygnox adopt preview`);
-2. presentation-neutral operator dispatch;
-3. TUI action dispatch; and
-4. the D8.6A Web surface (whose parity with the shared dispatcher was already
-   established in D8.6A).
+2. presentation-neutral operator dispatch; and
+3. TUI action dispatch.
 
 All action surfaces retain exact preview/confirmation semantics from the
 installed product modules. There is no automatic carry-forward, automatic
@@ -63,7 +62,7 @@ reattribution, or legacy fallback.
 
 ## Reconciliation presentation
 
-The TUI shows the same D8.6A attribution categories:
+The TUI shows the canonical attribution categories:
 
 - operator baseline;
 - Stygnox/controller-native;
@@ -90,10 +89,11 @@ environment and proves:
 - exact ANSI ASCII authority;
 - narrow-terminal fallback;
 - `NO_COLOR` behaviour;
-- operator/Web/TUI snapshot parity for new/unborn, clean and dirty projects;
+- operator/TUI snapshot parity for new/unborn, clean and dirty projects;
 - CLI/operator/TUI adoption-preview parity;
 - refusal to import a hostile target-local `ralph_tui.py`; and
 - independence from a Stygnox source checkout.
 
-D8.6B closes D8.6. The next stage is D8.7 release packaging, documentation,
-and release-wide installed-artifact qualification.
+D8.6B remains the terminal/operator qualification boundary after Web retirement.
+The next stage is D8.7 release packaging, documentation, and release-wide
+installed-artifact qualification.

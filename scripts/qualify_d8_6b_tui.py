@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""D8.6B installed TUI/terminal identity and cross-surface parity qualification."""
+"""D8.6B installed TUI/terminal identity and operator parity qualification."""
 from __future__ import annotations
 
 import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import runpy
 import subprocess
 import sys
 import tempfile
-import time
-import urllib.request
 import venv
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,37 +57,6 @@ def command_json(stygnox: Path, fixture: Path, env: dict[str, str], *args: str) 
     value = json.loads(result.stdout)
     if not isinstance(value, dict):
         raise RuntimeError("installed command did not return a JSON object")
-    return value
-
-
-def start_web(stygnox: Path, fixture: Path, env: dict[str, str]):
-    proc = subprocess.Popen(
-        [str(stygnox), "web", "--project", str(fixture), "--host", "127.0.0.1", "--port", "0"],
-        cwd=fixture, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1,
-    )
-    assert proc.stdout is not None
-    deadline = time.time() + 15
-    line = ""
-    while time.time() < deadline:
-        line = proc.stdout.readline().strip()
-        if line:
-            break
-        if proc.poll() is not None:
-            break
-        time.sleep(0.05)
-    match = re.search(r"http://127\.0\.0\.1:(\d+)", line)
-    if not match:
-        stderr = proc.stderr.read() if proc.stderr else ""
-        proc.terminate()
-        raise RuntimeError(f"installed Web did not start for parity gate: {line} {stderr}")
-    return proc, f"http://127.0.0.1:{match.group(1)}"
-
-
-def http_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=10) as response:
-        value = json.loads(response.read().decode("utf-8"))
-    if not isinstance(value, dict):
-        raise RuntimeError("Web snapshot was not an object")
     return value
 
 
@@ -149,17 +115,6 @@ def main() -> int:
             if canonical(op) != canonical(tui):
                 raise RuntimeError(f"{name}: operator/TUI snapshot parity mismatch")
 
-            proc, base = start_web(stygnox, fixture, fixture_env)
-            try:
-                web = http_json(base + "/api/snapshot")
-            finally:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill(); proc.wait(timeout=5)
-            if canonical(op) != canonical(web):
-                raise RuntimeError(f"{name}: operator/Web/TUI snapshot parity mismatch")
             if sentinel.exists():
                 raise RuntimeError(f"{name}: installed TUI imported target-local ralph_tui.py")
 
@@ -207,7 +162,7 @@ def main() -> int:
             "wheel_sha256": sha(wheel),
             "fixtures": results,
             "installed_tui": "PASS",
-            "operator_web_tui_snapshot_parity": "PASS",
+            "operator_tui_snapshot_parity": "PASS",
             "cli_operator_tui_preview_parity": "PASS",
             "plain_ascii_authority": "PASS",
             "ansi_ascii_authority": "PASS",
@@ -216,7 +171,7 @@ def main() -> int:
             "legacy_ralph_tui_fallback": "REFUSED",
             "next_stage": "D8.7 release packaging, documentation, and installed-artifact qualification",
         }
-        print("D8.6B INSTALLED TUI / TERMINAL IDENTITY / CROSS-SURFACE PARITY QUALIFICATION PASS")
+        print("D8.6B INSTALLED TUI / TERMINAL IDENTITY / OPERATOR PARITY QUALIFICATION PASS")
         print(json.dumps(report, indent=2, sort_keys=True))
         print("\nBUILD TRANSCRIPT")
         print(build.stdout.rstrip())

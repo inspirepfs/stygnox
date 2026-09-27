@@ -16,13 +16,14 @@ reversible extraction of supported idle legacy RALPH runtime into neutral
 Stygnox retained evidence, explicit upgrade compatibility, and non-destructive
 uninstall preparation. D8.5 adds the neutral installed profile, atomic
 execution policy, reviewed provider/model/effort overrides, and an installed
-controller activation/run path bound to D8.3 transaction authority. D8.6A adds
-the installed branded Web/operator surface; D8.6B completes the operator UX
-with the installed TUI, authoritative terminal identity, and cross-surface
-semantic parity. D8.7 closes release packaging and documentation around one
+controller activation/run path bound to D8.3 transaction authority. D8.6A
+historically added an installed Web/operator surface; 13D-R2 explicitly retires
+the Web presentation while preserving the presentation-neutral operator
+contract and all authoritative branding. D8.6B remains the installed TUI and
+terminal identity boundary. D8.7 closes release packaging and documentation around one
 build-once immutable wheel, a deterministic source-review archive, explicit
 post-extraction quarantine reporting, and exact-artifact requalification of
-the D8.1-D8.6B installed gates. D9 hardens the canonical release builder,
+the retained D8.1-D8.5 and D8.6B installed gates. D9 hardens the canonical release builder,
 independent-install review, licensing/governance packaging, and cross-host
 reproducibility for the first independent `0.1.0` release.
 
@@ -119,55 +120,26 @@ authority. See `docs/d8-5-neutral-controller.md` for the exact profile, policy,
 activation, provider, and qualification boundary.
 
 
-## D8.6A installed Web operator surface
+## D8.6A Web operator surface — retired
 
-The installed product provides a neutral, branded operator console. Loopback
-remains the default:
+The D8.6A installed Web UI is explicitly retired by 13D-R2 and is no longer a
+supported Stygnox operator path. `stygnox web`, `stygnox serve`, and
+`stygnox web-auth` are removed from the installed command surface.
 
-```bash
-stygnox web --project /path/to/project
-```
-
-For direct LAN/mobile testing, configure one Web username/password for the
-project and then choose the bind address and port explicitly:
+The retirement deliberately preserves the presentation-neutral operator
+contract used by the TUI and intended replacement frontend:
 
 ```bash
-stygnox web-auth set --username peter --project /path/to/project
-stygnox web-auth status --project /path/to/project
-
-stygnox web \
-  --project /path/to/project \
-  --host 0.0.0.0 \
-  --port 8765
+stygnox operator snapshot --project /path/to/project
+stygnox operator action --project /path/to/project --name <action> --payload-json '<json>'
 ```
 
-`web-auth set` prompts for the password twice without echoing it. Stygnox stores
-only a salted PBKDF2-SHA256 password digest in the controller-owned `.stygnox/`
-runtime with mode `0600`; the plaintext password is not persisted. Once Web
-authentication is configured, browsers receive the Stygnox login page and API
-clients may continue to use HTTP Basic authentication. A non-loopback bind
-refuses to start when credentials are absent. Plain HTTP is
-therefore suitable only for a trusted lab/LAN; put TLS in front when transport
-confidentiality is required. Remove credentials with:
+All authoritative branding remains under `branding/`; package-local copies that
+existed only for the retired frontend are removed. The replacement Web UI is a
+ground-up implementation and must consume canonical operator/controller state
+rather than recreating authority in presentation code.
 
-```bash
-stygnox web-auth clear --project /path/to/project
-```
-
-D8.6A uses the approved `branding/` design tokens and selected logo assets,
-projects only installed Stygnox state, and shares its action dispatcher with the
-TUI. CLI/Web adoption preview digests are qualified for parity. Carry-forward/
-reconciliation attribution is visible as operator-baseline, Stygnox-native,
-runtime-only, external, or unresolved and never auto-adopts or silently
-reattributes prior material.
-
-Run:
-
-```bash
-python3 scripts/qualify_d8_6a_web.py
-```
-
-See `docs/d8-6a-web-operator-ux.md` for the exact boundary.
+See `docs/web-ui-retirement.md` and `docs/d8-6a-web-operator-ux.md`.
 
 ## D8.6B installed TUI and cross-surface parity
 
@@ -182,7 +154,7 @@ stygnox tui --project /path/to/project
 At normal terminal widths the TUI uses the exact committed plain/ANSI Stygnox
 ASCII identity. Narrow terminals use a compact identity; `NO_COLOR` disables
 ANSI output. The TUI renders the same operator-baseline, Stygnox-native,
-runtime-only, external and unresolved attribution model as Web and never
+runtime-only, external and unresolved attribution model and never
 relies on colour alone for authority state.
 
 Run:
@@ -191,7 +163,7 @@ Run:
 python3 scripts/qualify_d8_6b_tui.py
 ```
 
-The qualifier proves installed operator/Web/TUI snapshot parity, adoption
+The qualifier proves installed operator/TUI snapshot parity, adoption
 preview parity, exact branding assets, terminal fallback behaviour and refusal
 of target-local legacy TUI fallbacks. See
 `docs/d8-6b-tui-terminal-parity.md` for the exact boundary.
@@ -217,7 +189,7 @@ python3 scripts/qualify_d8_7_release.py \
 ```
 
 The D8.7 gate builds the release wheel once, records its SHA-256, and supplies
-that exact immutable wheel to every established D8.1-D8.6B installed-artifact
+that exact immutable wheel to every retained D8.1-D8.5 and D8.6B installed-artifact
 qualifier through `STYGNOX_QUALIFICATION_WHEEL`. A second release set is built
 only to prove reproducibility and is never substituted into predecessor
 qualification. The normal standalone qualifier behaviour is unchanged when the
@@ -236,7 +208,7 @@ later-stage obligations:
 - source-tree `scripts/ralph.py` and legacy ZEN/RALPH compatibility surfaces;
 - persisted legacy schemas retained only where compatibility/evidence requires them;
 - source-tree `.ralph` and `scripts/ralph*.py` material is quarantined to migration, provenance, characterization, and source-review roles and is excluded from the installed wheel and normal operator path; and
-- D8.6A/D8.6B Web/TUI surfaces are installed and neutral; Web defaults to loopback and permits explicit authenticated LAN/container-style binds. RBAC remains a later roadmap capability.
+- the D8.6A Web presentation is explicitly retired; the canonical operator/TUI authority boundary and all authoritative branding remain, with Web UI vNext tracked as a ground-up replacement.
 
 The staged roadmap and release acceptance baseline are documented in
 `docs/d8-0-roadmap-and-release-acceptance.md`.
