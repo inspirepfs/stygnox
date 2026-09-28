@@ -175,11 +175,30 @@ def render_plan(plan: dict) -> str:
     ]
     if authority in REPOSITORY_AUTHORITIES:
         lines.append(f"**Repository authority:** `{authority}`")
+    binding = plan.get("rejection_lineage")
+    if isinstance(binding, dict):
+        lines.append(
+            "**Replacement rejection lineage:** "
+            f"`{binding.get('selected_rejection_id', '-')}` "
+            f"(digest `{binding.get('lineage_digest', '-')}`)"
+        )
     lines += [f"**Plan SHA-256:** `{digest}`", ""]
     for step in plan["steps"]:
         lines += [f"## {step['id']}. {step['title']}", "", step["objective"], "", "Acceptance:"]
         lines += [f"- {item}" for item in step["acceptance"]]
         lines += [f"- Test changes: `{step['test_change_policy']}`", ""]
+    acknowledgements = plan.get("rejection_acknowledgements")
+    if isinstance(acknowledgements, list):
+        lines += ["## Inherited rejection acknowledgements", ""]
+        for acknowledgement in acknowledgements:
+            if isinstance(acknowledgement, dict):
+                scope = acknowledgement.get("scope") if isinstance(acknowledgement.get("scope"), dict) else {}
+                steps = ", ".join(str(step) for step in scope.get("steps", []))
+                lines.append(
+                    f"- `{acknowledgement.get('rejection_id', '-')}`: `{acknowledgement.get('disposition', '-')}` "
+                    f"(plan={scope.get('plan', '-')}, steps=[{steps}])"
+                )
+        lines.append("")
     lines += ["## Human gate", "", f"Approve exactly this plan with: `python3 scripts/ralph.py approve {digest}`", ""]
     return "\n".join(lines)
 
@@ -227,6 +246,9 @@ def default_state() -> dict:
         "controller_runtime": None,
         "retirement_rollback_preview": None,
         "proposal_previous_state_sha256": None,
+        "rejection_lineage_index": None,
+        "rejection_lineage_digest": None,
+        "active_rejection_id": None,
         "interrupted_run_recovery": None,
         "updated_at": utc_now(),
     }
@@ -684,6 +706,317 @@ def _evidence_digest(value: object) -> str:
 def _json_copy(value: object) -> object:
     """Detach durable evidence from mutable state and caller-owned dictionaries."""
     return json.loads(json.dumps(value, sort_keys=True))
+
+
+REJECTION_RECORD_SCHEMA = "zen_ralph_rejection_record_v1"
+REJECTION_LINEAGE_INDEX_SCHEMA = "zen_ralph_rejection_lineage_index_v1"
+REJECTION_LINEAGE_BINDING_SCHEMA = "zen_ralph_rejection_lineage_binding_v1"
+_REJECTION_ID_RE = re.compile(r"^RJ-[0-9]{8}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_REJECTION_ACKNOWLEDGEMENT_DISPOSITIONS = frozenset({"addressed", "deferred", "not_applicable"})
+
+
+def _rejection_directory() -> Path:
+    """Locate immutable rejection evidence beside the bound controller state."""
+    return STATE.parent / "rejections"
+
+
+def rejection_record_id(sequence: int) -> str:
+    """Return the stable, monotonic identifier for one rejection record."""
+    if sequence < 1:
+        raise RuntimeError("rejection record sequence must be positive")
+    return f"RJ-{sequence:08d}"
+
+
+def _rejection_digest(record: dict) -> str:
+    canonical = {key: value for key, value in record.items() if key != "integrity_digest"}
+    return _evidence_digest(canonical)
+
+
+def _rejection_index_digest(index: dict) -> str:
+    return _evidence_digest(index)
+
+
+def _validate_rejection_record(record: object) -> dict:
+    """Validate one immutable rejection artifact without interpreting its directives."""
+    if not isinstance(record, dict) or set(record) != {
+        "schema", "id", "sequence", "recorded_at", "rejected_plan_hash", "reason",
+        "predecessor_rejection_id", "replacement_rejection_id", "integrity_digest",
+    }:
+        raise RuntimeError("rejection record is malformed or contains unknown fields")
+    if record["schema"] != REJECTION_RECORD_SCHEMA:
+        raise RuntimeError("rejection record schema is unknown")
+    sequence = record.get("sequence")
+    record_id = record.get("id")
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or record_id != rejection_record_id(sequence):
+        raise RuntimeError("rejection record identifier and sequence disagree")
+    if not isinstance(record.get("recorded_at"), str):
+        raise RuntimeError("rejection record time is malformed")
+    try:
+        parsed_at = dt.datetime.fromisoformat(record["recorded_at"])
+    except ValueError as exc:
+        raise RuntimeError("rejection record time is malformed") from exc
+    if parsed_at.tzinfo is None or parsed_at.microsecond or record["recorded_at"] != parsed_at.astimezone(dt.timezone.utc).isoformat():
+        raise RuntimeError("rejection record time is non-canonical")
+    if not isinstance(record.get("rejected_plan_hash"), str) or not _SHA256_RE.fullmatch(record["rejected_plan_hash"]):
+        raise RuntimeError("rejection record plan hash is malformed")
+    # Do not trim or normalize this field: it is the operator's original evidence.
+    if not isinstance(record.get("reason"), str):
+        raise RuntimeError("rejection record reason is malformed")
+    predecessor = record.get("predecessor_rejection_id")
+    replacement = record.get("replacement_rejection_id")
+    if predecessor is not None and (not isinstance(predecessor, str) or not _REJECTION_ID_RE.fullmatch(predecessor)):
+        raise RuntimeError("rejection record predecessor is malformed")
+    if replacement != predecessor:
+        raise RuntimeError("rejection record predecessor and replacement references contradict")
+    digest = record.get("integrity_digest")
+    if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest) or not secrets.compare_digest(digest, _rejection_digest(record)):
+        raise RuntimeError("rejection record integrity digest is malformed or mismatched")
+    return record
+
+
+def _read_rejection_record(record_id: str, expected_digest: str) -> dict:
+    path = _rejection_directory() / f"{record_id}.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot load rejection record {record_id!r}") from exc
+    record = _validate_rejection_record(record)
+    if record["id"] != record_id:
+        raise RuntimeError("rejection record filename and identifier disagree")
+    if not secrets.compare_digest(record["integrity_digest"], expected_digest):
+        raise RuntimeError("rejection record state index digest does not match artifact")
+    return record
+
+
+def resolve_rejection_lineage(state: dict, selector: str | None = None) -> dict:
+    """Resolve a validated rejection lineage, optionally by durable ID or plan hash.
+
+    An explicit selector deliberately does not trust the mutable current-selection
+    pointer.  It still requires the complete digest-bound artifact index, so it is
+    a recovery route rather than a way to invent or bypass rejection evidence.
+    """
+    index = state.get("rejection_lineage_index")
+    current = state.get("active_rejection_id")
+    index_digest = state.get("rejection_lineage_digest")
+    if index is None and current is None and index_digest is None:
+        if selector is not None:
+            raise RuntimeError("rejection selector requires a durable rejection index")
+        return {"active_rejection_id": None, "lineage_digest": None, "directives": []}
+    if not isinstance(index, dict) or set(index) != {"schema", "records"} or index.get("schema") != REJECTION_LINEAGE_INDEX_SCHEMA:
+        raise RuntimeError("rejection lineage state index is malformed or unknown")
+    entries = index.get("records")
+    if not isinstance(entries, list):
+        raise RuntimeError("rejection lineage state index records are malformed")
+    if not isinstance(index_digest, str) or not _SHA256_RE.fullmatch(index_digest) or not secrets.compare_digest(index_digest, _rejection_index_digest(index)):
+        raise RuntimeError("rejection lineage state index digest is malformed or mismatched")
+    indexed: dict[str, dict] = {}
+    sequences: set[int] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"id", "sequence", "digest"}:
+            raise RuntimeError("rejection lineage state index contains an unknown or malformed entry")
+        record_id, sequence, digest = entry.get("id"), entry.get("sequence"), entry.get("digest")
+        if (not isinstance(sequence, int) or isinstance(sequence, bool) or record_id != rejection_record_id(sequence)
+                or not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest)
+                or record_id in indexed or sequence in sequences):
+            raise RuntimeError("rejection lineage state index contains duplicate or contradictory entries")
+        indexed[record_id] = entry
+        sequences.add(sequence)
+    if not indexed or sequences != set(range(1, len(sequences) + 1)):
+        raise RuntimeError("rejection lineage state index has an invalid history")
+    directory = _rejection_directory()
+    try:
+        artifact_names = {path.name for path in directory.iterdir()}
+    except OSError as exc:
+        raise RuntimeError("rejection lineage artifacts are unavailable") from exc
+    expected_names = {f"{record_id}.json" for record_id in indexed}
+    if artifact_names != expected_names:
+        raise RuntimeError("rejection lineage artifacts contain unknown, missing, or duplicate records")
+    records = {
+        record_id: _read_rejection_record(record_id, str(entry["digest"]))
+        for record_id, entry in indexed.items()
+    }
+    for record_id, entry in indexed.items():
+        record = records[record_id]
+        if record["sequence"] != entry["sequence"]:
+            raise RuntimeError("rejection lineage state index contradicts artifact sequence")
+        predecessor = record["predecessor_rejection_id"]
+        if record["sequence"] == 1:
+            if predecessor is not None:
+                raise RuntimeError("first rejection record cannot have a predecessor")
+        elif predecessor not in records or records[predecessor]["sequence"] >= record["sequence"]:
+            raise RuntimeError("rejection lineage predecessor is unknown or contradictory")
+    if selector is None:
+        if not isinstance(current, str) or not _REJECTION_ID_RE.fullmatch(current) or current not in indexed:
+            raise RuntimeError("rejection lineage selection is malformed")
+        selected = current
+    elif _REJECTION_ID_RE.fullmatch(selector):
+        if selector not in indexed:
+            raise RuntimeError("rejection selector does not name an indexed rejection")
+        selected = selector
+    elif _SHA256_RE.fullmatch(selector):
+        matches = [record_id for record_id, record in records.items() if record["rejected_plan_hash"] == selector]
+        if len(matches) != 1:
+            raise RuntimeError("rejection plan-hash selector is unknown or ambiguous")
+        selected = matches[0]
+    else:
+        raise RuntimeError("rejection selector must be a rejection ID or rejected proposal SHA-256")
+    lineage: list[dict] = []
+    seen: set[str] = set()
+    cursor: str | None = selected
+    while cursor is not None:
+        if cursor in seen:
+            raise RuntimeError("rejection lineage contains a predecessor cycle")
+        seen.add(cursor)
+        record = records[cursor]
+        lineage.append(record)
+        cursor = record["predecessor_rejection_id"]
+    lineage.reverse()
+    return {
+        "active_rejection_id": selected,
+        "lineage_digest": index_digest,
+        "directives": [
+            # Planning receives only durable provenance plus the exact operator
+            # directive text; rejected-plan scope is never propagated as authority.
+            {key: record[key] for key in ("id", "rejected_plan_hash", "reason")}
+            for record in lineage
+        ],
+    }
+
+
+def rejection_lineage_binding(lineage: dict) -> dict | None:
+    """Create the controller-owned candidate binding for a selected lineage."""
+    selected = lineage.get("active_rejection_id")
+    if selected is None:
+        return None
+    directives = lineage.get("directives")
+    if (
+        not isinstance(selected, str) or not _REJECTION_ID_RE.fullmatch(selected)
+        or not isinstance(lineage.get("lineage_digest"), str) or not _SHA256_RE.fullmatch(lineage["lineage_digest"])
+        or not isinstance(directives, list)
+    ):
+        raise RuntimeError("validated rejection lineage cannot be bound to a proposal")
+    rejection_ids = [directive.get("id") for directive in directives if isinstance(directive, dict)]
+    if (
+        len(rejection_ids) != len(directives) or not rejection_ids
+        or len(set(rejection_ids)) != len(rejection_ids)
+        or any(not isinstance(record_id, str) or not _REJECTION_ID_RE.fullmatch(record_id) for record_id in rejection_ids)
+        or rejection_ids[-1] != selected
+    ):
+        raise RuntimeError("validated rejection lineage has invalid acknowledgement identifiers")
+    return {
+        "schema": REJECTION_LINEAGE_BINDING_SCHEMA,
+        "selected_rejection_id": selected,
+        "lineage_digest": lineage["lineage_digest"],
+        "rejection_ids": rejection_ids,
+    }
+
+
+def replacement_acknowledgement_schema(rejection_ids: list[str]) -> dict:
+    """Return the proposal-only acknowledgement contract for one replacement."""
+    return {
+        "type": "array",
+        "minItems": len(rejection_ids),
+        "maxItems": len(rejection_ids),
+        "items": {
+            "type": "object",
+            "properties": {
+                "rejection_id": {"type": "string", "enum": rejection_ids},
+                "disposition": {"type": "string", "enum": sorted(_REJECTION_ACKNOWLEDGEMENT_DISPOSITIONS)},
+                "scope": {
+                    "type": "object",
+                    "properties": {
+                        "plan": {"type": "boolean"},
+                        "steps": {"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": True},
+                    },
+                    "required": ["plan", "steps"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["rejection_id", "disposition", "scope"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def validate_replacement_acknowledgements(state: dict, plan: dict) -> None:
+    """Require an exact, current acknowledgement for every bound rejection."""
+    binding = plan.get("rejection_lineage")
+    if not isinstance(binding, dict) or set(binding) != {"schema", "selected_rejection_id", "lineage_digest", "rejection_ids"}:
+        raise RuntimeError("replacement proposal rejection-lineage binding is malformed")
+    if binding.get("schema") != REJECTION_LINEAGE_BINDING_SCHEMA:
+        raise RuntimeError("replacement proposal rejection-lineage binding schema is unknown")
+    selected = binding.get("selected_rejection_id")
+    if not isinstance(selected, str) or not _REJECTION_ID_RE.fullmatch(selected):
+        raise RuntimeError("replacement proposal rejection-lineage selection is malformed")
+    resolved = resolve_rejection_lineage(state, selected)
+    expected_binding = rejection_lineage_binding(resolved)
+    if expected_binding is None or binding != expected_binding:
+        raise RuntimeError("replacement proposal rejection-lineage binding is stale or altered")
+    expected_ids = expected_binding["rejection_ids"]
+    acknowledgements = plan.get("rejection_acknowledgements")
+    if not isinstance(acknowledgements, list) or len(acknowledgements) != len(expected_ids):
+        raise RuntimeError("replacement proposal must acknowledge every inherited rejection exactly once")
+    seen: set[str] = set()
+    step_ids = {step.get("id") for step in plan.get("steps", []) if isinstance(step, dict)}
+    for acknowledgement in acknowledgements:
+        if not isinstance(acknowledgement, dict) or set(acknowledgement) != {"rejection_id", "disposition", "scope"}:
+            raise RuntimeError("replacement rejection acknowledgement is malformed")
+        record_id = acknowledgement.get("rejection_id")
+        if not isinstance(record_id, str) or record_id not in expected_ids or record_id in seen:
+            raise RuntimeError("replacement rejection acknowledgement has a duplicate or foreign rejection ID")
+        seen.add(record_id)
+        if acknowledgement.get("disposition") not in _REJECTION_ACKNOWLEDGEMENT_DISPOSITIONS:
+            raise RuntimeError("replacement rejection acknowledgement disposition is invalid")
+        scope = acknowledgement.get("scope")
+        if not isinstance(scope, dict) or set(scope) != {"plan", "steps"} or not isinstance(scope.get("plan"), bool):
+            raise RuntimeError("replacement rejection acknowledgement scope is malformed")
+        steps = scope.get("steps")
+        if (
+            not isinstance(steps, list) or len(set(steps)) != len(steps)
+            or any(not isinstance(step_id, int) or isinstance(step_id, bool) or step_id not in step_ids for step_id in steps)
+            or (not scope["plan"] and not steps)
+        ):
+            raise RuntimeError("replacement rejection acknowledgement scope is invalid")
+    if seen != set(expected_ids):
+        raise RuntimeError("replacement proposal omitted an inherited rejection acknowledgement")
+
+
+def write_rejection_record(state: dict, rejected_plan_hash: str, reason: object) -> tuple[dict, dict]:
+    """Append one digest-bound rejection artifact and return its replacement lineage state."""
+    lineage = resolve_rejection_lineage(state)
+    prior_index = state.get("rejection_lineage_index")
+    entries = list(prior_index["records"]) if isinstance(prior_index, dict) else []
+    sequence = len(entries) + 1
+    record = {
+        "schema": REJECTION_RECORD_SCHEMA,
+        "id": rejection_record_id(sequence),
+        "sequence": sequence,
+        "recorded_at": utc_now(),
+        "rejected_plan_hash": rejected_plan_hash,
+        "reason": reason,
+        "predecessor_rejection_id": lineage["active_rejection_id"],
+        # A new rejection replaces the selected directive set used by the next proposal.
+        "replacement_rejection_id": lineage["active_rejection_id"],
+    }
+    record["integrity_digest"] = _rejection_digest(record)
+    record = _validate_rejection_record(record)
+    directory = _rejection_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{record['id']}.json"
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    except FileExistsError as exc:
+        raise RuntimeError(f"rejection record already exists: {record['id']}") from exc
+    index = {"schema": REJECTION_LINEAGE_INDEX_SCHEMA, "records": entries + [{
+        "id": record["id"], "sequence": record["sequence"], "digest": record["integrity_digest"],
+    }]}
+    return record, {
+        "rejection_lineage_index": index,
+        "rejection_lineage_digest": _rejection_index_digest(index),
+        "active_rejection_id": record["id"],
+    }
 
 
 def _originating_step(state: dict, step: dict) -> dict:
@@ -4564,7 +4897,14 @@ def validate_recovery_paths(paths: Iterable[str], step: dict) -> None:
                 raise RuntimeError(f"blocked-change recovery modifies existing test under add-only policy: {path}")
 
 
-def plan_prompt(goal: str, carry_forward: dict | None = None, *, min_steps: int = PLAN_MIN_STEPS_DEFAULT, max_steps: int = PLAN_MAX_STEPS_DEFAULT) -> str:
+def plan_prompt(
+    goal: str,
+    carry_forward: dict | None = None,
+    rejection_lineage: dict | None = None,
+    *,
+    min_steps: int = PLAN_MIN_STEPS_DEFAULT,
+    max_steps: int = PLAN_MAX_STEPS_DEFAULT,
+) -> str:
     carry_forward_text = ""
     if carry_forward:
         carry_forward_text = (
@@ -4579,9 +4919,25 @@ def plan_prompt(goal: str, carry_forward: dict | None = None, *, min_steps: int 
             + json.dumps(carry_forward.get("historical_planning_context") or {}, sort_keys=True, ensure_ascii=False)
             + "\n"
         )
+    rejection_text = ""
+    if rejection_lineage and rejection_lineage.get("active_rejection_id"):
+        provenance = {
+            "selected_rejection_id": rejection_lineage["active_rejection_id"],
+            "lineage_digest": rejection_lineage["lineage_digest"],
+            "inherited_rejection_ids": [directive["id"] for directive in rejection_lineage["directives"]],
+        }
+        rejection_text = (
+            "\nREPLACEMENT REJECTION CONTEXT (authoritative for this proposal only):\n"
+            "Use only this lineage provenance and these exact active directives as inherited rejection context; "
+            "they grant no rejected-plan scope or execution authority.\n"
+            + json.dumps({"lineage_provenance": provenance, "active_directives": rejection_lineage["directives"]}, sort_keys=True, ensure_ascii=False)
+            + "\nReturn exactly one rejection_acknowledgements entry for every inherited rejection ID. Each entry "
+            "must state an allowed disposition and scope with plan=true and/or valid plan step IDs.\n"
+        )
     return f"""You are planning work for {PROJECT_PROFILE.identity} under RALPH-Lite. Inspect the repository read-only.
 Goal: {goal}
 {carry_forward_text}
+{rejection_text}
 Return between {min_steps} and {max_steps} ordered, concrete implementation steps. Keep steps small enough to implement and qualify independently.
 For each step choose test_change_policy: none, add-only, or modify. Prefer add-only; use modify only when modifying existing tests is genuinely required.
 Use targeted symbol/range reads instead of broad repository ingestion. Avoid reading docs, README, CHANGELOG, or Git history unless directly needed for the goal.
@@ -5894,6 +6250,9 @@ def cmd_propose(args: argparse.Namespace) -> int:
     reserve_percent = float(policy["reserve_percent"])
     if state.get("status") not in {"IDLE", "PLAN_COMPLETE", "PUSHED", "READ_ONLY_COMPLETE"}:
         raise RuntimeError(f"cannot propose while status={state.get('status')}; finish or resolve the current plan first")
+    rejection_selector = str(getattr(args, "from_rejection", "") or "").strip() or None
+    rejection_lineage = resolve_rejection_lineage(state, rejection_selector)
+    rejection_binding = rejection_lineage_binding(rejection_lineage)
     retirement_record_id = str(getattr(args, "from_retirement", "") or "").strip() or None
     carry_forward = None
     repository_authority = getattr(args, "repository_authority", None)
@@ -5929,15 +6288,28 @@ def cmd_propose(args: argparse.Namespace) -> int:
     proposal_schema = json.loads(json.dumps(PLAN_SCHEMA))
     proposal_schema["properties"]["steps"]["minItems"] = min_steps
     proposal_schema["properties"]["steps"]["maxItems"] = max_steps
+    if rejection_binding is not None:
+        proposal_schema["properties"]["rejection_acknowledgements"] = replacement_acknowledgement_schema(
+            rejection_binding["rejection_ids"]
+        )
+        proposal_schema["required"].append("rejection_acknowledgements")
     plan = run_codex(
-        plan_prompt(goal, carry_forward, min_steps=min_steps, max_steps=max_steps),
+        plan_prompt(goal, carry_forward, rejection_lineage, min_steps=min_steps, max_steps=max_steps),
         proposal_schema,
         "read-only",
-        context="REPLACEMENT PLAN PROPOSAL" if carry_forward else "PLAN PROPOSAL",
+        context="REPLACEMENT PLAN PROPOSAL" if carry_forward or rejection_binding else "PLAN PROPOSAL",
     )
+    if rejection_binding is not None:
+        if "rejection_lineage" in plan:
+            raise RuntimeError("model proposal must not supply controller-owned rejection-lineage binding")
+        plan["rejection_lineage"] = rejection_binding
+    elif "rejection_acknowledgements" in plan or "rejection_lineage" in plan:
+        raise RuntimeError("independent proposal must not contain inherited rejection data")
     plan["planning"] = {"min_steps": min_steps, "max_steps": max_steps}
     controller_inject_repository_authority(plan, repository_authority)
     validate_complete_plan(plan)
+    if rejection_binding is not None:
+        validate_replacement_acknowledgements(state, plan)
     digest = plan_hash(plan)
     if retirement_record_id and secrets.compare_digest(digest, str(manifest["plan_hash"])):
         raise RuntimeError("replacement proposal must produce a fresh plan hash")
@@ -6013,6 +6385,10 @@ def cmd_approve(args: argparse.Namespace) -> int:
     if state.get("status") != "AWAITING_APPROVAL" or not state.get("plan"):
         raise RuntimeError("no plan is awaiting approval")
     validate_complete_plan(state["plan"], state.get("plan_hash"))
+    if "rejection_lineage" in state["plan"]:
+        validate_replacement_acknowledgements(state, state["plan"])
+    elif "rejection_acknowledgements" in state["plan"]:
+        raise RuntimeError("independent proposal contains inherited rejection acknowledgements")
     expected = plan_hash(state["plan"])
     if args.plan_hash != expected or state.get("plan_hash") != expected:
         raise RuntimeError("approval hash does not match the proposed plan")
@@ -6075,10 +6451,29 @@ def cmd_reject(args: argparse.Namespace) -> int:
     if args.plan_hash != expected or state.get("plan_hash") != expected:
         raise RuntimeError("rejection hash does not match the proposed plan")
 
-    current_usage = state.get("codex_usage")
+    # Validate any restorable state before appending evidence, then make the
+    # evidence and its state index durable while the rejected proposal is still
+    # the live controller state.  A later restoration can never erase it.
     previous = state.get("proposal_previous_state")
     previous_sha256 = str(state.get("proposal_previous_state_sha256") or "")
     previous_state = previous.get("state") if isinstance(previous, dict) else None
+    if (
+        isinstance(previous, dict)
+        and previous.get("schema") == PROPOSAL_PREVIOUS_STATE_SCHEMA
+        and isinstance(previous_state, dict)
+        and previous_state.get("status") in {"IDLE", "PLAN_COMPLETE", "PUSHED", "READ_ONLY_COMPLETE"}
+    ):
+        if not previous_sha256 or not secrets.compare_digest(previous_sha256, _evidence_digest(previous)):
+            raise RuntimeError("proposal previous-state snapshot is stale or altered")
+        if set(previous_state) - _PROPOSAL_PREVIOUS_STATE_FIELDS:
+            raise RuntimeError("proposal previous-state snapshot contains non-whitelisted fields")
+        if "controller_runtime" in previous_state or "proposal_previous_state" in previous_state:
+            raise RuntimeError("proposal previous-state snapshot contains transient controller state")
+    rejection_record, rejection_state = write_rejection_record(state, expected, args.reason)
+    state.update(rejection_state)
+    save_state(state)
+
+    current_usage = state.get("codex_usage")
     if (
         isinstance(previous, dict)
         and previous.get("schema") == PROPOSAL_PREVIOUS_STATE_SCHEMA
@@ -6123,11 +6518,13 @@ def cmd_reject(args: argparse.Namespace) -> int:
         PLAN.unlink(missing_ok=True)
         restored_to = "IDLE"
 
+    state.update(rejection_state)
     save_state(state)
     with JOURNAL.open("a", encoding="utf-8") as handle:
         handle.write(
             f"## Proposal rejected — {utc_now()}\n\n"
             f"- Proposal: `{expected}`\n"
+            f"- Rejection record: `{rejection_record['id']}` ({rejection_record['integrity_digest']})\n"
             f"- Reason: {args.reason}\n"
             f"- Restored controller state: {restored_to}\n"
             "- Execution authority granted: no\n\n"
@@ -7816,6 +8213,10 @@ def build_parser() -> argparse.ArgumentParser:
     propose = sub.add_parser("propose")
     propose.add_argument("--goal")
     propose.add_argument("--from-retirement", metavar="RT_ID")
+    propose.add_argument(
+        "--from-rejection", metavar="REJECTION_ID_OR_PLAN_SHA256",
+        help="select a validated rejected proposal lineage by RJ ID or rejected plan SHA-256",
+    )
     # Runtime admission in ``cmd_propose`` owns this requirement.  Keeping the
     # parser permissive lets callers inspect proposal-only options (such as
     # planning bounds) without implying that a proposal can be admitted
