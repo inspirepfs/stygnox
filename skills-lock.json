@@ -80,6 +80,12 @@
       "skillPath": ".agents/skills/impeccable/SKILL.md",
       "computedHash": "f7c4e03bef91154273d2dc3b62aff829cf4ab1b1f16e6b98c8c6a31be4405318"
     },
+    "ln-26-architecture-migration-planner": {
+      "source": "levnikolaevich/claude-code-skills",
+      "sourceType": "github",
+      "skillPath": "plugins/architecture-suite/skills/ln-26-architecture-migration-planner/SKILL.md",
+      "computedHash": "1debcff1eb3c5fd444f22851865bde0f55c45a65445cf6ceb2c56ee92d0108b9"
+    },
     "playwright-best-practices": {
       "source": "currents-dev/playwright-best-practices-skill",
       "sourceType": "github",
