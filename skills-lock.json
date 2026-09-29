@@ -74,6 +74,12 @@
       "skillPath": "skills/frontend-design/SKILL.md",
       "computedHash": "89496d5dd00f4810205f351759594fc2742bf8eea85a2f2b2d1de59f4bd91576"
     },
+    "headroom": {
+      "source": "roman-ryzenadvanced/headroom-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "7fea85d5f95be81ca42aa135f3a97fe15fbe95864312911ad8d1594c1bcbe4c9"
+    },
     "impeccable": {
       "source": "pbakaus/impeccable",
       "sourceType": "github",

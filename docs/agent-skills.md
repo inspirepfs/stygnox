@@ -13,6 +13,7 @@ A skill may be present in `.agents/skills/` but should only influence repository
 | Skill | Source | Intended use | Normal activation point |
 |---|---|---|---|
 | `codemapper` | `zenobi-us/dotfiles` exact skill subtree (engine originates from CodeMapper) | AST-based codebase mapping, symbol relationships, callers/callees and impact analysis | Repository exploration, audits and change-impact analysis |
+| `headroom` | `roman-ryzenadvanced/headroom-skill` | Context/token reduction for large logs, search output, JSON/tool results and source excerpts while retaining reversible raw evidence | Large-output handling and token-efficiency work |
 | `frontend-design` | `anthropics/skills` | Product-grade visual/frontend design | Web UI vNext design |
 | `webapp-testing` | `anthropics/skills` | Real-browser application validation | Web UI behavioural validation |
 | `design-systems-frontend-architecture` | `hueyexe/frontend-agent-skills` | Design tokens, components, states and governance | Web UI architecture |
@@ -60,7 +61,7 @@ A skill may be present in `.agents/skills/` but should only influence repository
 
 Project skills are intentionally project-local. Keep `skills-lock.json` with the repository so the skill set is auditable and reproducible.
 
-The bootstrap currently contains **21 explicitly selected skills**. The four additional engineering-quality skills (`codemapper`, `testing-anti-patterns`, `contract-testing-builder`, and `verification-before-completion`) were cross-checked against their current skills.sh catalogue entries before inclusion.
+The bootstrap currently contains **22 explicitly selected skills**. The additional engineering-quality and efficiency skills (`codemapper`, `testing-anti-patterns`, `contract-testing-builder`, `verification-before-completion`, and `headroom`) are intentionally project-local and auditable.
 
 
 Before updating a third-party skill, review the upstream delta and security audit status. Skill updates are dependency changes and should not silently alter StygNox development behaviour.

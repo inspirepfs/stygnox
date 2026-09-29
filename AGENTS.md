@@ -56,6 +56,8 @@ For tests, use `testing-anti-patterns` to avoid tests that merely reproduce impl
 
 For API/provider-consumer boundaries, consider `contract-testing-builder`.
 
+For materially large tool output, logs, search results, JSON, or source excerpts, consider `headroom` before injecting the raw output into model context. Prefer avoiding unnecessary broad reads first; compression is the second line of defence. Preserve authoritative raw evidence on disk and compress only its context representation. Headroom may compress evidence presentation, never evidence authority.
+
 For browser and UI behaviour, prefer behavioural validation with the relevant Playwright and web-app testing skills rather than tests that only assert static markup or hard-coded values.
 
 ## Frontend and Web UI work

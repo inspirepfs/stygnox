@@ -37,6 +37,7 @@ required_skills=(
   impeccable
   doc-author
   verification-before-completion
+  headroom
 )
 
 fail=0

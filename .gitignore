@@ -17,3 +17,6 @@ venv/
 build/
 dist/
 *.egg-info/
+
+# Headroom reversible context cache
+.headroom-cache/

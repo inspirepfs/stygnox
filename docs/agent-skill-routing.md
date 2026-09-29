@@ -5,6 +5,7 @@ Use this document to choose project-local skills deliberately. Installed does no
 | Work type | Primary skill(s) | What they add |
 |---|---|---|
 | Repository exploration, unfamiliar code, dependency/change impact | `codemapper` | AST-based structure, symbols, callers/callees, test relationships and impact analysis |
+| Large tool output, long test/build logs, broad search results, large JSON/source excerpts, context pressure | `headroom` | Reduces model-context cost while retaining reversible raw evidence; use only when the output is materially large |
 | FastAPI endpoints, backend API behaviour, streaming/SSE | `fastapi` | Current FastAPI implementation patterns and streaming guidance |
 | Provider/consumer API compatibility | `contract-testing-builder` | Contract tests and compatibility checks across boundaries |
 | Test design or test review | `testing-anti-patterns` | Guards against mock-behaviour tests, implementation-detail tests and test-only production code |
@@ -32,6 +33,27 @@ Use `codemapper` when impact is unclear, then `fastapi` where FastAPI behaviour 
 ### Test repair or regression coverage
 
 Use `testing-anti-patterns` before designing the regression. Use the narrowest test tool appropriate to the behaviour. Finish with `verification-before-completion`.
+
+### Context and token efficiency
+
+Use `headroom` when a tool result is materially large (roughly over 200 tokens) and a compressed representation is sufficient for the next reasoning step.
+
+Prefer:
+- `LogCompressor` for large test/build logs.
+- `SearchCompressor` for large grep/ripgrep output.
+- `SmartCrusher` for large JSON/tool responses.
+- `CodeCompressor` for large source excerpts.
+- targeted symbol/range reads before compression where that avoids generating the large output at all.
+
+Raw evidence remains authoritative. Preserve the original on disk and compress only the representation injected into model context.
+
+Do not use compression as a substitute for:
+- exact Git diffs or hashes;
+- controller state or provenance;
+- byte-exact evidence;
+- errors, failures, stack traces, or other material diagnostic evidence.
+
+Headroom may compress **evidence presentation**, never **evidence authority**.
 
 ### Web UI vNext implementation
 
