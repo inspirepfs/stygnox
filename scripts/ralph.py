@@ -927,7 +927,7 @@ def replacement_acknowledgement_schema(rejection_ids: list[str]) -> dict:
                     "type": "object",
                     "properties": {
                         "plan": {"type": "boolean"},
-                        "steps": {"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": True},
+                        "steps": {"type": "array", "items": {"type": "integer", "minimum": 1}},
                     },
                     "required": ["plan", "steps"],
                     "additionalProperties": False,
@@ -937,6 +937,22 @@ def replacement_acknowledgement_schema(rejection_ids: list[str]) -> dict:
             "additionalProperties": False,
         },
     }
+
+
+def build_proposal_schema(
+    min_steps: int,
+    max_steps: int,
+    *,
+    rejection_ids: list[str] | None = None,
+) -> dict:
+    """Build the provider-facing plan schema for normal or replacement proposals."""
+    schema = json.loads(json.dumps(PLAN_SCHEMA))
+    schema["properties"]["steps"]["minItems"] = min_steps
+    schema["properties"]["steps"]["maxItems"] = max_steps
+    if rejection_ids is not None:
+        schema["properties"]["rejection_acknowledgements"] = replacement_acknowledgement_schema(rejection_ids)
+        schema["required"] = [*schema["required"], "rejection_acknowledgements"]
+    return schema
 
 
 def validate_replacement_acknowledgements(state: dict, plan: dict) -> None:
@@ -6285,14 +6301,11 @@ def cmd_propose(args: argparse.Namespace) -> int:
     if proposal_guard != "SAFE":
         detail = "; ".join(proposal_findings) or proposal_guard
         raise RuntimeError(f"BLOCKED_INSUFFICIENT_START_RESERVE: {detail}")
-    proposal_schema = json.loads(json.dumps(PLAN_SCHEMA))
-    proposal_schema["properties"]["steps"]["minItems"] = min_steps
-    proposal_schema["properties"]["steps"]["maxItems"] = max_steps
-    if rejection_binding is not None:
-        proposal_schema["properties"]["rejection_acknowledgements"] = replacement_acknowledgement_schema(
-            rejection_binding["rejection_ids"]
-        )
-        proposal_schema["required"].append("rejection_acknowledgements")
+    proposal_schema = build_proposal_schema(
+        min_steps,
+        max_steps,
+        rejection_ids=rejection_binding["rejection_ids"] if rejection_binding is not None else None,
+    )
     plan = run_codex(
         plan_prompt(goal, carry_forward, rejection_lineage, min_steps=min_steps, max_steps=max_steps),
         proposal_schema,

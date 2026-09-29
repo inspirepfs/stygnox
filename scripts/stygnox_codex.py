@@ -10,6 +10,36 @@ from pathlib import Path
 from typing import Callable
 
 
+_SUPPORTED_OUTPUT_SCHEMA_KEYWORDS = frozenset({
+    "additionalProperties",
+    "enum",
+    "items",
+    "maxItems",
+    "minItems",
+    "minimum",
+    "properties",
+    "required",
+    "type",
+})
+
+
+def validate_output_schema(schema: dict, path: str = "$") -> None:
+    """Reject unsupported Codex output-schema vocabulary before starting a turn."""
+    if not isinstance(schema, dict):
+        raise ValueError(f"output schema at {path} must be an object")
+    for keyword, value in schema.items():
+        keyword_path = f"{path}.{keyword}"
+        if keyword not in _SUPPORTED_OUTPUT_SCHEMA_KEYWORDS:
+            raise ValueError(f"unsupported output-schema keyword at {keyword_path}: {keyword}")
+        if keyword == "properties":
+            if not isinstance(value, dict):
+                raise ValueError(f"output schema properties at {keyword_path} must be an object")
+            for name, child_schema in value.items():
+                validate_output_schema(child_schema, f"{keyword_path}.{name}")
+        elif keyword == "items":
+            validate_output_schema(value, keyword_path)
+
+
 def empty_codex_metrics() -> dict:
     return {
         "commands_executed": 0,
@@ -105,12 +135,42 @@ def codex_environment_error_output(output: str) -> str:
     return "\n".join(errors)
 
 
+def invalid_json_schema_provider_error(output: str) -> str | None:
+    """Return an escaped provider schema rejection, if one was reported."""
+    for raw in output.splitlines():
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        error = event.get("error") if isinstance(event.get("error"), dict) else event
+        message = error.get("message")
+        if str(error.get("code") or error.get("type") or "") == "invalid_json_schema":
+            return str(message or "invalid_json_schema")
+        if not isinstance(message, str):
+            continue
+        try:
+            escaped_error = json.loads(message)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(escaped_error, dict):
+            continue
+        if str(escaped_error.get("code") or escaped_error.get("type") or "") == "invalid_json_schema":
+            return str(escaped_error.get("message") or message)
+    return None
+
+
 class EnvironmentBlocked(RuntimeError):
     """Environment prerequisite failed; metrics are retained if a turn had already started."""
 
     def __init__(self, message: str, metrics: dict | None = None):
         super().__init__(message)
         self.metrics = dict(metrics or {})
+
+
+class ProviderContractDefect(RuntimeError):
+    """Codex rejected the declared provider-facing output-schema contract."""
 
 
 def sandbox_prefix_from_preflights(default_returncode: int, default_output: str) -> list[str]:
@@ -146,6 +206,7 @@ def run_codex(
     temporary_directory: Callable[..., tempfile.TemporaryDirectory] = tempfile.TemporaryDirectory,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict:
+    validate_output_schema(schema)
     with temporary_directory(prefix="ralph-lite-") as temp_dir:
         schema_path = Path(temp_dir) / "schema.json"
         output_path = Path(temp_dir) / "result.json"
@@ -174,6 +235,12 @@ def run_codex(
                 "Codex default sandbox failed inside the model turn; automatic legacy fallback is disabled: "
                 + normalize_failure(environment_error)[-1200:],
                 metrics=metrics,
+            )
+        schema_error = invalid_json_schema_provider_error(output)
+        if schema_error is not None:
+            raise ProviderContractDefect(
+                "Codex provider-contract defect: invalid_json_schema; no deterministic retry path: "
+                + schema_error[-1200:]
             )
         if returncode != 0:
             raise RuntimeError(f"codex exec failed ({returncode}):\n{output[-6000:]}")
