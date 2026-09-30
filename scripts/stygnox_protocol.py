@@ -279,6 +279,23 @@ PLAN_SCHEMA = {
     "additionalProperties": False,
 }
 
+# New controller proposals use this explicit execution-contract shape.  Keep
+# ``PLAN_SCHEMA`` above as the immutable v1 compatibility contract: artifact
+# verified unversioned/v1 plans must never acquire v2 fields by inference.
+PLAN_V2_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "schema": {"type": "string", "enum": ["zen_ralph_plan_v2"]},
+        "repository_mutation_scope": {
+            "type": "array", "maxItems": 64, "items": {"type": "string"},
+        },
+        "goal": {"type": "string"},
+        "steps": PLAN_SCHEMA["properties"]["steps"],
+    },
+    "required": ["schema", "repository_mutation_scope", "goal", "steps"],
+    "additionalProperties": False,
+}
+
 RESULT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -339,7 +356,7 @@ def resolve_contract(name: str, major_version: int = STYGNOX_PROTOCOL_MAJOR_VERS
 
 __all__ = [
     "AgentAdapter", "AgentWorkOrder", "Capability", "CanonicalValue", "EffectIntent",
-    "Evaluator", "EvidenceBundle", "ExecutionReceipt", "KnowledgeRef", "PLAN_SCHEMA",
+    "Evaluator", "EvidenceBundle", "ExecutionReceipt", "KnowledgeRef", "PLAN_SCHEMA", "PLAN_V2_SCHEMA",
     "PROTOCOL_REGISTRY", "RESULT_SCHEMA", "STYGNOX_PROTOCOL_FAMILY",
     "STYGNOX_PROTOCOL_MAJOR_VERSION", "SemanticResult", "StateFingerprint", "Task",
     "TaskBackend", "WorkOrder", "canonical_data", "canonical_json_bytes", "resolve_contract",

@@ -17,6 +17,11 @@ PLAN_MAX_STEPS_DEFAULT = 10
 PLAN_MAX_STEPS_LIMIT = 20
 REPOSITORY_AUTHORITY_FIELD = "repository_authority"
 REPOSITORY_AUTHORITIES = frozenset({"read-only", "write"})
+REPOSITORY_MUTATION_SCOPE_FIELD = "repository_mutation_scope"
+REPOSITORY_MUTATION_SCOPE_MAX_PATHS = 64
+APPROVED_PLAN_V1 = "v1"
+APPROVED_PLAN_V2 = "v2"
+APPROVED_PLAN_V2_SCHEMA = "zen_ralph_plan_v2"
 
 
 @dataclass(frozen=True)
@@ -151,19 +156,103 @@ def controller_inject_repository_authority(proposal: object, authority: object) 
     return {**proposal, REPOSITORY_AUTHORITY_FIELD: authority}
 
 
+def normalize_repository_mutation_scope(scope: object) -> tuple[str, ...]:
+    """Return one finite, canonical representation of exact repository paths."""
+    if not isinstance(scope, list):
+        raise ValueError("repository mutation scope must be an array")
+    if len(scope) > REPOSITORY_MUTATION_SCOPE_MAX_PATHS:
+        raise ValueError(f"repository mutation scope must contain at most {REPOSITORY_MUTATION_SCOPE_MAX_PATHS} paths")
+    normalized: list[str] = []
+    for raw_path in scope:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError("repository mutation scope paths must be non-empty strings")
+        if any(token in raw_path for token in ("*", "?", "[", "]", "{", "}")):
+            raise ValueError("repository mutation scope paths must be exact, not glob patterns")
+        path = normalize_repo_path(raw_path)
+        if not path:
+            raise ValueError("repository mutation scope paths must not name the repository root")
+        normalized.append(path)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("repository mutation scope paths must be unique")
+    return tuple(sorted(normalized))
+
+
+def validate_v2_repository_mutation_scope(plan: Mapping[str, Any]) -> tuple[str, ...]:
+    """Fail closed unless a v2 authority candidate carries its canonical scope."""
+    if REPOSITORY_MUTATION_SCOPE_FIELD not in plan:
+        raise ValueError("v2 plan is missing repository mutation scope")
+    scope = normalize_repository_mutation_scope(plan[REPOSITORY_MUTATION_SCOPE_FIELD])
+    if plan[REPOSITORY_MUTATION_SCOPE_FIELD] != list(scope):
+        raise ValueError("v2 repository mutation scope must use its normalized representation")
+    authority = plan.get(REPOSITORY_AUTHORITY_FIELD)
+    if authority == "write" and not scope:
+        raise ValueError("v2 write plan requires a non-empty repository mutation scope")
+    if authority == "read-only" and scope:
+        raise ValueError("v2 read-only plan requires an explicit empty repository mutation scope")
+    return scope
+
+
 def validate_complete_plan(plan: object, expected_hash: str | None = None) -> None:
     validate_plan(plan)
     assert isinstance(plan, Mapping)
     if plan.get(REPOSITORY_AUTHORITY_FIELD) not in REPOSITORY_AUTHORITIES:
         raise ValueError("plan is missing controller-injected repository authority")
+    if approved_plan_version(plan) == APPROVED_PLAN_V2:
+        validate_v2_repository_mutation_scope(plan)
     if expected_hash is not None and (not str(expected_hash).strip() or plan_hash(plan) != str(expected_hash).strip()):
         raise ValueError("approved plan hash does not match controller state")
 
 
-def sandbox_for_approved_plan(plan: object, expected_hash: str | None = None) -> str:
-    validate_complete_plan(plan, expected_hash)
+def approved_plan_version(plan: object) -> str:
+    """Return the explicit execution contract for an approved plan.
+
+    Plans created before plan schemas were named are deliberately v1.  This is
+    the only compatibility discriminator: callers must not infer a new
+    contract from optional fields added by a future version.
+    """
+    if not isinstance(plan, Mapping):
+        raise ValueError("plan must be an object")
+    schema = plan.get("schema")
+    if schema is None or schema == "zen_ralph_plan_v1":
+        return APPROVED_PLAN_V1
+    if schema == APPROVED_PLAN_V2_SCHEMA:
+        return APPROVED_PLAN_V2
+    raise ValueError("approved plan has an unsupported schema")
+
+
+def dispatch_approved_plan(plan: object, expected_hash: str | None = None) -> str:
+    """Validate one approved plan through its explicit version contract.
+
+    Proposal and approval admission apply the complete v2 mutation-scope
+    contract.  This evidence-first execution seam retains the common approved
+    contract for already artifact-verified bootstrap-era v2 records, whose
+    schema name predates that v2-only field.
+    """
+    version = approved_plan_version(plan)
+    if version == APPROVED_PLAN_V1:
+        validate_complete_plan(plan, expected_hash)
+    elif version == APPROVED_PLAN_V2:
+        validate_plan(plan)
+        assert isinstance(plan, Mapping)
+        if plan.get(REPOSITORY_AUTHORITY_FIELD) not in REPOSITORY_AUTHORITIES:
+            raise ValueError("plan is missing controller-injected repository authority")
+        if expected_hash is not None and (not str(expected_hash).strip() or plan_hash(plan) != str(expected_hash).strip()):
+            raise ValueError("approved plan hash does not match controller state")
+    else:  # Defensive guard for future discriminator extensions.
+        raise ValueError("approved plan has an unsupported execution contract")
+    return version
+
+
+def sandbox_for_dispatched_approved_plan(plan: object, version: str) -> str:
+    """Select the sandbox after ``dispatch_approved_plan`` has validated it."""
+    if version not in {APPROVED_PLAN_V1, APPROVED_PLAN_V2}:
+        raise ValueError("approved plan has an unsupported execution contract")
     assert isinstance(plan, Mapping)
     return "read-only" if plan[REPOSITORY_AUTHORITY_FIELD] == "read-only" else "workspace-write"
+
+
+def sandbox_for_approved_plan(plan: object, expected_hash: str | None = None) -> str:
+    return sandbox_for_dispatched_approved_plan(plan, dispatch_approved_plan(plan, expected_hash))
 
 
 def is_protected_path(path: object, policy: ProjectPathPolicy) -> bool:

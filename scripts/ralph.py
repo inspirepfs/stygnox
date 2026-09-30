@@ -40,7 +40,7 @@ import stygnox_core as core
 import stygnox_codex as codex
 import stygnox_runtime as runtime
 import stygnox_operator as operator_contract
-from stygnox_protocol import PLAN_SCHEMA, RESULT_SCHEMA
+from stygnox_protocol import PLAN_SCHEMA, PLAN_V2_SCHEMA, RESULT_SCHEMA
 
 ROOT = PROJECT_PROFILE.repository_root(__file__)
 
@@ -151,6 +151,24 @@ def validate_complete_plan(plan: dict, expected_hash: str | None = None) -> None
     core.validate_complete_plan(plan, expected_hash)
 
 
+def dispatch_approved_plan(plan: dict, expected_hash: str | None = None) -> str:
+    """Dispatch through the core's sole v1/v2 execution-contract seam."""
+    return core.dispatch_approved_plan(plan, expected_hash)
+
+
+def verified_approved_plan_dispatch(state: dict) -> tuple[dict, str, str]:
+    """Verify immutable approval evidence before selecting an execution contract.
+
+    This is the only lifecycle entrypoint permitted to reach the v1/v2
+    dispatcher.  In particular, it deliberately verifies the artifact and
+    checkpoint/repository binding before interpreting the plan schema.
+    """
+    checkpoint = verify_approval_execution_evidence(state)
+    version = dispatch_approved_plan(state.get("plan"), str(state.get("plan_hash") or ""))
+    sandbox = core.sandbox_for_dispatched_approved_plan(state["plan"], version)
+    return checkpoint, version, sandbox
+
+
 def sandbox_for_approved_plan(plan: dict, expected_hash: str | None = None) -> str:
     """Select the model sandbox from the controller-bound plan authority only.
     """
@@ -175,6 +193,16 @@ def render_plan(plan: dict) -> str:
     ]
     if authority in REPOSITORY_AUTHORITIES:
         lines.append(f"**Repository authority:** `{authority}`")
+    # New v2 candidates are admitted only with this field.  An already
+    # artifact-verified bootstrap-era named-v2 record may predate it, though,
+    # and must remain renderable on the Step 1 compatibility path.
+    if (
+        core.approved_plan_version(plan) == core.APPROVED_PLAN_V2
+        and core.REPOSITORY_MUTATION_SCOPE_FIELD in plan
+    ):
+        scope = core.validate_v2_repository_mutation_scope(plan)
+        rendered_scope = json.dumps(list(scope), ensure_ascii=False, separators=(",", ":"))
+        lines.append(f"**Repository mutation scope (normalized JSON):** `{rendered_scope}`")
     binding = plan.get("rejection_lineage")
     if isinstance(binding, dict):
         lines.append(
@@ -946,7 +974,7 @@ def build_proposal_schema(
     rejection_ids: list[str] | None = None,
 ) -> dict:
     """Build the provider-facing plan schema for normal or replacement proposals."""
-    schema = json.loads(json.dumps(PLAN_SCHEMA))
+    schema = json.loads(json.dumps(PLAN_V2_SCHEMA))
     schema["properties"]["steps"]["minItems"] = min_steps
     schema["properties"]["steps"]["maxItems"] = max_steps
     if rejection_ids is not None:
@@ -1150,6 +1178,16 @@ def _validated_operation_records(state: dict) -> list[dict]:
         }
         if set(record) != required or record.get("record_sha256") != _operation_record_hash(record):
             raise RuntimeError("operation attribution record is incomplete or altered")
+        # A persisted record is checkpoint-relative ownership evidence. Scope
+        # must be proven before its origin, policy, or grant is consulted.
+        recorded_verification = record.get("controller_verification")
+        recorded_delta = (
+            recorded_verification.get("new_project_delta")
+            if isinstance(recorded_verification, dict) else []
+        )
+        _require_v2_checkpoint_delta_scope(
+            state, [str(record.get("path") or ""), *(recorded_delta or [])],
+        )
         if record["plan_hash"] != state.get("plan_hash") or record["approved_plan_artifact"] != artifact or record["approved_plan_artifact_sha256"] != _evidence_digest(artifact):
             raise RuntimeError("operation attribution approved-artifact origin is stale or altered")
         if record["approval_checkpoint"] != expected_checkpoint or record["approval_repository_evidence"] != evidence or record["approval_repository_evidence_sha256"] != _evidence_digest(evidence):
@@ -1250,6 +1288,27 @@ def _pending_step_paths(state: dict, step_no: int) -> set[str]:
     }
 
 
+def _require_v2_checkpoint_delta_scope(state: dict, paths: Iterable[str]) -> None:
+    """Refuse v2 checkpoint deltas outside the hash-bound repository scope.
+
+    This deliberately precedes all record, pending-path, attribution,
+    ownership, policy, and self-hosting decisions. Those mechanisms can
+    constrain an in-scope change; none can make an out-of-scope path valid.
+    """
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    if core.approved_plan_version(plan) != core.APPROVED_PLAN_V2:
+        return
+    scope = set(core.validate_v2_repository_mutation_scope(plan))
+    delta = {
+        _normalize_repo_path(str(path))
+        for path in paths
+        if _normalize_repo_path(str(path))
+    }
+    outside = sorted(delta - scope)
+    if outside:
+        raise RuntimeError(f"CHECKPOINT_REPOSITORY_SCOPE_DELTA: {outside}")
+
+
 def _remember_pending_step_paths(state: dict, step_no: int, paths: Iterable[str]) -> None:
     existing = _pending_step_paths(state, step_no)
     existing.update(
@@ -1346,6 +1405,10 @@ def strict_native_provenance(
         for path in repository.get("new_project_delta") or []
         if _normalize_repo_path(str(path))
     }
+    # Terminal readiness, requalification, and finalization all consume this
+    # native proof.  Apply the hash-bound v2 scope to the live
+    # checkpoint-relative delta before it is compared with attribution.
+    _require_v2_checkpoint_delta_scope(state, current_delta)
     attributed = set(latest)
     if authority == "read-only":
         if current_delta:
@@ -1490,6 +1553,7 @@ def verified_attribution_result(
         _normalize_repo_path(str(path)) for path in verification.get("new_project_delta") or []
         if _normalize_repo_path(str(path))
     }
+    _require_v2_checkpoint_delta_scope(state, verified_delta)
     observed = {
         _normalize_repo_path(str(path)) for path in observed_paths
         if _normalize_repo_path(str(path))
@@ -1648,6 +1712,7 @@ def _native_recovery_record(
 ) -> dict:
     checkpoint_id = str(state.get("recovery_checkpoint") or "")
     checkpoint = verify_approval_execution_evidence(state)
+    _require_v2_checkpoint_delta_scope(state, [path])
     baseline_kind = plan_baseline_path_kind(state, path)
     if baseline_kind not in {"tracked", "absent"}:
         raise RuntimeError(f"self-upgrade recovery refuses non-plan baseline path: {path}")
@@ -1841,6 +1906,10 @@ def verify_post_turn_repository_state(
         raise RuntimeError(f"post-turn verification received unsupported sandbox {sandbox!r}")
     if changed_residue:
         raise RuntimeError(f"APPROVAL_RESIDUE_CHANGED: {changed_residue}")
+
+    # Check the complete checkpoint-relative delta before any recorded,
+    # pending, current-turn, self-hosting, or test-policy interpretation.
+    _require_v2_checkpoint_delta_scope(state, new_delta)
 
     recorded = set(current_attributed_paths(state))
     pending = _pending_step_paths(state, int(step["id"]))
@@ -2925,6 +2994,60 @@ def restored_retirement_paths_match_checkpoint(
     return True, "all recorded plan paths match the approval checkpoint"
 
 
+def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> list[dict]:
+    """Build retirement evidence only after proving a native delta is already gone.
+
+    This is deliberately separate from rollback evidence: it validates the
+    immutable native operation records, then requires their *current* paths to
+    match the approval checkpoint without performing a checkout or deletion.
+    """
+    try:
+        latest = _latest_operation_records_by_path(state)
+        validated = _validated_operation_records(state)
+    except RuntimeError as exc:
+        raise RuntimeError(f"reconcile-restored refuses unverified native delta: {exc}") from exc
+    if len(latest) != len(validated):
+        raise RuntimeError("reconcile-restored refuses duplicate native operation attribution")
+
+    repository = recompute_repository_against_approval_checkpoint(state)
+    changed_residue = sorted(repository.get("changed_approval_residue") or [])
+    if changed_residue:
+        raise RuntimeError(f"reconcile-restored refuses changed approval residue: {changed_residue}")
+
+    records: list[dict] = []
+    for path in sorted(latest):
+        attribution = latest[path]
+        baseline = str(attribution.get("baseline_kind") or "")
+        if baseline not in {"tracked", "absent"}:
+            raise RuntimeError(f"reconcile-restored refuses unsupported attribution baseline: {path} ({baseline})")
+        before = _json_copy(attribution["current_fingerprint"])
+        records.append({
+            "path": path,
+            "baseline": baseline,
+            "plan_owned": baseline == "absent",
+            "current": before["kind"],
+            "unexpected": False,
+            "evidence": before,
+            "attribution": _json_copy(attribution),
+            "before": before,
+            "after": retirement_path_fingerprint(path),
+            "restoration": {
+                "disposition": "reconciled",
+                "action": "none",
+                "checkpoint": checkpoint["id"],
+            },
+        })
+
+    matches, detail = restored_retirement_paths_match_checkpoint(state, checkpoint, records)
+    if not matches:
+        raise RuntimeError(f"reconcile-restored refuses changed or missing recorded path: {detail}")
+
+    current_delta = sorted({_retirement_path(str(path)) for path in repository.get("new_project_delta") or []})
+    if current_delta:
+        raise RuntimeError(f"reconcile-restored refuses extra changed path or unverified delta: {current_delta}")
+    return records
+
+
 def _retirement_path(path: str) -> str:
     """Canonicalize an artifact path, refusing protected or ambiguous targets."""
     value = _normalize_repo_path(path)
@@ -3335,7 +3458,13 @@ def validate_retirement_manifest(manifest: dict) -> dict:
         if restoration["checkpoint"] != manifest["checkpoint"]:
             raise RuntimeError("retirement manifest restoration checkpoint is invalid")
         if manifest["disposition"] == "ROLLED_BACK":
-            if restoration["disposition"] != "restored" or restoration["action"] not in {"checkout", "delete"}:
+            if restoration["disposition"] == "restored":
+                restoration_valid = restoration["action"] in {"checkout", "delete"}
+            elif restoration["disposition"] == "reconciled":
+                restoration_valid = restoration["action"] == "none"
+            else:
+                restoration_valid = False
+            if not restoration_valid:
                 raise RuntimeError("retirement manifest rollback restoration is invalid")
             after = item["after"]
             if not isinstance(after, dict) or set(after) != set(evidence):
@@ -6144,8 +6273,7 @@ def _interrupted_run_recovery_evidence(state: dict, checkpoint_id: str, declared
     expected = str(state.get("plan_hash") or "")
     if not expected:
         raise RuntimeError("interrupted-run recovery requires an active plan hash")
-    validate_complete_plan(state.get("plan"), expected)
-    checkpoint = verify_approval_execution_evidence(state)
+    checkpoint, _version, sandbox = verified_approved_plan_dispatch(state)
     if str(checkpoint.get("id") or "") != checkpoint_id:
         raise RuntimeError("interrupted-run recovery checkpoint does not match approval evidence")
     current_step = int(state.get("current_step") or 0)
@@ -6153,7 +6281,6 @@ def _interrupted_run_recovery_evidence(state: dict, checkpoint_id: str, declared
     if not (1 <= current_step <= len(steps)):
         raise RuntimeError("interrupted-run recovery requires an unfinished approved step")
     step = steps[current_step - 1]
-    sandbox = sandbox_for_approved_plan(state["plan"], expected)
     verification = verify_post_turn_repository_state(state, step, sandbox, [])
     current_delta = set(verification.get("new_project_delta") or [])
     recorded = set(current_attributed_paths(state))
@@ -6634,8 +6761,11 @@ def cmd_retire_plan(args: argparse.Namespace) -> int:
 
     rollback = bool(getattr(args, "rollback", False))
     carry_forward = bool(getattr(args, "carry_forward", False))
+    reconcile_restored = bool(getattr(args, "reconcile_restored", False))
     if rollback == carry_forward:
         raise RuntimeError("retire-plan requires exactly one of --rollback or --carry-forward")
+    if reconcile_restored and not rollback:
+        raise RuntimeError("reconcile-restored requires --rollback and cannot carry forward content")
     # Retirement is a lifecycle transition of the exact immutable approved plan,
     # not a mechanism for accepting a substituted in-memory plan object.  Bind to
     # the already-approved plan hash without reinterpreting historical schema.
@@ -6664,13 +6794,21 @@ def cmd_retire_plan(args: argparse.Namespace) -> int:
         | set(state.get("plan_owned_files") or [])
         | set(state.get("plan_carry_forward_files") or [])
     )
-    records = retirement_attribution_records(state) if rollback else retirement_path_records(state, carry_forward_paths)
+    records = (
+        reconciled_restored_retirement_records(state, checkpoint)
+        if reconcile_restored
+        else (retirement_attribution_records(state) if rollback else retirement_path_records(state, carry_forward_paths))
+    )
 
     before = repo_snapshot()
 
     restore_paths = [item["path"] for item in records if item["baseline"] == "tracked"]
     delete_paths = [item["path"] for item in records if item["baseline"] == "absent"]
-    if rollback:
+    if rollback and reconcile_restored:
+        # This path proves restoration has already happened. It must remain a
+        # strict no-op: no preview, checkout, deletion, or substitution occurs.
+        disposition, operations = "ROLLED_BACK", {"restore": [], "delete": [], "preserved": []}
+    elif rollback:
         preview = retirement_rollback_preview(
             state, checkpoint, records, reason=reason, status=status, step=old_step,
             loop_count=old_loops, recovery_ref=recovery_ref, recovery_oid=recovery_oid,
@@ -7605,14 +7743,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if state.get("status") not in {"APPROVED", "PAUSED_USAGE_LIMIT"}:
         raise RuntimeError(f"run requires APPROVED/PAUSED_USAGE_LIMIT status, found {state.get('status')}")
     try:
-        validate_complete_plan(state["plan"], state.get("plan_hash"))
-        sandbox = sandbox_for_approved_plan(state["plan"], state.get("plan_hash"))
-    except (TypeError, ValueError) as exc:
-        block(state, f"approved plan repository authority is invalid: {exc}")
-        raise RuntimeError("approved plan repository authority is invalid; blocked for human review") from exc
-    try:
-        verify_approval_execution_evidence(state)
-    except RuntimeError as exc:
+        _checkpoint, _version, sandbox = verified_approved_plan_dispatch(state)
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         block(state, str(exc))
         raise RuntimeError(f"{exc}; blocked for human review") from exc
     if state.get("retirement_record_id") and not refresh_replacement_dirty_inventory(state):
@@ -7632,9 +7764,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 0
         state = load_state()
         try:
-            validate_complete_plan(state["plan"], state.get("plan_hash"))
-            sandbox = sandbox_for_approved_plan(state["plan"], state.get("plan_hash"))
-        except (KeyError, TypeError, ValueError) as exc:
+            _checkpoint, _version, sandbox = verified_approved_plan_dispatch(state)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
             block(state, f"approved plan identity/authority is invalid before model admission: {exc}")
             raise RuntimeError("approved plan identity/authority changed before model admission; blocked for human review") from exc
         if loops_this_run >= args.max_loops:
@@ -7977,8 +8108,7 @@ def cmd_recover_self_upgrade(args: argparse.Namespace) -> int:
     checkpoint_id = str(state.get("recovery_checkpoint") or "")
     if not checkpoint_id or str(args.checkpoint or "") != checkpoint_id:
         raise RuntimeError("recover-self-upgrade requires the exact active recovery checkpoint")
-    validate_complete_plan(state["plan"], expected)
-    verify_approval_execution_evidence(state)
+    _checkpoint, _version, _sandbox = verified_approved_plan_dispatch(state)
 
     current_step = int(state.get("current_step") or 0)
     steps = list(((state.get("plan") or {}).get("steps") or []))
@@ -8002,6 +8132,7 @@ def cmd_recover_self_upgrade(args: argparse.Namespace) -> int:
         for path in repository.get("new_project_delta") or []
         if _normalize_repo_path(str(path))
     }
+    _require_v2_checkpoint_delta_scope(state, current_delta)
     if not set(pending).issubset(current_delta):
         raise RuntimeError("recover-self-upgrade pending paths must be current checkpoint-relative delta")
     for path in pending:
@@ -8138,8 +8269,7 @@ def cmd_recover_validation_block(args: argparse.Namespace) -> int:
     if not is_recoverable_validation_block(state.get("block_reason") or ""):
         raise RuntimeError("current block is not classified as a recoverable validation-only block")
     try:
-        validate_complete_plan(state["plan"], state.get("plan_hash"))
-        verify_approval_execution_evidence(state)
+        _checkpoint, _version, _sandbox = verified_approved_plan_dispatch(state)
     except (TypeError, ValueError, RuntimeError) as exc:
         block(state, str(exc))
         raise RuntimeError(f"{exc}; recovery blocked for human review") from exc
