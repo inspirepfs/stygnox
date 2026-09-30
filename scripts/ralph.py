@@ -7724,6 +7724,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                 verification = record_post_turn_repository_verification(
                     state, step, sandbox, files, loop=loop_no,
                 )
+                if verification["state"] == "PASS":
+                    _remember_pending_step_paths(
+                        state, int(step["id"]),
+                        set(files) & set(verification.get("new_project_delta") or []),
+                    )
                 candidate_paths = sorted(
                     path for path in changed_authority
                     if not PROJECT_PROFILE.is_runtime_path(path)
