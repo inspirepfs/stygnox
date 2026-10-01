@@ -249,6 +249,7 @@ def default_state() -> dict:
         "approval_repository_evidence": None,
         "operation_attributions": [],
         "pending_step_delta_paths": [],
+        "pending_retirement_recovery_evidence": [],
         "plan_changed_files": [],
         "plan_owned_files": [],
         "test_reconciliation_adoptions": [],
@@ -1277,15 +1278,131 @@ def current_attributed_paths(state: dict) -> list[str]:
     return sorted(covered)
 
 
-def _pending_step_paths(state: dict, step_no: int) -> set[str]:
-    pending = state.get("pending_step_delta_paths")
-    if not isinstance(pending, dict) or int(pending.get("step") or 0) != int(step_no):
+PENDING_RECOVERY_EVIDENCE_SCHEMA = "zen_ralph_pending_recovery_evidence_v1"
+
+
+def _pending_retirement_recovery_paths(
+    state: dict, step_no: int, *, require_current_state: bool = True,
+) -> set[str]:
+    """Return hash-bound pending recovery observations for this active step.
+
+    Pending evidence is a witness for a later controller verification.  It is
+    deliberately not operation attribution, ownership, or a source of plan
+    advancement.  Normal rollback requires the witness to remain live;
+    restored reconciliation instead proves the recorded paths have returned
+    to the immutable checkpoint before it can use that same evidence.
+    """
+    pending = state.get("pending_retirement_recovery_evidence")
+    if not pending:
         return set()
-    return {
-        _normalize_repo_path(str(path))
-        for path in pending.get("paths") or []
-        if _normalize_repo_path(str(path))
-    }
+    if not isinstance(pending, dict) or pending.get("schema") != PENDING_RECOVERY_EVIDENCE_SCHEMA:
+        raise RuntimeError("pending recovery evidence is missing its immutable schema")
+    if int(pending.get("step") or 0) != int(step_no) or int(state.get("current_step") or 0) != int(step_no):
+        raise RuntimeError("pending recovery evidence does not match the active step")
+    checkpoint = verify_approval_execution_evidence(state)
+    checkpoint_id = str(state.get("recovery_checkpoint") or "")
+    if (
+        pending.get("plan_hash") != state.get("plan_hash")
+        or pending.get("approved_plan_artifact_sha256") != _evidence_digest(state.get("approved_plan_artifact"))
+        or pending.get("approval_checkpoint") != _checkpoint_identity(checkpoint_id, checkpoint)
+    ):
+        raise RuntimeError("pending recovery evidence does not match active approval authority")
+    scope = pending.get("repository_scope")
+    if not isinstance(scope, list):
+        raise RuntimeError("pending recovery evidence scope is malformed")
+    try:
+        normalized_scope = list(core.normalize_repository_mutation_scope(scope))
+    except ValueError as exc:
+        raise RuntimeError("pending recovery evidence scope is malformed") from exc
+    if scope != normalized_scope:
+        raise RuntimeError("pending recovery evidence scope is stale or altered")
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    active_steps = [
+        item for item in plan.get("steps") or []
+        if isinstance(item, dict) and int(item.get("id") or 0) == int(step_no)
+    ]
+    if len(active_steps) != 1 or pending.get("originating_step_sha256") != _evidence_digest(
+        _originating_step(state, active_steps[0])
+    ):
+        raise RuntimeError("pending recovery evidence originating step is stale or altered")
+    if core.approved_plan_version(plan) == core.APPROVED_PLAN_V2:
+        if scope != list(core.validate_v2_repository_mutation_scope(plan)):
+            raise RuntimeError("pending recovery evidence scope is stale or altered")
+    if pending.get("repository_scope_sha256") != _evidence_digest(scope):
+        raise RuntimeError("pending recovery evidence scope is stale or altered")
+    stored = {key: value for key, value in pending.items() if key != "evidence_sha256"}
+    if pending.get("evidence_sha256") != _evidence_digest(stored):
+        raise RuntimeError("pending recovery evidence digest is stale or altered")
+    verification = pending.get("verification")
+    if not isinstance(verification, dict) or verification.get("state") != "PASS":
+        raise RuntimeError("pending recovery evidence lacks PASS verification")
+    declared_paths = pending.get("paths")
+    records = pending.get("path_evidence")
+    if not isinstance(declared_paths, list) or not isinstance(records, list):
+        raise RuntimeError("pending recovery evidence path records are malformed")
+    paths: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise RuntimeError("pending recovery evidence has malformed path record")
+        path = _normalize_repo_path(str(record.get("path") or ""))
+        fingerprint = record.get("current_fingerprint")
+        baseline = str(record.get("baseline_kind") or "")
+        change = str(record.get("change") or "")
+        if (
+            not path or path not in scope or path in approval_baseline_residue_paths(state)
+            or is_protected_path(path) or path in paths
+            or not isinstance(fingerprint, dict)
+            or (
+                require_current_state
+                and fingerprint != retirement_path_fingerprint(path, allow_runtime=True)
+            )
+        ):
+            raise RuntimeError(f"pending recovery evidence is no longer exact: {path or '<missing>'}")
+        expected = (
+            "tracked-modification" if baseline == "tracked" and fingerprint.get("kind") == "tracked"
+            else "checkpoint-absent-creation" if baseline == "absent" and fingerprint.get("kind") == "untracked"
+            else "tracked-deletion" if baseline == "tracked" and fingerprint.get("kind") == "missing"
+            else ""
+        )
+        if change != expected:
+            raise RuntimeError(f"pending recovery evidence has invalid change state: {path}")
+        paths.add(path)
+    # Keep the original path-list shape as a passive operator-facing projection,
+    # but bind it to the immutable records rather than trusting it as evidence.
+    if declared_paths != sorted(paths):
+        raise RuntimeError("pending recovery evidence path projection is stale or altered")
+    removals = pending.get("authority_enforcement_removals")
+    if not isinstance(removals, list):
+        raise RuntimeError("pending recovery evidence enforcement removals are malformed")
+    removed_paths: set[str] = set()
+    for removal in removals:
+        if not isinstance(removal, dict) or set(removal) != {"path", "post_enforcement_fingerprint"}:
+            raise RuntimeError("pending recovery evidence enforcement removal is malformed")
+        path = _normalize_repo_path(str(removal.get("path") or ""))
+        fingerprint = removal.get("post_enforcement_fingerprint")
+        if (
+            not path or path not in scope or path in removed_paths
+            or not isinstance(fingerprint, dict)
+            or (
+                require_current_state
+                and fingerprint != retirement_path_fingerprint(path, allow_runtime=True)
+            )
+        ):
+            raise RuntimeError("pending recovery evidence enforcement removal is stale or altered")
+        removed_paths.add(path)
+    if paths & removed_paths:
+        raise RuntimeError("pending recovery evidence reintroduces an enforcement-removed path")
+    return paths
+
+
+def _pending_step_paths(state: dict, step_no: int) -> set[str]:
+    """Return the legacy bootstrap projection for explicit recovery only.
+
+    New retirement evidence is deliberately not an input to acceptance.  The
+    historic bootstrap projection is retained independently for its narrowly
+    scoped self-upgrade recovery transaction.
+    """
+    return _pending_step_path_projection(state, step_no)
 
 
 def _require_v2_checkpoint_delta_scope(state: dict, paths: Iterable[str]) -> None:
@@ -1309,22 +1426,130 @@ def _require_v2_checkpoint_delta_scope(state: dict, paths: Iterable[str]) -> Non
         raise RuntimeError(f"CHECKPOINT_REPOSITORY_SCOPE_DELTA: {outside}")
 
 
-def _remember_pending_step_paths(state: dict, step_no: int, paths: Iterable[str]) -> None:
-    existing = _pending_step_paths(state, step_no)
-    existing.update(
-        _normalize_repo_path(str(path))
-        for path in paths
+def _pending_recovery_scope(state: dict, verified_delta: set[str]) -> list[str]:
+    """Freeze the approved v2 scope, or the exact verified legacy delta."""
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    if core.approved_plan_version(plan) == core.APPROVED_PLAN_V2:
+        return list(core.validate_v2_repository_mutation_scope(plan))
+    return sorted(verified_delta)
+
+
+def _persist_pending_recovery_evidence(
+    state: dict, step: dict, verification: dict, *, authority_enforcement_removals: Iterable[str] = (),
+) -> None:
+    """Persist a verified surviving delta without granting it acceptance authority.
+
+    The complete checkpoint-relative delta, rather than a model-reported or
+    attempted-turn file list, is the only source for the observations.  Paths
+    removed by an authority guard are retained solely as removal evidence and
+    never reintroduced as eligible observations.
+    """
+    origin_step = _originating_step(state, step)
+    step_no = int(origin_step["id"])
+    checkpoint = verify_approval_execution_evidence(state)
+    checkpoint_id = str(state.get("recovery_checkpoint") or "")
+    if (
+        int(state.get("current_step") or 0) != step_no
+        or verification.get("state") != "PASS"
+        or verification.get("plan_hash") != state.get("plan_hash")
+        or verification.get("checkpoint") != checkpoint_id
+        or int(verification.get("step") or 0) != step_no
+        or not isinstance(verification.get("fingerprint"), str)
+    ):
+        raise RuntimeError("pending recovery evidence requires active-step PASS verification")
+    verified_delta = {
+        _normalize_repo_path(str(path)) for path in verification.get("new_project_delta") or []
         if _normalize_repo_path(str(path))
-    )
-    state["pending_step_delta_paths"] = {
-        "step": int(step_no),
-        "paths": sorted(existing),
-        "updated_at": utc_now(),
     }
+    _require_v2_checkpoint_delta_scope(state, verified_delta)
+    scope = _pending_recovery_scope(state, verified_delta)
+    fingerprints = verification.get("current_fingerprints")
+    if not isinstance(fingerprints, dict):
+        raise RuntimeError("pending recovery evidence requires controller fingerprints")
+    removed = {
+        _normalize_repo_path(str(path)) for path in authority_enforcement_removals
+        if _normalize_repo_path(str(path))
+    }
+    records: list[dict] = []
+    # A prior accepted record is never pending merely because it remains in the
+    # checkpoint-relative delta.  Pending evidence describes only the surviving
+    # delta that lacks exact accepted provenance at this moment.
+    eligible_delta = verified_delta - set(current_attributed_paths(state)) - removed
+    for path in sorted(eligible_delta):
+        baseline = plan_baseline_path_kind(state, path)
+        fingerprint = fingerprints.get(path)
+        if (
+            path in approval_baseline_residue_paths(state) or is_protected_path(path)
+            or baseline not in {"tracked", "absent"}
+            or not isinstance(fingerprint, dict)
+            or fingerprint != retirement_path_fingerprint(path, allow_runtime=True)
+        ):
+            continue
+        change = (
+            "tracked-modification" if baseline == "tracked" and fingerprint.get("kind") == "tracked"
+            else "checkpoint-absent-creation" if baseline == "absent" and fingerprint.get("kind") == "untracked"
+            else "tracked-deletion" if baseline == "tracked" and fingerprint.get("kind") == "missing"
+            else ""
+        )
+        if change:
+            records.append({
+                "path": path,
+                "baseline_kind": baseline,
+                "change": change,
+                "current_fingerprint": _json_copy(fingerprint),
+            })
+    removals = [
+        {
+            "path": path,
+            "post_enforcement_fingerprint": _json_copy(
+                retirement_path_fingerprint(path, allow_runtime=True)
+            ),
+        }
+        for path in sorted(removed)
+    ]
+    evidence = {
+        "schema": PENDING_RECOVERY_EVIDENCE_SCHEMA,
+        "plan_hash": state.get("plan_hash"),
+        "approved_plan_artifact_sha256": _evidence_digest(state.get("approved_plan_artifact")),
+        "step": step_no,
+        "originating_step_sha256": _evidence_digest(origin_step),
+        "approval_checkpoint": _checkpoint_identity(checkpoint_id, checkpoint),
+        "repository_scope": _json_copy(scope),
+        "repository_scope_sha256": _evidence_digest(scope),
+        "verification": {
+            "state": verification["state"],
+            "fingerprint": verification["fingerprint"],
+            "loop": int(verification.get("loop") or 0),
+            "sandbox": verification.get("sandbox"),
+        },
+        "paths": [record["path"] for record in records],
+        "path_evidence": records,
+        "authority_enforcement_removals": removals,
+        "recorded_at": utc_now(),
+    }
+    evidence["evidence_sha256"] = _evidence_digest(evidence)
+    # This provenance is deliberately distinct from the legacy bootstrap
+    # pending-path record.  It must remain a passive, checkpoint-bound witness
+    # and cannot alter legacy recovery attribution semantics.
+    state["pending_retirement_recovery_evidence"] = evidence
 
 
 def _clear_pending_step_paths(state: dict) -> None:
     state["pending_step_delta_paths"] = []
+    state["pending_retirement_recovery_evidence"] = []
+
+
+def _pending_step_path_projection(state: dict, step_no: int) -> set[str]:
+    """Return the passive pending-path projection without granting it authority."""
+    pending = state.get("pending_step_delta_paths")
+    if not isinstance(pending, dict) or int(pending.get("step") or 0) != int(step_no):
+        return set()
+    values = pending.get("paths") if isinstance(pending.get("paths"), list) else []
+    return {
+        _normalize_repo_path(str(item.get("path") if isinstance(item, dict) else item))
+        for item in values
+        if _normalize_repo_path(str(item.get("path") if isinstance(item, dict) else item))
+    }
 
 
 def validated_plan_paths(state: dict, *, owned_only: bool = False) -> list[str]:
@@ -1558,8 +1783,13 @@ def verified_attribution_result(
         _normalize_repo_path(str(path)) for path in observed_paths
         if _normalize_repo_path(str(path))
     }
-    pending = _pending_step_paths(state, int(origin_step["id"]))
-    witness = observed | pending
+    # The new retirement-recovery witness is intentionally not an attribution
+    # input.  Retain the independent legacy bootstrap projection here: its
+    # explicit self-upgrade recovery contract predates retirement evidence and
+    # may reconstruct its previously verified current-step operations.
+    # `_pending_step_paths` reads only that legacy projection, never the new
+    # checkpoint-bound retirement record.
+    witness = observed | _pending_step_paths(state, int(origin_step["id"]))
     latest = _latest_operation_records_by_path(state)
     paths = sorted(
         path for path in (verified_delta & witness)
@@ -1912,9 +2142,15 @@ def verify_post_turn_repository_state(
     _require_v2_checkpoint_delta_scope(state, new_delta)
 
     recorded = set(current_attributed_paths(state))
-    pending = _pending_step_paths(state, int(step["id"]))
     observed = {_normalize_repo_path(str(path)) for path in observed_paths if _normalize_repo_path(str(path))}
-    candidates = recorded | pending | observed
+    # Pending recovery evidence may support an explicit recovery workflow, but
+    # cannot make a later ordinary model turn pass checkpoint coverage.
+    # The legacy bootstrap projection remains a narrowly-scoped recovery input.
+    # It is intentionally separate from pending retirement provenance: the
+    # latter never contributes acceptance-facing coverage, while the former is
+    # retained for the explicit self-upgrade recovery contract.
+    legacy_pending = _pending_step_path_projection(state, int(step["id"]))
+    candidates = recorded | observed | legacy_pending
     unexpected = sorted(new_delta - candidates)
     if unexpected:
         raise RuntimeError(f"UNATTRIBUTED_CHECKPOINT_DELTA: {unexpected}")
@@ -3009,6 +3245,17 @@ def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> lis
     if len(latest) != len(validated):
         raise RuntimeError("reconcile-restored refuses duplicate native operation attribution")
 
+    # A path may be pending precisely because its original controller witness
+    # was not accepted attribution.  Its old fingerprint cannot remain live
+    # after an operator restores it, so validate the immutable record first,
+    # then prove the current path equals the checkpoint below.  This mode
+    # derives no restore/delete authority and is never used by normal rollback.
+    pending_paths = _pending_retirement_recovery_paths(
+        state, int(state.get("current_step") or 0), require_current_state=False,
+    )
+    if set(latest) & pending_paths:
+        raise RuntimeError("reconcile-restored refuses pending evidence that overlaps accepted attribution")
+
     repository = recompute_repository_against_approval_checkpoint(state)
     changed_residue = sorted(repository.get("changed_approval_residue") or [])
     if changed_residue:
@@ -3038,6 +3285,49 @@ def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> lis
             },
         })
 
+    pending = state.get("pending_retirement_recovery_evidence")
+    pending_records = pending.get("path_evidence") if isinstance(pending, dict) else []
+    pending_by_path = {
+        _normalize_repo_path(str(record.get("path") or "")): record
+        for record in pending_records
+        if isinstance(record, dict)
+    }
+    if set(pending_by_path) != pending_paths:
+        raise RuntimeError("reconcile-restored pending recovery records are incomplete or ambiguous")
+    for path in sorted(pending_paths):
+        evidence = pending_by_path[path]
+        baseline = str(evidence.get("baseline_kind") or "")
+        # Pending observations may have included a runtime sibling while they
+        # were live, but reconciliation never makes that path mutable or
+        # admissible.  Keep native protected-path validation for the manifest.
+        _retirement_path(path)
+        before = _json_copy(evidence["current_fingerprint"])
+        records.append({
+            "path": path,
+            "baseline": baseline,
+            "plan_owned": baseline == "absent",
+            "current": before["kind"],
+            "unexpected": False,
+            "evidence": before,
+            "attribution": {
+                "schema": PENDING_RECOVERY_EVIDENCE_SCHEMA,
+                "authority": "pending-recovery-only",
+                "plan_hash": pending.get("plan_hash"),
+                "approval_checkpoint": _json_copy(pending.get("approval_checkpoint")),
+                "originating_step_sha256": pending.get("originating_step_sha256"),
+                "evidence_sha256": pending.get("evidence_sha256"),
+                "path": path,
+                "current_fingerprint": _json_copy(before),
+            },
+            "before": before,
+            "after": retirement_path_fingerprint(path),
+            "restoration": {
+                "disposition": "reconciled",
+                "action": "none",
+                "checkpoint": checkpoint["id"],
+            },
+        })
+
     matches, detail = restored_retirement_paths_match_checkpoint(state, checkpoint, records)
     if not matches:
         raise RuntimeError(f"reconcile-restored refuses changed or missing recorded path: {detail}")
@@ -3048,8 +3338,13 @@ def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> lis
     return records
 
 
-def _retirement_path(path: str) -> str:
-    """Canonicalize an artifact path, refusing protected or ambiguous targets."""
+def _retirement_path(path: str, *, allow_runtime: bool = False) -> str:
+    """Canonicalize an artifact path, refusing protected or ambiguous targets.
+
+    Checkpoint-bound pending recovery may inventory a non-protected runtime
+    sibling, but that narrow exception does not relax native attribution or
+    mutation authority.
+    """
     value = _normalize_repo_path(path)
     candidate = Path(value)
     if (
@@ -3057,7 +3352,7 @@ def _retirement_path(path: str) -> str:
         or candidate.is_absolute()
         or any(part in {"", ".", ".."} for part in candidate.parts)
         or is_protected_path(value)
-        or _is_runtime_authority_path(value)
+        or (_is_runtime_authority_path(value) and not allow_runtime)
     ):
         raise RuntimeError(f"retirement record rejects protected or ambiguous path: {path!r}")
     return candidate.as_posix()
@@ -3067,13 +3362,13 @@ def _retirement_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def retirement_path_fingerprint(path: str) -> dict:
+def retirement_path_fingerprint(path: str, *, allow_runtime: bool = False) -> dict:
     """Capture canonical Git status plus content and HEAD-delta evidence for one path.
 
     A missing path is a legitimate, distinct state.  Directories and symlinks are
     deliberately rejected: neither provides unambiguous file-content ownership.
     """
-    rel = _retirement_path(path)
+    rel = _retirement_path(path, allow_runtime=allow_runtime)
     full = ROOT / rel
     tracked = _git(["ls-files", "--error-unmatch", "--", rel], check=False).returncode == 0
     status_proc = _git(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", rel], check=False)
@@ -3296,12 +3591,12 @@ def retirement_path_records(state: dict, paths: Iterable[str]) -> list[dict]:
 
 
 def retirement_attribution_records(state: dict) -> list[dict]:
-    """Derive one fail-closed rollback record per current native attribution.
+    """Derive rollback records from accepted attribution and active pending evidence.
 
     Retirement deliberately does not consult the convenience plan-file lists:
-    those lists are reporting projections, not recovery authority.  Every
-    checkpoint-relative delta must instead have one intact native operation
-    record whose fingerprint still describes the current worktree.
+    those lists are reporting projections, not recovery authority.  Every live
+    checkpoint-relative path must instead have exactly one intact accepted
+    operation record or one immutable active-step pending recovery record.
     """
     latest = _latest_operation_records_by_path(state)
     validated = _validated_operation_records(state)
@@ -3313,15 +3608,22 @@ def retirement_attribution_records(state: dict) -> list[dict]:
     if changed_residue:
         raise RuntimeError(f"retire-plan refuses changed approval residue: {changed_residue}")
     current_delta = {
-        _retirement_path(str(path))
+        _normalize_repo_path(str(path))
         for path in repository.get("new_project_delta") or []
+        if _normalize_repo_path(str(path))
     }
+    pending_paths = _pending_retirement_recovery_paths(
+        state, int(state.get("current_step") or 0),
+    )
     attributed = set(latest)
-    if current_delta != attributed:
+    if attributed & pending_paths:
+        raise RuntimeError("retire-plan refuses pending evidence that overlaps accepted attribution")
+    expected_delta = attributed | pending_paths
+    if current_delta != expected_delta:
         raise RuntimeError(
             "retire-plan refuses unattributed or stale checkpoint delta: "
-            f"unattributed={sorted(current_delta - attributed)} "
-            f"stale={sorted(attributed - current_delta)}"
+            f"unattributed={sorted(current_delta - expected_delta)} "
+            f"stale={sorted(expected_delta - current_delta)}"
         )
 
     records: list[dict] = []
@@ -3345,6 +3647,47 @@ def retirement_attribution_records(state: dict) -> list[dict]:
             "unexpected": False,
             "evidence": before,
             "attribution": _json_copy(attribution),
+            "before": before,
+            "after": None,
+            "restoration": None,
+        })
+    pending = state.get("pending_retirement_recovery_evidence")
+    pending_records = pending.get("path_evidence") if isinstance(pending, dict) else []
+    pending_by_path = {
+        _normalize_repo_path(str(record.get("path") or "")): record
+        for record in pending_records
+        if isinstance(record, dict)
+    }
+    if set(pending_by_path) != pending_paths:
+        raise RuntimeError("retire-plan pending recovery records are incomplete or ambiguous")
+    for path in sorted(pending_paths):
+        evidence = pending_by_path[path]
+        baseline = str(evidence.get("baseline_kind") or "")
+        # Pending recovery evidence may observe a non-protected controller
+        # runtime sibling so that it cannot disappear from checkpoint coverage.
+        # That observation never grants mutation authority: normal rollback
+        # rejects it before issuing a reviewable restore/delete operation.
+        _retirement_path(path)
+        before = retirement_path_fingerprint(path)
+        if baseline not in {"tracked", "absent"} or evidence.get("current_fingerprint") != before:
+            raise RuntimeError(f"retire-plan refuses stale pending recovery fingerprint: {path}")
+        records.append({
+            "path": path,
+            "baseline": baseline,
+            "plan_owned": baseline == "absent",
+            "current": before["kind"],
+            "unexpected": False,
+            "evidence": before,
+            "attribution": {
+                "schema": PENDING_RECOVERY_EVIDENCE_SCHEMA,
+                "authority": "pending-recovery-only",
+                "plan_hash": pending.get("plan_hash"),
+                "approval_checkpoint": _json_copy(pending.get("approval_checkpoint")),
+                "originating_step_sha256": pending.get("originating_step_sha256"),
+                "evidence_sha256": pending.get("evidence_sha256"),
+                "path": path,
+                "current_fingerprint": _json_copy(before),
+            },
             "before": before,
             "after": None,
             "restoration": None,
@@ -6241,7 +6584,14 @@ def _declared_interrupted_pending_paths(state: dict, raw_paths: object) -> set[s
     if len(set(normalized)) != len(normalized):
         raise RuntimeError("recover-interrupted-run pending paths must be unique")
     current_step = int(state.get("current_step") or 0)
-    expected = _pending_step_paths(state, current_step)
+    pending = state.get("pending_step_delta_paths")
+    if isinstance(pending, dict) and pending.get("schema") != PENDING_RECOVERY_EVIDENCE_SCHEMA:
+        # Pre-schema state is admissible only to finish the one explicit
+        # interrupted-run recovery transaction.  It is never ordinary pending
+        # evidence and is cleared by that transaction.
+        expected = _pending_step_path_projection(state, current_step)
+    else:
+        expected = _pending_step_paths(state, current_step)
     declared = set(normalized)
     if declared != expected:
         raise RuntimeError(
@@ -6478,6 +6828,7 @@ def cmd_propose(args: argparse.Namespace) -> int:
         "approval_repository_evidence": None,
         "operation_attributions": [],
         "pending_step_delta_paths": [],
+        "pending_retirement_recovery_evidence": [],
         "plan_changed_files": [],
         "plan_owned_files": [],
         "plan_carry_forward_files": [],
@@ -6548,6 +6899,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
     # inherit operation evidence from a retired/completed plan.
     state["operation_attributions"] = []
     state["pending_step_delta_paths"] = []
+    state["pending_retirement_recovery_evidence"] = []
     bind_approved_plan_artifact(state)
     checkpoint = create_recovery_checkpoint(state)
     state["status"] = "APPROVED"
@@ -6690,10 +7042,18 @@ def retirement_rollback_preview(
     paths = []
     for record in records:
         attribution = record.get("attribution") if isinstance(record.get("attribution"), dict) else {}
+        baseline = record["baseline"]
         paths.append({
             "path": record["path"],
-            "baseline": record["baseline"],
+            "baseline": baseline,
+            "state": record["current"],
             "before": _json_copy(record["before"]),
+            "operation": "restore" if baseline == "tracked" else "delete",
+            # Accepted operation records and pending recovery evidence have
+            # different authority semantics.  Bind their complete, already
+            # validated provenance into the reviewed contract so neither can
+            # be substituted after preview.
+            "provenance": _json_copy(attribution),
             "operation_record_sha256": attribution.get("record_sha256"),
         })
     payload = {
@@ -6846,8 +7206,8 @@ def cmd_retire_plan(args: argparse.Namespace) -> int:
         # inventory only and cannot be consumed as native rollback authority.
         disposition, operations = "RETIRED_WITH_CARRY_FORWARD", {"restore": [], "delete": [], "preserved": [item["path"] for item in records]}
     after = repo_snapshot()
-    if carry_forward and after != before:
-        raise RuntimeError("carry-forward changed the worktree; retirement refused")
+    if (carry_forward or reconcile_restored) and after != before:
+        raise RuntimeError("non-mutating retirement disposition changed the worktree; retirement refused")
     manifest = {"schema": RETIREMENT_MANIFEST_SCHEMA, "id": retirement_record_id(), "created_at": utc_now(), "plan_hash": expected, "status_before": status, "reason": reason[:1200], "disposition": disposition, "checkpoint": checkpoint["id"], "step": old_step, "step_count": len(steps), "loop_count": old_loops, "paths": records, "operations": operations, "repository_before": before, "repository_after": after, "planning_context": retirement_planning_context(state)}
     manifest_path = write_retirement_manifest(manifest)
     retirement = {"plan_hash": expected, "status_before": status, "step": old_step, "step_count": len(steps), "loop_count": old_loops, "reason": reason[:1200], "retired_at": manifest["created_at"], "disposition": disposition, "record_id": manifest["id"], "checkpoint": checkpoint["id"], "manifest_sha256": file_hash(manifest_path)}
@@ -7415,7 +7775,7 @@ def operator_snapshot_data() -> dict:
             "authorized_paths": self_hosting_paths,
             "authority_error": self_hosting_error,
         },
-        pending_paths=sorted(_pending_step_paths(state, current_step)),
+        pending_paths=sorted(_pending_step_path_projection(state, current_step)),
         recovery={
             "checkpoint_id": checkpoint_id or None,
             "checkpoint": load_recovery_checkpoint(checkpoint_id),
@@ -7856,10 +8216,19 @@ def cmd_run(args: argparse.Namespace) -> int:
                     state, step, sandbox, files, loop=loop_no,
                 )
                 if verification["state"] == "PASS":
-                    _remember_pending_step_paths(
-                        state, int(step["id"]),
-                        set(files) & set(verification.get("new_project_delta") or []),
+                    _persist_pending_recovery_evidence(
+                        state, step, verification,
+                        authority_enforcement_removals=changed_authority,
                     )
+                    state["pending_step_delta_paths"] = {
+                        "step": int(step["id"]),
+                        "paths": sorted({
+                            _normalize_repo_path(str(path))
+                            for path in verification.get("new_project_delta") or []
+                            if _normalize_repo_path(str(path))
+                        }),
+                        "updated_at": utc_now(),
+                    }
                 candidate_paths = sorted(
                     path for path in changed_authority
                     if not PROJECT_PROFILE.is_runtime_path(path)
@@ -7899,6 +8268,23 @@ def cmd_run(args: argparse.Namespace) -> int:
             verification = record_post_turn_repository_verification(
                 state, step, sandbox, files, loop=loop_no,
             )
+            if verification["state"] == "PASS":
+                # A protected-path restoration must not discard independently
+                # verified surviving siblings, nor let the attempted protected
+                # path re-enter pending evidence through the raw turn file list.
+                _persist_pending_recovery_evidence(
+                    state, step, verification,
+                    authority_enforcement_removals=protected,
+                )
+                state["pending_step_delta_paths"] = {
+                    "step": int(step["id"]),
+                    "paths": sorted({
+                        _normalize_repo_path(str(path))
+                        for path in verification.get("new_project_delta") or []
+                        if _normalize_repo_path(str(path))
+                    }),
+                    "updated_at": utc_now(),
+                }
             reason = "policy violation: " + "; ".join(filter(None, [f"protected paths {protected}" if protected else "", f"test paths {test_violations}" if test_violations else ""]))
             if verification["state"] == "REFUSED":
                 reason += f"; post-turn checkpoint verification: {verification['error']}"
@@ -7938,10 +8324,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             live_write(f"loop={loop_no:04d} checkpoint verification refused: {reason}", "VERIFY")
             block(state, reason)
             return 2
-        _remember_pending_step_paths(
-            state, int(step["id"]),
-            set(files) & set(verification.get("new_project_delta") or []),
-        )
+        _persist_pending_recovery_evidence(state, step, verification)
         try:
             attribution = verified_attribution_result(
                 state, step, verification, files, loop=loop_no, phase=phase,
@@ -8213,10 +8596,27 @@ def cmd_recover_self_upgrade(args: argparse.Namespace) -> int:
     validated = _validated_operation_records(state)
     state["plan_changed_files"] = sorted({str(item["path"]) for item in validated})
     state["plan_owned_files"] = sorted({str(item["path"]) for item in validated if item["baseline_kind"] == "absent"})
-    if pending:
-        state["pending_step_delta_paths"] = {"step": current_step, "paths": pending, "updated_at": utc_now()}
-    else:
-        _clear_pending_step_paths(state)
+    # Recovery arguments only constrain which reconstructed delta may remain
+    # pending.  The evidence itself comes from a fresh, active-step controller
+    # verification of the exact checkpoint delta, never from those arguments.
+    verification = record_post_turn_repository_verification(
+        state, current_step_def, _sandbox, sorted(current_delta),
+        loop=int(state.get("loop_count") or 0),
+    )
+    if verification.get("state") != "PASS":
+        raise RuntimeError(
+            "recover-self-upgrade requires PASS current-step checkpoint verification: "
+            f"{verification.get('error') or 'verification refused'}"
+        )
+    # Preserve the pre-existing operator bootstrap contract independently of
+    # retirement evidence.  These declared paths remain legacy pending inputs
+    # for its explicit recovery transaction; they never become retirement
+    # provenance or accepted operation attribution.
+    state["pending_step_delta_paths"] = {
+        "step": current_step,
+        "paths": pending,
+        "updated_at": utc_now(),
+    } if pending else []
     _invalidate_terminal_artifacts_for_recovery(state, "controller self-upgrade attribution recovery")
     state["status"] = "APPROVED"
     state["block_reason"] = None
