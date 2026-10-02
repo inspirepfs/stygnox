@@ -248,6 +248,7 @@ def default_state() -> dict:
         "approved_plan_artifact": None,
         "approval_repository_evidence": None,
         "operation_attributions": [],
+        "pending_current_step_provenance": [],
         "pending_step_delta_paths": [],
         "pending_retirement_recovery_evidence": [],
         "plan_changed_files": [],
@@ -1279,6 +1280,202 @@ def current_attributed_paths(state: dict) -> list[str]:
 
 
 PENDING_RECOVERY_EVIDENCE_SCHEMA = "zen_ralph_pending_recovery_evidence_v1"
+PENDING_CURRENT_STEP_PROVENANCE_SCHEMA = "zen_ralph_pending_current_step_provenance_v1"
+
+
+def _validated_pending_current_step_provenance(
+    state: dict, step: dict, *, require_current_state: bool = True,
+) -> dict | None:
+    """Validate the unaccepted, checkpoint-bound generation for this step.
+
+    This is intentionally a layer beside accepted operation attribution.  It
+    never grants ownership or progression on its own, but permits an exact
+    verified generation to survive a failed qualification and a bounded repair.
+    """
+    pending = state.get("pending_current_step_provenance")
+    if pending in (None, [], {}):
+        return None
+    if not isinstance(pending, dict) or pending.get("schema") != PENDING_CURRENT_STEP_PROVENANCE_SCHEMA:
+        raise RuntimeError("current-step pending provenance has an invalid schema")
+    origin = _originating_step(state, step)
+    step_no = int(origin["id"])
+    checkpoint = verify_approval_execution_evidence(state)
+    checkpoint_id = str(state.get("recovery_checkpoint") or "")
+    required = {
+        "schema", "plan_hash", "approved_plan_artifact", "approved_plan_artifact_sha256",
+        "approval_checkpoint", "repository_scope", "repository_scope_sha256", "step",
+        "originating_step", "originating_step_sha256", "originating_test_change_policy",
+        "generation", "verification", "paths", "path_evidence", "recorded_at", "evidence_sha256",
+    }
+    if set(pending) != required:
+        raise RuntimeError("current-step pending provenance is incomplete or altered")
+    if (
+        pending.get("plan_hash") != state.get("plan_hash")
+        or pending.get("approved_plan_artifact") != state.get("approved_plan_artifact")
+        or pending.get("approved_plan_artifact_sha256") != _evidence_digest(state.get("approved_plan_artifact"))
+        or pending.get("approval_checkpoint") != _checkpoint_identity(checkpoint_id, checkpoint)
+        or int(pending.get("step") or 0) != step_no
+        or pending.get("originating_step") != origin
+        or pending.get("originating_step_sha256") != _evidence_digest(origin)
+        or pending.get("originating_test_change_policy") != origin.get("test_change_policy")
+    ):
+        raise RuntimeError("current-step pending provenance does not match active authority")
+    scope = pending.get("repository_scope")
+    if not isinstance(scope, list):
+        raise RuntimeError("current-step pending provenance scope is malformed")
+    try:
+        normalized_scope = list(core.normalize_repository_mutation_scope(scope))
+    except ValueError as exc:
+        raise RuntimeError("current-step pending provenance scope is malformed") from exc
+    if scope != normalized_scope or pending.get("repository_scope_sha256") != _evidence_digest(scope):
+        raise RuntimeError("current-step pending provenance scope is stale or altered")
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    if core.approved_plan_version(plan) == core.APPROVED_PLAN_V2:
+        if scope != list(core.validate_v2_repository_mutation_scope(plan)):
+            raise RuntimeError("current-step pending provenance scope is stale or altered")
+    verification = pending.get("verification")
+    if (
+        not isinstance(verification, dict)
+        or verification.get("schema") != "zen_ralph_post_turn_repository_verification_v1"
+        or verification.get("state") != "PASS"
+        or verification.get("plan_hash") != state.get("plan_hash")
+        or verification.get("checkpoint") != checkpoint_id
+        or int(verification.get("step") or 0) != step_no
+        or verification.get("fingerprint") != pending.get("generation")
+        or not isinstance(verification.get("current_fingerprints"), dict)
+    ):
+        raise RuntimeError("current-step pending provenance lacks exact PASS verification")
+    if pending.get("evidence_sha256") != _evidence_digest({key: value for key, value in pending.items() if key != "evidence_sha256"}):
+        raise RuntimeError("current-step pending provenance digest is stale or altered")
+    paths = pending.get("paths")
+    records = pending.get("path_evidence")
+    if not isinstance(paths, list) or not isinstance(records, list):
+        raise RuntimeError("current-step pending provenance paths are malformed")
+    seen: set[str] = set()
+    verified_delta = set(verification.get("new_project_delta") or [])
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {
+            "path", "baseline_kind", "operation", "current_fingerprint",
+            "self_hosting_grant", "self_hosting_grant_sha256",
+        }:
+            raise RuntimeError("current-step pending provenance path record is malformed")
+        path = _normalize_repo_path(str(record.get("path") or ""))
+        fingerprint = record.get("current_fingerprint")
+        if (
+            not path or path != record.get("path") or path in seen or path not in scope
+            or path not in verified_delta or path in approval_baseline_residue_paths(state)
+            or is_protected_path(path) or _is_runtime_authority_path(path)
+            or not isinstance(fingerprint, dict)
+            or verification["current_fingerprints"].get(path) != fingerprint
+        ):
+            raise RuntimeError("current-step pending provenance path is stale or invalid")
+        baseline = plan_baseline_path_kind(state, path)
+        expected_operation = "create" if baseline == "absent" and fingerprint.get("kind") != "missing" else ("delete" if fingerprint.get("kind") == "missing" else "edit")
+        if baseline not in {"tracked", "absent"} or record.get("baseline_kind") != baseline or record.get("operation") != expected_operation:
+            raise RuntimeError("current-step pending provenance baseline or operation is invalid")
+        grant = record.get("self_hosting_grant")
+        if is_tooling_path(path):
+            if not isinstance(grant, dict) or record.get("self_hosting_grant_sha256") != _evidence_digest(grant):
+                raise RuntimeError("current-step pending provenance self-hosting grant is invalid")
+            allowed, reason = self_hosting_grant_allows(state, step_no, [path], operation_loop=int(verification.get("loop") or 0))
+            if not allowed or _evidence_digest(_origin_self_hosting_grant(state, origin, path, operation_loop=int(verification.get("loop") or 0))) != _evidence_digest(grant):
+                raise RuntimeError(f"current-step pending provenance self-hosting grant is stale: {reason}")
+        elif grant is not None or record.get("self_hosting_grant_sha256") is not None:
+            raise RuntimeError("current-step pending provenance has inapplicable self-hosting grant")
+        violations = test_policy_violation({}, {path: "checkpoint-delta"}, str(origin.get("test_change_policy") or "none"), state=state, step_no=step_no)
+        if violations:
+            raise RuntimeError(f"current-step pending provenance violates test policy: {violations}")
+        if require_current_state and fingerprint != retirement_path_fingerprint(path):
+            raise RuntimeError(f"current-step pending provenance fingerprint is stale or altered: {path}")
+        seen.add(path)
+    if paths != sorted(seen):
+        raise RuntimeError("current-step pending provenance path projection is stale or altered")
+    return pending
+
+
+def _persist_pending_current_step_provenance(
+    state: dict, step: dict, verification: dict, observed_paths: Iterable[str], *, loop: int,
+) -> dict:
+    """Refresh the one active pending generation, refusing unobserved drift."""
+    origin = _originating_step(state, step)
+    step_no = int(origin["id"])
+    if (
+        verification.get("state") != "PASS" or verification.get("sandbox") != "workspace-write"
+        or int(verification.get("step") or 0) != step_no or int(state.get("current_step") or 0) != step_no
+    ):
+        raise RuntimeError("current-step pending provenance requires active workspace PASS verification")
+    prior = _validated_pending_current_step_provenance(state, step, require_current_state=False)
+    prior_records = {item["path"]: item for item in (prior or {}).get("path_evidence", [])}
+    observed = {_normalize_repo_path(str(path)) for path in observed_paths if _normalize_repo_path(str(path))}
+    delta = {_normalize_repo_path(str(path)) for path in verification.get("new_project_delta") or [] if _normalize_repo_path(str(path))}
+    fingerprints = verification.get("current_fingerprints")
+    if not isinstance(fingerprints, dict):
+        raise RuntimeError("current-step pending provenance requires controller fingerprints")
+    accepted = _latest_operation_records_by_path(state)
+    accepted_current = {path for path, record in accepted.items() if record.get("current_fingerprint") == fingerprints.get(path)}
+    pending_paths = delta - accepted_current
+    missing = set(prior_records) - pending_paths
+    if missing:
+        raise RuntimeError(f"current-step pending provenance removal refused: {sorted(missing)}")
+    changed = {
+        path for path, record in prior_records.items()
+        if fingerprints.get(path) != record.get("current_fingerprint")
+    }
+    if changed - observed:
+        raise RuntimeError(f"current-step pending provenance has unobserved altered paths: {sorted(changed - observed)}")
+    unknown = pending_paths - set(prior_records) - observed
+    if unknown:
+        raise RuntimeError(f"current-step pending provenance has unknown checkpoint delta: {sorted(unknown)}")
+    _require_v2_checkpoint_delta_scope(state, pending_paths)
+    scope = _pending_recovery_scope(state, pending_paths)
+    records: list[dict] = []
+    for path in sorted(pending_paths):
+        fingerprint = fingerprints.get(path)
+        baseline = plan_baseline_path_kind(state, path)
+        if (
+            path in approval_baseline_residue_paths(state) or is_protected_path(path)
+            or _is_runtime_authority_path(path) or baseline not in {"tracked", "absent"}
+            or not isinstance(fingerprint, dict) or fingerprint != retirement_path_fingerprint(path)
+        ):
+            raise RuntimeError(f"current-step pending provenance path is invalid: {path}")
+        operation = "create" if baseline == "absent" and fingerprint.get("kind") != "missing" else ("delete" if fingerprint.get("kind") == "missing" else "edit")
+        grant = _origin_self_hosting_grant(state, origin, path, operation_loop=loop)
+        records.append({
+            "path": path, "baseline_kind": baseline, "operation": operation,
+            "current_fingerprint": _json_copy(fingerprint), "self_hosting_grant": grant,
+            "self_hosting_grant_sha256": _evidence_digest(grant) if grant is not None else None,
+        })
+    checkpoint = verify_approval_execution_evidence(state)
+    checkpoint_id = str(state.get("recovery_checkpoint") or "")
+    pending = {
+        "schema": PENDING_CURRENT_STEP_PROVENANCE_SCHEMA,
+        "plan_hash": state.get("plan_hash"), "approved_plan_artifact": _json_copy(state.get("approved_plan_artifact")),
+        "approved_plan_artifact_sha256": _evidence_digest(state.get("approved_plan_artifact")),
+        "approval_checkpoint": _checkpoint_identity(checkpoint_id, checkpoint), "repository_scope": _json_copy(scope),
+        "repository_scope_sha256": _evidence_digest(scope), "step": step_no,
+        "originating_step": _json_copy(origin), "originating_step_sha256": _evidence_digest(origin),
+        "originating_test_change_policy": origin.get("test_change_policy"), "generation": verification.get("fingerprint"),
+        "verification": _json_copy(verification), "paths": [record["path"] for record in records],
+        "path_evidence": records, "recorded_at": utc_now(),
+    }
+    pending["evidence_sha256"] = _evidence_digest(pending)
+    state["pending_current_step_provenance"] = pending
+    return pending
+
+
+def _promote_pending_current_step_provenance(state: dict, step: dict) -> tuple[dict, list[str]]:
+    """Atomically turn the complete latest pending generation into attribution."""
+    pending = _validated_pending_current_step_provenance(state, step)
+    if pending is None:
+        raise RuntimeError("qualification cannot promote a missing current-step pending generation")
+    verification = pending["verification"]
+    attribution = verified_attribution_result(
+        state, step, verification, pending["paths"],
+        loop=int(verification.get("loop") or 0), phase="qualification-promotion",
+    )
+    accepted = record_accepted_operations(state, attribution)
+    state["pending_current_step_provenance"] = []
+    return attribution, [str(record["path"]) for record in accepted]
 
 
 def _pending_retirement_recovery_paths(
@@ -1535,6 +1732,7 @@ def _persist_pending_recovery_evidence(
 
 
 def _clear_pending_step_paths(state: dict) -> None:
+    state["pending_current_step_provenance"] = []
     state["pending_step_delta_paths"] = []
     state["pending_retirement_recovery_evidence"] = []
 
@@ -2150,7 +2348,26 @@ def verify_post_turn_repository_state(
     # latter never contributes acceptance-facing coverage, while the former is
     # retained for the explicit self-upgrade recovery contract.
     legacy_pending = _pending_step_path_projection(state, int(step["id"]))
-    candidates = recorded | observed | legacy_pending
+    pending = _validated_pending_current_step_provenance(state, step, require_current_state=False)
+    pending_records = {
+        str(record["path"]): record for record in (pending or {}).get("path_evidence", [])
+        if isinstance(record, dict) and isinstance(record.get("path"), str)
+    }
+    pending_paths = set(pending_records)
+    # A retained generation is a repair witness only when every path is still
+    # present in the checkpoint delta and any changed member was observed in
+    # this exact turn.  Thus it cannot conceal removals or external drift.
+    removed_pending = sorted(pending_paths - new_delta)
+    if removed_pending:
+        raise RuntimeError(f"PENDING_PROVENANCE_REMOVAL: {removed_pending}")
+    changed_pending = {
+        path for path, record in pending_records.items()
+        if record.get("current_fingerprint") != retirement_path_fingerprint(path)
+    }
+    unobserved_pending = sorted(changed_pending - observed)
+    if unobserved_pending:
+        raise RuntimeError(f"PENDING_PROVENANCE_UNOBSERVED_ALTERATION: {unobserved_pending}")
+    candidates = recorded | observed | legacy_pending | pending_paths
     unexpected = sorted(new_delta - candidates)
     if unexpected:
         raise RuntimeError(f"UNATTRIBUTED_CHECKPOINT_DELTA: {unexpected}")
@@ -2160,7 +2377,10 @@ def verify_post_turn_repository_state(
     # Accepted paths whose current fingerprints still match their native record
     # retain their originating step/grant authority. Only uncovered current
     # delta is governed by the live step's self-hosting and test policy.
-    current_step_delta = new_delta - recorded
+    # Untouched pending paths already carry their originating grant and test
+    # policy evidence.  Repaired pending paths and new deltas are checked as
+    # fresh current-step work below.
+    current_step_delta = new_delta - recorded - (pending_paths - changed_pending)
     tooling = sorted(path for path in current_step_delta if is_tooling_path(path))
     authorized_tooling = authorized_self_hosting_paths(state)
     current_grant, _grant_reason = self_hosting_grant_allows(state, int(step["id"]), tooling) if tooling else (True, "")
@@ -3240,6 +3460,9 @@ def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> lis
     try:
         latest = _latest_operation_records_by_path(state)
         validated = _validated_operation_records(state)
+        pending_current = _retirement_current_step_pending_layers(
+            state, require_current_state=False,
+        )
     except RuntimeError as exc:
         raise RuntimeError(f"reconcile-restored refuses unverified native delta: {exc}") from exc
     if len(latest) != len(validated):
@@ -3255,6 +3478,8 @@ def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> lis
     )
     if set(latest) & pending_paths:
         raise RuntimeError("reconcile-restored refuses pending evidence that overlaps accepted attribution")
+    if set(pending_current) & pending_paths:
+        raise RuntimeError("reconcile-restored refuses overlapping current-step and recovery pending evidence")
 
     repository = recompute_repository_against_approval_checkpoint(state)
     changed_residue = sorted(repository.get("changed_approval_residue") or [])
@@ -3262,12 +3487,31 @@ def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> lis
         raise RuntimeError(f"reconcile-restored refuses changed approval residue: {changed_residue}")
 
     records: list[dict] = []
-    for path in sorted(latest):
-        attribution = latest[path]
-        baseline = str(attribution.get("baseline_kind") or "")
+    for path in sorted(set(latest) | set(pending_current)):
+        attribution = latest.get(path)
+        current_pending = pending_current.get(path)
+        baseline = str(
+            current_pending["path_evidence"].get("baseline_kind")
+            if current_pending is not None else attribution.get("baseline_kind")
+        )
+        if attribution is not None and current_pending is not None:
+            accepted_baseline = str(attribution.get("baseline_kind") or "")
+            pending_baseline = str(current_pending["path_evidence"].get("baseline_kind") or "")
+            if accepted_baseline != pending_baseline:
+                raise RuntimeError(f"reconcile-restored refuses layered baseline disagreement: {path}")
+            pending_loop = int(current_pending["verification"].get("loop") or 0)
+            if pending_loop <= int(attribution.get("loop") or 0):
+                raise RuntimeError(f"reconcile-restored refuses non-newer current-step pending provenance: {path}")
+            before = _json_copy(current_pending["path_evidence"]["current_fingerprint"])
+            provenance = _layered_retirement_provenance(path, attribution, current_pending)
+        elif attribution is not None:
+            before = _json_copy(attribution["current_fingerprint"])
+            provenance = _json_copy(attribution)
+        else:
+            before = _json_copy(current_pending["path_evidence"]["current_fingerprint"])
+            provenance = _layered_retirement_provenance(path, None, current_pending)
         if baseline not in {"tracked", "absent"}:
             raise RuntimeError(f"reconcile-restored refuses unsupported attribution baseline: {path} ({baseline})")
-        before = _json_copy(attribution["current_fingerprint"])
         records.append({
             "path": path,
             "baseline": baseline,
@@ -3275,7 +3519,7 @@ def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> lis
             "current": before["kind"],
             "unexpected": False,
             "evidence": before,
-            "attribution": _json_copy(attribution),
+            "attribution": provenance,
             "before": before,
             "after": retirement_path_fingerprint(path),
             "restoration": {
@@ -3590,18 +3834,87 @@ def retirement_path_records(state: dict, paths: Iterable[str]) -> list[dict]:
     return records
 
 
+def _retirement_current_step_pending_layers(
+    state: dict, *, require_current_state: bool = True,
+) -> dict[str, dict]:
+    """Return the one validated current-step generation keyed by retirement path.
+
+    The complete immutable generation is retained with each returned path so a
+    reviewed preview and the retirement manifest bind the pending layer's
+    authority, scope, checkpoint, and exact verification instead of merely a
+    convenient path projection.
+    """
+    raw_pending = state.get("pending_current_step_provenance")
+    if raw_pending in (None, [], {}):
+        return {}
+    step_no = int(state.get("current_step") or 0)
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    matches = [
+        item for item in plan.get("steps") or []
+        if isinstance(item, dict) and int(item.get("id") or 0) == step_no
+    ]
+    if len(matches) != 1:
+        raise RuntimeError("retire-plan current-step pending provenance has no active approved step")
+    pending = _validated_pending_current_step_provenance(
+        state, matches[0], require_current_state=require_current_state,
+    )
+    if pending is None:
+        return {}
+    records = pending.get("path_evidence")
+    if not isinstance(records, list):
+        raise RuntimeError("retire-plan current-step pending provenance records are malformed")
+    by_path: dict[str, dict] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise RuntimeError("retire-plan current-step pending provenance records are malformed")
+        path = _retirement_path(str(record.get("path") or ""))
+        if path in by_path:
+            raise RuntimeError("retire-plan current-step pending provenance records are ambiguous")
+        by_path[path] = {
+            "generation": _json_copy(pending),
+            "path_evidence": _json_copy(record),
+            "verification": _json_copy(pending["verification"]),
+        }
+    if set(by_path) != set(pending.get("paths") or []):
+        raise RuntimeError("retire-plan current-step pending provenance records are incomplete or altered")
+    return by_path
+
+
+def _layered_retirement_provenance(
+    path: str, accepted: dict | None, current_pending: dict,
+) -> dict:
+    """Bind the accepted and newer pending layers for one single-path action."""
+    generation = current_pending["generation"]
+    return {
+        "schema": "zen_ralph_layered_retirement_provenance_v1",
+        "authority": (
+            "accepted-plus-current-step-pending"
+            if accepted is not None else "current-step-pending-only"
+        ),
+        "path": path,
+        "accepted_operation": _json_copy(accepted) if accepted is not None else None,
+        "accepted_operation_record_sha256": accepted.get("record_sha256") if accepted is not None else None,
+        "current_step_pending_generation": _json_copy(generation),
+        "current_step_pending_evidence_sha256": generation.get("evidence_sha256"),
+        "current_step_pending_path_evidence": _json_copy(current_pending["path_evidence"]),
+    }
+
+
 def retirement_attribution_records(state: dict) -> list[dict]:
     """Derive rollback records from accepted attribution and active pending evidence.
 
     Retirement deliberately does not consult the convenience plan-file lists:
-    those lists are reporting projections, not recovery authority.  Every live
-    checkpoint-relative path must instead have exactly one intact accepted
-    operation record or one immutable active-step pending recovery record.
+    those lists are reporting projections, not recovery authority.  A path may
+    carry a historical accepted operation plus a newer current-step pending
+    generation.  Both layers are independently checkpoint-bound, and together
+    still authorize exactly one restore/delete operation for that path.
     """
     latest = _latest_operation_records_by_path(state)
     validated = _validated_operation_records(state)
     if len(latest) != len(validated):
         raise RuntimeError("retire-plan refuses duplicate operation attribution")
+
+    pending_current = _retirement_current_step_pending_layers(state)
 
     repository = recompute_repository_against_approval_checkpoint(state)
     changed_residue = sorted(repository.get("changed_approval_residue") or [])
@@ -3616,9 +3929,12 @@ def retirement_attribution_records(state: dict) -> list[dict]:
         state, int(state.get("current_step") or 0),
     )
     attributed = set(latest)
+    current_pending_paths = set(pending_current)
     if attributed & pending_paths:
         raise RuntimeError("retire-plan refuses pending evidence that overlaps accepted attribution")
-    expected_delta = attributed | pending_paths
+    if current_pending_paths & pending_paths:
+        raise RuntimeError("retire-plan refuses overlapping current-step and recovery pending evidence")
+    expected_delta = attributed | current_pending_paths | pending_paths
     if current_delta != expected_delta:
         raise RuntimeError(
             "retire-plan refuses unattributed or stale checkpoint delta: "
@@ -3627,14 +3943,33 @@ def retirement_attribution_records(state: dict) -> list[dict]:
         )
 
     records: list[dict] = []
-    for path in sorted(attributed):
-        attribution = latest[path]
-        baseline = str(attribution.get("baseline_kind") or "")
+    for path in sorted(attributed | current_pending_paths):
+        attribution = latest.get(path)
+        current_pending = pending_current.get(path)
+        baseline = str(
+            current_pending["path_evidence"].get("baseline_kind")
+            if current_pending is not None else attribution.get("baseline_kind")
+        )
+        if attribution is not None and current_pending is not None:
+            accepted_baseline = str(attribution.get("baseline_kind") or "")
+            pending_baseline = str(current_pending["path_evidence"].get("baseline_kind") or "")
+            if accepted_baseline != pending_baseline:
+                raise RuntimeError(f"retire-plan refuses layered baseline disagreement: {path}")
+            pending_loop = int(current_pending["verification"].get("loop") or 0)
+            if pending_loop <= int(attribution.get("loop") or 0):
+                raise RuntimeError(f"retire-plan refuses non-newer current-step pending provenance: {path}")
+            before = _json_copy(current_pending["path_evidence"]["current_fingerprint"])
+            provenance = _layered_retirement_provenance(path, attribution, current_pending)
+        elif attribution is not None:
+            before = retirement_path_fingerprint(path)
+            if attribution.get("current_fingerprint") != before:
+                raise RuntimeError(f"retire-plan refuses stale attribution fingerprint: {path}")
+            provenance = _json_copy(attribution)
+        else:
+            before = _json_copy(current_pending["path_evidence"]["current_fingerprint"])
+            provenance = _layered_retirement_provenance(path, None, current_pending)
         if baseline not in {"tracked", "absent"}:
             raise RuntimeError(f"retire-plan refuses unsupported attribution baseline: {path} ({baseline})")
-        before = retirement_path_fingerprint(path)
-        if attribution.get("current_fingerprint") != before:
-            raise RuntimeError(f"retire-plan refuses stale attribution fingerprint: {path}")
         if baseline == "tracked" and before["kind"] not in {"tracked", "missing"}:
             raise RuntimeError(f"retire-plan refuses invalid tracked attribution state: {path}")
         if baseline == "absent" and before["kind"] == "missing":
@@ -3646,7 +3981,7 @@ def retirement_attribution_records(state: dict) -> list[dict]:
             "current": before["kind"],
             "unexpected": False,
             "evidence": before,
-            "attribution": _json_copy(attribution),
+            "attribution": provenance,
             "before": before,
             "after": None,
             "restoration": None,
@@ -7043,6 +7378,9 @@ def retirement_rollback_preview(
     for record in records:
         attribution = record.get("attribution") if isinstance(record.get("attribution"), dict) else {}
         baseline = record["baseline"]
+        accepted_record_sha256 = attribution.get("record_sha256")
+        if accepted_record_sha256 is None:
+            accepted_record_sha256 = attribution.get("accepted_operation_record_sha256")
         paths.append({
             "path": record["path"],
             "baseline": baseline,
@@ -7054,7 +7392,8 @@ def retirement_rollback_preview(
             # validated provenance into the reviewed contract so neither can
             # be substituted after preview.
             "provenance": _json_copy(attribution),
-            "operation_record_sha256": attribution.get("record_sha256"),
+            "operation_record_sha256": accepted_record_sha256,
+            "pending_evidence_sha256": attribution.get("current_step_pending_evidence_sha256"),
         })
     payload = {
         "schema": RETIREMENT_ROLLBACK_PREVIEW_SCHEMA,
@@ -8325,25 +8664,26 @@ def cmd_run(args: argparse.Namespace) -> int:
             block(state, reason)
             return 2
         _persist_pending_recovery_evidence(state, step, verification)
-        try:
-            attribution = verified_attribution_result(
-                state, step, verification, files, loop=loop_no, phase=phase,
-            )
-        except RuntimeError as exc:
-            reason = str(exc)
-            append_journal(
-                loop_no, step["id"], "verified-attribution", "BLOCKED",
-                summary=reason, files=files, repair=repair_no, ideas=result.get("ideas", []),
-                next_action="human review verified operation attribution",
-                change_class=change_class, stats=loop_stats(loop_started, result, repair=repair_no),
-            )
-            block(state, reason)
-            return 2
-        # From this point onward, no acceptance-facing control may consume the
-        # raw before/after path list.  It is evidence only; attribution is the
-        # controller's verified and checkpoint-bound authority boundary.
-        files = list(attribution["paths"])
-        change_class = classify_changes(files)
+        if sandbox == "workspace-write":
+            try:
+                pending_generation = _persist_pending_current_step_provenance(
+                    state, step, verification, files, loop=loop_no,
+                )
+            except RuntimeError as exc:
+                reason = str(exc)
+                append_journal(
+                    loop_no, step["id"], "pending-provenance", "BLOCKED",
+                    summary=reason, files=files, repair=repair_no, ideas=result.get("ideas", []),
+                    next_action="human review current-step pending provenance",
+                    change_class=change_class, stats=loop_stats(loop_started, result, repair=repair_no),
+                )
+                block(state, reason)
+                return 2
+            # From this point onward, no acceptance-facing control may consume the
+            # raw before/after path list.  The latest pending generation is the
+            # checkpoint-bound authority boundary until qualification promotes it.
+            files = list(pending_generation["paths"])
+            change_class = classify_changes(files)
         save_state(state)
         live_write(
             f"loop={loop_no:04d} checkpoint verification=PASS sandbox={sandbox} "
@@ -8417,7 +8757,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "mode": mode,
                 "findings": runaway or efficiency,
             }
-            record_accepted_operations(state, attribution)
+            attribution = None
+            if sandbox == "workspace-write":
+                attribution, promoted_paths = _promote_pending_current_step_provenance(state, step)
+                if promoted_paths != files:
+                    raise RuntimeError("qualification promotion did not preserve the complete pending generation")
             remember_plan_files(state, files)
             update_context_after_pass(state, step, result, files)
             record_step_result(
