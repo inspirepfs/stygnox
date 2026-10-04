@@ -7386,8 +7386,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
     # Approval starts a fresh native authority ledger. Proposal state must never
     # inherit operation evidence from a retired/completed plan.
     state["operation_attributions"] = []
-    state["pending_step_delta_paths"] = []
-    state["pending_retirement_recovery_evidence"] = []
+    _clear_pending_step_paths(state)
     bind_approved_plan_artifact(state)
     checkpoint = create_recovery_checkpoint(state)
     state["status"] = "APPROVED"
@@ -7742,6 +7741,10 @@ def cmd_retire_plan(args: argparse.Namespace) -> int:
     state.pop("proposal_previous_state", None)
 
     PLAN.unlink(missing_ok=True)
+    # Retirement records have already captured and validated any current-step
+    # pending provenance.  Clear only at the neutral lifecycle boundary so the
+    # immutable manifest remains the durable retirement evidence.
+    _clear_pending_step_paths(state)
     save_state(state)
 
     print(
