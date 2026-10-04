@@ -40,7 +40,7 @@ import stygnox_core as core
 import stygnox_codex as codex
 import stygnox_runtime as runtime
 import stygnox_operator as operator_contract
-from stygnox_protocol import PLAN_SCHEMA, PLAN_V2_SCHEMA, RESULT_SCHEMA
+from stygnox_protocol import OUTCOME_RESULT_SCHEMA, PLAN_SCHEMA, PLAN_V2_SCHEMA, RESULT_SCHEMA, result_contract_digest
 
 ROOT = PROJECT_PROFILE.repository_root(__file__)
 
@@ -169,6 +169,111 @@ def verified_approved_plan_dispatch(state: dict) -> tuple[dict, str, str]:
     return checkpoint, version, sandbox
 
 
+def bind_outcome_result_contract(state: dict, dispatch_version: str) -> None:
+    """Persist controller-derived result-contract witnesses at approval time."""
+    if dispatch_version in {core.APPROVED_PLAN_V1, core.APPROVED_PLAN_V2}:
+        state["outcome_result_contract_digest"] = None
+        state["outcome_result_contract_bindings"] = None
+        return
+    digest = result_contract_digest("OUTCOME_RESULT_SCHEMA")
+    state["outcome_result_contract_digest"] = digest
+    state["outcome_result_contract_bindings"] = core.outcome_result_contract_bindings(
+        state.get("plan"), str(state.get("plan_hash") or ""),
+        state.get("approved_plan_artifact"), state.get("recovery_checkpoint"),
+        dispatch_version, digest,
+    )
+
+
+def verified_result_contract_for_active_step(state: dict, dispatch_version: str) -> dict | None:
+    """Select a result schema only from the verified active approval evidence."""
+    contract_name = core.select_outcome_result_contract(
+        state.get("plan"), str(state.get("plan_hash") or ""),
+        state.get("approved_plan_artifact"), state.get("recovery_checkpoint"),
+        dispatch_version, state.get("current_step"),
+        state.get("outcome_result_contract_bindings"),
+        state.get("outcome_result_contract_digest"),
+    )
+    if contract_name is None:
+        return None
+    if contract_name != "OUTCOME_RESULT_SCHEMA":
+        raise RuntimeError("verified result contract is not the required outcome contract")
+    return OUTCOME_RESULT_SCHEMA
+
+
+def completed_outcome_witness(state: dict, dispatch_version: str, result: object) -> dict:
+    """Return the active immutable completion witness or fail closed.
+
+    The controller may use this witness only after its safety and qualification
+    work.  It deliberately refuses summaries, gates, blockers, and legacy
+    result shapes as substitutes for the selected structured outcome.
+    """
+    contract_name = core.select_outcome_result_contract(
+        state.get("plan"), str(state.get("plan_hash") or ""),
+        state.get("approved_plan_artifact"), state.get("recovery_checkpoint"),
+        dispatch_version, state.get("current_step"),
+        state.get("outcome_result_contract_bindings"),
+        state.get("outcome_result_contract_digest"),
+    )
+    # Named v1/v2 dispatches predate immutable outcome-result contracts.  The
+    # approved compatibility boundary deliberately preserves their existing
+    # acceptance rules; it must not fabricate a v3 witness for them.
+    if contract_name is None:
+        return {}
+    if not core.result_reports_explicit_completed_outcome(result, contract_name):
+        raise RuntimeError("PASS requires explicit structured outcome=completed from the immutable selected result contract")
+    bindings = state.get("outcome_result_contract_bindings")
+    step_no = int(state.get("current_step") or 0)
+    if not isinstance(bindings, list) or not (1 <= step_no <= len(bindings)) or not isinstance(bindings[step_no - 1], dict):
+        raise RuntimeError("PASS requires an immutable active-step outcome-contract binding")
+    binding = bindings[step_no - 1]
+    return {
+        "schema": "zen_ralph_completed_outcome_witness_v1",
+        "plan_hash": state.get("plan_hash"),
+        "step": step_no,
+        "contract_name": contract_name,
+        "contract_sha256": state.get("outcome_result_contract_digest"),
+        "binding_sha256": binding.get("binding_sha256"),
+        "outcome": "completed",
+    }
+
+
+def operator_completed_outcome_result(outcome: object) -> dict:
+    """Make an operator's explicit outcome a complete strict-contract value."""
+    return {
+        "summary": "", "ideas": [], "blockers": [], "needs_human": False,
+        "blocker_class": "none", "validation_notes": [],
+        "context": {"relevant_files": [], "accepted_findings": [], "files_inspected": []},
+        "outcome": outcome,
+    }
+
+
+def accepted_step_has_completed_outcome(state: dict, item: object) -> bool:
+    """Verify a durable accepted result carries its exact completion witness."""
+    if not isinstance(item, dict) or item.get("result") not in {"PASS", "HUMAN_CONFIRMED"}:
+        return False
+    plan = state.get("plan")
+    if isinstance(plan, dict) and core.approved_plan_version(plan) in {
+        core.APPROVED_PLAN_V1, core.APPROVED_PLAN_V2,
+    }:
+        # Only a verified v3 selection imposes completion-witness semantics.
+        # Do not infer completion for v3 from this legacy compatibility path.
+        return True
+    witness = item.get("completion_witness")
+    bindings = state.get("outcome_result_contract_bindings")
+    step_no = int(item.get("step") or 0)
+    return (
+        isinstance(witness, dict) and isinstance(bindings, list)
+        and 1 <= step_no <= len(bindings) and isinstance(bindings[step_no - 1], dict)
+        and witness.get("schema") == "zen_ralph_completed_outcome_witness_v1"
+        and witness.get("plan_hash") == state.get("plan_hash")
+        and witness.get("step") == step_no
+        and witness.get("contract_name") == "OUTCOME_RESULT_SCHEMA"
+        and witness.get("contract_sha256") == state.get("outcome_result_contract_digest")
+        and witness.get("binding_sha256") == bindings[step_no - 1].get("binding_sha256")
+        and witness.get("outcome") == "completed"
+    )
+
+
 def sandbox_for_approved_plan(plan: dict, expected_hash: str | None = None) -> str:
     """Select the model sandbox from the controller-bound plan authority only.
     """
@@ -197,7 +302,7 @@ def render_plan(plan: dict) -> str:
     # artifact-verified bootstrap-era named-v2 record may predate it, though,
     # and must remain renderable on the Step 1 compatibility path.
     if (
-        core.approved_plan_version(plan) == core.APPROVED_PLAN_V2
+        core.plan_requires_repository_mutation_scope(plan)
         and core.REPOSITORY_MUTATION_SCOPE_FIELD in plan
     ):
         scope = core.validate_v2_repository_mutation_scope(plan)
@@ -246,9 +351,12 @@ def default_state() -> dict:
         "block_reason": None,
         "recovery_checkpoint": None,
         "approved_plan_artifact": None,
+        "outcome_result_contract_digest": None,
+        "outcome_result_contract_bindings": None,
         "approval_repository_evidence": None,
         "operation_attributions": [],
         "pending_current_step_provenance": [],
+        "pending_provenance_recoveries": [],
         "pending_step_delta_paths": [],
         "pending_retirement_recovery_evidence": [],
         "plan_changed_files": [],
@@ -1283,6 +1391,8 @@ PENDING_RECOVERY_EVIDENCE_SCHEMA = "zen_ralph_pending_recovery_evidence_v1"
 LEGACY_PENDING_CURRENT_STEP_PROVENANCE_SCHEMA = "zen_ralph_pending_current_step_provenance_v1"
 PENDING_CURRENT_STEP_PROVENANCE_SCHEMA = "zen_ralph_pending_current_step_provenance_v2"
 PENDING_CURRENT_STEP_PATH_WITNESS_SCHEMA = "zen_ralph_pending_current_step_path_witness_v1"
+PENDING_CURRENT_STEP_RECOVERY_PATH_WITNESS_SCHEMA = "zen_ralph_pending_current_step_path_witness_v2"
+PENDING_PROVENANCE_RECOVERY_SCHEMA = "zen_ralph_pending_provenance_recovery_v1"
 
 
 def _pending_current_step_verification_is_exact(
@@ -1353,7 +1463,7 @@ def _validated_pending_current_step_provenance(
     if scope != normalized_scope or pending.get("repository_scope_sha256") != _evidence_digest(scope):
         raise RuntimeError("current-step pending provenance scope is stale or altered")
     plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
-    if core.approved_plan_version(plan) == core.APPROVED_PLAN_V2:
+    if core.plan_requires_repository_mutation_scope(plan):
         if scope != list(core.validate_v2_repository_mutation_scope(plan)):
             raise RuntimeError("current-step pending provenance scope is stale or altered")
     verification = pending.get("verification")
@@ -1383,7 +1493,9 @@ def _validated_pending_current_step_provenance(
             "originating_test_change_policy", "generation", "checkpoint_verification",
             "checkpoint_verification_sha256", "witness_sha256",
         }
-        if not isinstance(record, dict) or set(record) != (legacy_fields if legacy else witness_fields):
+        recovery_witness = isinstance(record, dict) and record.get("schema") == PENDING_CURRENT_STEP_RECOVERY_PATH_WITNESS_SCHEMA
+        expected_fields = legacy_fields if legacy else witness_fields | ({"recovery"} if recovery_witness else set())
+        if not isinstance(record, dict) or set(record) != expected_fields:
             raise RuntimeError("current-step pending provenance path record is malformed")
         path = _normalize_repo_path(str(record.get("path") or ""))
         fingerprint = record.get("current_fingerprint")
@@ -1391,7 +1503,10 @@ def _validated_pending_current_step_provenance(
         if not legacy:
             witness = {key: value for key, value in record.items() if key != "witness_sha256"}
             if (
-                record.get("schema") != PENDING_CURRENT_STEP_PATH_WITNESS_SCHEMA
+                record.get("schema") not in {
+                    PENDING_CURRENT_STEP_PATH_WITNESS_SCHEMA,
+                    PENDING_CURRENT_STEP_RECOVERY_PATH_WITNESS_SCHEMA,
+                }
                 or record.get("witness_sha256") != _evidence_digest(witness)
                 or record.get("plan_hash") != state.get("plan_hash")
                 or record.get("approved_plan_artifact") != state.get("approved_plan_artifact")
@@ -1412,6 +1527,57 @@ def _validated_pending_current_step_provenance(
                 record_verification, state, step_no, checkpoint_id, record.get("generation"),
             ):
                 raise RuntimeError("current-step pending provenance path witness is stale or altered")
+            if recovery_witness:
+                recovery = record.get("recovery")
+                if (
+                    not isinstance(recovery, dict)
+                    or set(recovery) != {
+                        "schema", "plan_hash", "checkpoint", "step", "path",
+                        "prior_witness_sha256", "confirmation", "recovered_at",
+                    }
+                    or recovery.get("schema") != PENDING_PROVENANCE_RECOVERY_SCHEMA
+                    or recovery.get("plan_hash") != state.get("plan_hash")
+                    or recovery.get("checkpoint") != checkpoint_id
+                    or int(recovery.get("step") or 0) != step_no
+                    or recovery.get("path") != path
+                    or not isinstance(recovery.get("prior_witness_sha256"), str)
+                    or recovery.get("confirmation") != "RECOVER_PENDING_PROVENANCE"
+                    or not isinstance(recovery.get("recovered_at"), str)
+                ):
+                    raise RuntimeError("current-step pending provenance recovery witness is malformed")
+                matching_recovery = False
+                history = state.get("pending_provenance_recoveries")
+                for transaction in history if isinstance(history, list) else []:
+                    if not isinstance(transaction, dict):
+                        continue
+                    unsigned = {key: value for key, value in transaction.items() if key != "evidence_sha256"}
+                    if (
+                        transaction.get("schema") != PENDING_PROVENANCE_RECOVERY_SCHEMA
+                        or transaction.get("evidence_sha256") != _evidence_digest(unsigned)
+                        or transaction.get("plan_hash") != state.get("plan_hash")
+                        or transaction.get("checkpoint") != checkpoint_id
+                        or int(transaction.get("step") or 0) != step_no
+                        or transaction.get("confirmation") != "RECOVER_PENDING_PROVENANCE"
+                        or not isinstance(transaction.get("paths"), list)
+                        or not isinstance(transaction.get("replacements"), list)
+                    ):
+                        continue
+                    for replacement in transaction["replacements"]:
+                        if (
+                            isinstance(replacement, dict)
+                            and set(replacement) == {
+                                "path", "prior_witness_sha256", "replacement_witness_sha256",
+                            }
+                            and replacement.get("path") == path
+                            and replacement.get("prior_witness_sha256") == recovery.get("prior_witness_sha256")
+                            and replacement.get("replacement_witness_sha256") == record.get("witness_sha256")
+                        ):
+                            matching_recovery = True
+                            break
+                    if matching_recovery:
+                        break
+                if not matching_recovery:
+                    raise RuntimeError("current-step pending provenance recovery witness lacks immutable transaction evidence")
         if (
             not path or path != record.get("path") or path in seen or path not in scope
             or path not in verified_delta or path in approval_baseline_residue_paths(state)
@@ -1426,11 +1592,18 @@ def _validated_pending_current_step_provenance(
             raise RuntimeError("current-step pending provenance baseline or operation is invalid")
         grant = record.get("self_hosting_grant")
         if is_tooling_path(path):
-            if not isinstance(grant, dict) or record.get("self_hosting_grant_sha256") != _evidence_digest(grant):
+            history = state.get("self_hosting_grant_history") if isinstance(state.get("self_hosting_grant_history"), list) else []
+            if (
+                not isinstance(grant, dict)
+                or grant not in history
+                or record.get("self_hosting_grant_sha256") != _evidence_digest(grant)
+            ):
                 raise RuntimeError("current-step pending provenance self-hosting grant is invalid")
             witness_loop = int(record_verification.get("loop") or 0)
-            allowed, reason = self_hosting_grant_allows(state, step_no, [path], operation_loop=witness_loop)
-            if not allowed or _evidence_digest(_origin_self_hosting_grant(state, origin, path, operation_loop=witness_loop)) != _evidence_digest(grant):
+            allowed, reason = self_hosting_grant_allows(
+                {**state, "self_hosting_grant": grant}, step_no, [path], operation_loop=witness_loop,
+            )
+            if not allowed:
                 raise RuntimeError(f"current-step pending provenance self-hosting grant is stale: {reason}")
         elif grant is not None or record.get("self_hosting_grant_sha256") is not None:
             raise RuntimeError("current-step pending provenance has inapplicable self-hosting grant")
@@ -1447,6 +1620,7 @@ def _validated_pending_current_step_provenance(
 
 def _persist_pending_current_step_provenance(
     state: dict, step: dict, verification: dict, observed_paths: Iterable[str], *, loop: int,
+    recovery_prior_witnesses: Mapping[str, str] | None = None,
 ) -> dict:
     """Refresh the one active pending generation, refusing unobserved drift."""
     origin = _originating_step(state, step)
@@ -1475,6 +1649,15 @@ def _persist_pending_current_step_provenance(
     }
     if changed - observed:
         raise RuntimeError(f"current-step pending provenance has unobserved altered paths: {sorted(changed - observed)}")
+    recovery_witnesses = dict(recovery_prior_witnesses or {})
+    if recovery_witnesses and set(recovery_witnesses) != changed:
+        raise RuntimeError("pending provenance recovery must replace exactly the currently stale witnesses")
+    if any(
+        not isinstance(witness_sha256, str) or witness_sha256 != prior_records[path].get("witness_sha256")
+        for path, witness_sha256 in recovery_witnesses.items()
+        if path in prior_records
+    ):
+        raise RuntimeError("pending provenance recovery prior witness evidence is stale or altered")
     unknown = pending_paths - set(prior_records) - observed
     if unknown:
         raise RuntimeError(f"current-step pending provenance has unknown checkpoint delta: {sorted(unknown)}")
@@ -1525,6 +1708,16 @@ def _persist_pending_current_step_provenance(
             "self_hosting_grant": grant,
             "self_hosting_grant_sha256": _evidence_digest(grant) if grant is not None else None,
         }
+        if path in recovery_witnesses:
+            record["schema"] = PENDING_CURRENT_STEP_RECOVERY_PATH_WITNESS_SCHEMA
+            record["recovery"] = {
+                "schema": PENDING_PROVENANCE_RECOVERY_SCHEMA,
+                "plan_hash": state.get("plan_hash"), "checkpoint": checkpoint_id,
+                "step": step_no, "path": path,
+                "prior_witness_sha256": recovery_witnesses[path],
+                "confirmation": "RECOVER_PENDING_PROVENANCE",
+                "recovered_at": utc_now(),
+            }
         record["witness_sha256"] = _evidence_digest(record)
         records.append(record)
     pending = {
@@ -1543,8 +1736,14 @@ def _persist_pending_current_step_provenance(
     return pending
 
 
-def _promote_pending_current_step_provenance(state: dict, step: dict) -> tuple[dict, list[str]]:
+def _promote_pending_current_step_provenance(
+    state: dict, step: dict, completion_witness: dict,
+) -> tuple[dict, list[str]]:
     """Atomically turn each pending path's exact witness into attribution."""
+    if not accepted_step_has_completed_outcome(
+        state, {"result": "PASS", "step": step.get("id"), "completion_witness": completion_witness},
+    ):
+        raise RuntimeError("qualification promotion requires explicit completed outcome evidence")
     pending = _validated_pending_current_step_provenance(state, step)
     if pending is None:
         raise RuntimeError("qualification cannot promote a missing current-step pending generation")
@@ -1559,7 +1758,7 @@ def _promote_pending_current_step_provenance(state: dict, step: dict) -> tuple[d
         )
         if attribution.get("paths") != [path]:
             raise RuntimeError("qualification promotion did not preserve the pending path witness")
-        accepted.extend(record_accepted_operations(state, attribution))
+        accepted.extend(record_accepted_operations(state, attribution, completion_witness=completion_witness))
         path_attributions.append(attribution)
     state["pending_current_step_provenance"] = []
     return {
@@ -1617,7 +1816,7 @@ def _pending_retirement_recovery_paths(
         _originating_step(state, active_steps[0])
     ):
         raise RuntimeError("pending recovery evidence originating step is stale or altered")
-    if core.approved_plan_version(plan) == core.APPROVED_PLAN_V2:
+    if core.plan_requires_repository_mutation_scope(plan):
         if scope != list(core.validate_v2_repository_mutation_scope(plan)):
             raise RuntimeError("pending recovery evidence scope is stale or altered")
     if pending.get("repository_scope_sha256") != _evidence_digest(scope):
@@ -1705,7 +1904,7 @@ def _require_v2_checkpoint_delta_scope(state: dict, paths: Iterable[str]) -> Non
     constrain an in-scope change; none can make an out-of-scope path valid.
     """
     plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
-    if core.approved_plan_version(plan) != core.APPROVED_PLAN_V2:
+    if not core.plan_requires_repository_mutation_scope(plan):
         return
     scope = set(core.validate_v2_repository_mutation_scope(plan))
     delta = {
@@ -1719,9 +1918,9 @@ def _require_v2_checkpoint_delta_scope(state: dict, paths: Iterable[str]) -> Non
 
 
 def _pending_recovery_scope(state: dict, verified_delta: set[str]) -> list[str]:
-    """Freeze the approved v2 scope, or the exact verified legacy delta."""
+    """Freeze the approved mutation scope, or the exact verified legacy delta."""
     plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
-    if core.approved_plan_version(plan) == core.APPROVED_PLAN_V2:
+    if core.plan_requires_repository_mutation_scope(plan):
         return list(core.validate_v2_repository_mutation_scope(plan))
     return sorted(verified_delta)
 
@@ -2178,8 +2377,14 @@ def verified_attribution_result(
     }
 
 
-def record_accepted_operations(state: dict, attribution: dict) -> list[dict]:
+def record_accepted_operations(
+    state: dict, attribution: dict, *, completion_witness: dict | None = None,
+) -> list[dict]:
     """Persist only the operation records produced by verified attribution."""
+    if not accepted_step_has_completed_outcome(
+        state, {"result": "PASS", "step": attribution.get("step", {}).get("id"), "completion_witness": completion_witness},
+    ):
+        raise RuntimeError("plan-file attribution requires explicit completed outcome evidence")
     if attribution.get("schema") != "zen_ralph_verified_attribution_v1":
         raise RuntimeError("accepted operation recording requires verified attribution")
     if attribution.get("plan_hash") != state.get("plan_hash") or attribution.get("checkpoint") != state.get("recovery_checkpoint"):
@@ -2213,7 +2418,7 @@ def record_accepted_operations(state: dict, attribution: dict) -> list[dict]:
 def _accepted_step_results_by_id(state: dict) -> dict[int, dict]:
     accepted: dict[int, dict] = {}
     for item in state.get("step_results") or []:
-        if not isinstance(item, dict) or item.get("result") != "PASS":
+        if not isinstance(item, dict) or item.get("result") != "PASS" or not accepted_step_has_completed_outcome(state, item):
             continue
         step_no = int(item.get("step") or 0)
         if step_no > 0:
@@ -2562,6 +2767,54 @@ def record_post_turn_repository_verification(
     return verification
 
 
+def process_post_turn_safety(
+    state: dict, step: dict, sandbox: str, observed_paths: Iterable[str], *, loop: int,
+    authority_enforcement_removals: Iterable[str] = (),
+) -> tuple[dict, list[str]]:
+    """Establish all post-turn safety evidence before any result disposition.
+
+    Callers restore denied paths before this function.  A PASS verification then
+    becomes the sole source for pending recovery/current-step provenance and
+    for every downstream display, semantic, qualification, and progression
+    path.  Enforcement removals remain exclusion-only evidence.
+    """
+    verification = record_post_turn_repository_verification(
+        state, step, sandbox, observed_paths, loop=loop,
+    )
+    if verification["state"] == "REFUSED":
+        return verification, []
+    try:
+        _persist_pending_recovery_evidence(
+            state, step, verification,
+            authority_enforcement_removals=authority_enforcement_removals,
+        )
+        verified_paths = list(verification.get("new_project_delta") or [])
+        if sandbox == "workspace-write":
+            pending_generation = _persist_pending_current_step_provenance(
+                state, step, verification, observed_paths, loop=loop,
+            )
+            verified_paths = list(pending_generation["paths"])
+        if authority_enforcement_removals:
+            state["pending_step_delta_paths"] = {
+                "step": int(step["id"]),
+                "paths": sorted({
+                    _normalize_repo_path(str(path))
+                    for path in verification.get("new_project_delta") or []
+                    if _normalize_repo_path(str(path))
+                }),
+                "updated_at": utc_now(),
+            }
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+        verification = verification | {
+            "state": "REFUSED",
+            "error": f"POST_TURN_SAFETY_PROVENANCE_REFUSED: {exc}",
+            "recorded_at": utc_now(),
+        }
+        state["last_post_turn_verification"] = verification
+        return verification, []
+    return verification, verified_paths
+
+
 def remember_plan_files(state: dict, paths: Iterable[str]) -> None:
     requested = sorted({_normalize_repo_path(str(path)) for path in paths if _normalize_repo_path(str(path))})
     derived = validated_plan_paths(state)
@@ -2585,7 +2838,15 @@ def remember_plan_files(state: dict, paths: Iterable[str]) -> None:
                 state, step, verification, requested,
                 loop=int(state.get("loop_count") or 0), phase="controller-reconciliation",
             )
-            record_accepted_operations(state, attribution)
+            # Reconciliation may still validate and preserve the established
+            # v1/v2 attribution flow.  A bound v3 dispatch has no model result
+            # at this controller-only call site, so completed_outcome_witness
+            # deliberately refuses to manufacture one from filenames or gates.
+            _checkpoint, dispatch_version, _sandbox = verified_approved_plan_dispatch(state)
+            completion_witness = completed_outcome_witness(state, dispatch_version, None)
+            record_accepted_operations(
+                state, attribution, completion_witness=completion_witness,
+            )
             derived = validated_plan_paths(state)
         missing = set(requested) - set(derived)
     # Approval-time residue is deliberately visible to reconciliation but can
@@ -3112,7 +3373,11 @@ def _step_results_from_state(state: dict) -> list[dict]:
     return [dict(value) for value in values if isinstance(value, dict)]
 
 
-def record_step_result(state: dict, step: dict, result: str, *, summary: str = "", files: Iterable[str] = (), gates: Iterable[str] = (), stats: dict | None = None, attribution: dict | None = None) -> None:
+def record_step_result(state: dict, step: dict, result: str, *, summary: str = "", files: Iterable[str] = (), gates: Iterable[str] = (), stats: dict | None = None, attribution: dict | None = None, completion_witness: dict | None = None) -> None:
+    if result in {"PASS", "HUMAN_CONFIRMED"} and not accepted_step_has_completed_outcome(
+        state, {"result": result, "step": step.get("id"), "completion_witness": completion_witness},
+    ):
+        raise RuntimeError(f"{result} recording requires explicit completed outcome evidence")
     values = _step_results_from_state(state)
     values.append({
         "step": int(step.get("id") or 0),
@@ -3121,6 +3386,7 @@ def record_step_result(state: dict, step: dict, result: str, *, summary: str = "
         "summary": " ".join(str(summary or "").split())[:1000],
         "files": list(files),
         "attribution": dict(attribution or {}),
+        "completion_witness": dict(completion_witness or {}),
         "gates": list(gates),
         "stats": dict(stats or {}),
         "recorded_at": utc_now(),
@@ -3136,8 +3402,8 @@ def summarize_step_outcomes(state: dict) -> dict:
         if step_no:
             latest[step_no] = item
     values = list(latest.values())
-    passed = [item for item in values if item.get("result") == "PASS"]
-    human = [item for item in values if item.get("result") == "HUMAN_CONFIRMED"]
+    passed = [item for item in values if item.get("result") == "PASS" and accepted_step_has_completed_outcome(state, item)]
+    human = [item for item in values if item.get("result") == "HUMAN_CONFIRMED" and accepted_step_has_completed_outcome(state, item)]
     recovered = [
         item for item in passed
         if int((item.get("stats") or {}).get("repair") or 0) > 0
@@ -3584,8 +3850,11 @@ def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> lis
     match the approval checkpoint without performing a checkout or deletion.
     """
     try:
+        # `_latest_operation_records_by_path` validates the complete immutable
+        # ledger before reducing it to one record per physical path.  A length
+        # comparison here would mistake legitimate later generations for a
+        # duplicate attribution.
         latest = _latest_operation_records_by_path(state)
-        validated = _validated_operation_records(state)
         # Recovery evidence remains a fail-closed passive witness.  Validate it
         # before the newer path witnesses so an externally altered surviving
         # delta is reported as failed recovery evidence, even where the same
@@ -3598,9 +3867,6 @@ def reconciled_restored_retirement_records(state: dict, checkpoint: dict) -> lis
         )
     except RuntimeError as exc:
         raise RuntimeError(f"reconcile-restored refuses unverified native delta: {exc}") from exc
-    if len(latest) != len(validated):
-        raise RuntimeError("reconcile-restored refuses duplicate native operation attribution")
-
     # A path may be pending precisely because its original controller witness
     # was not accepted attribution.  Its old fingerprint cannot remain live
     # after an operator restores it, so validate the immutable record first,
@@ -4052,10 +4318,10 @@ def retirement_attribution_records(state: dict) -> list[dict]:
     generation.  Both layers are independently checkpoint-bound, and together
     still authorize exactly one restore/delete operation for that path.
     """
+    # Projection is intentionally one physical path per latest generation;
+    # exact duplicate tuples were rejected by complete-ledger validation inside
+    # `_latest_operation_records_by_path`.
     latest = _latest_operation_records_by_path(state)
-    validated = _validated_operation_records(state)
-    if len(latest) != len(validated):
-        raise RuntimeError("retire-plan refuses duplicate operation attribution")
 
     # Validate passive recovery evidence first.  This retains its recovery
     # contract and produces its precise failure if a surviving delta changed;
@@ -5498,12 +5764,16 @@ def codex_command_prefix() -> list[str]:
     return list(_CODEX_PREFIX)
 
 
-def run_codex(prompt: str, schema: dict, sandbox: str, *, context: str = "Codex") -> dict:
+def run_codex(
+    prompt: str, schema: dict, sandbox: str, *, context: str = "Codex",
+    result_contract: dict | None = None,
+) -> dict:
     return codex.run_codex(
         prompt, schema, sandbox, cwd=ROOT, prefix=codex_command_prefix(),
         stream_process=stream_codex_process, normalize_failure=normalize_failure,
         clip=_clip, live_write=live_write, selected_model=selected_codex_model(),
         selected_effort=selected_codex_effort(), context=context,
+        result_contract=result_contract,
     )
 
 
@@ -7315,6 +7585,8 @@ def cmd_propose(args: argparse.Namespace) -> int:
         "approved_plan_artifact": None,
         "approval_repository_evidence": None,
         "operation_attributions": [],
+        "pending_current_step_provenance": [],
+        "pending_provenance_recoveries": [],
         "pending_step_delta_paths": [],
         "pending_retirement_recovery_evidence": [],
         "plan_changed_files": [],
@@ -7388,9 +7660,11 @@ def cmd_approve(args: argparse.Namespace) -> int:
     state["operation_attributions"] = []
     _clear_pending_step_paths(state)
     bind_approved_plan_artifact(state)
+    dispatch_version = dispatch_approved_plan(state["plan"], expected)
     checkpoint = create_recovery_checkpoint(state)
     state["status"] = "APPROVED"
     state["recovery_checkpoint"] = checkpoint["id"]
+    bind_outcome_result_contract(state, dispatch_version)
     state["approval_repository_evidence"] = checkpoint["repository_evidence"]
     state["plan_changed_files"] = []
     state["plan_owned_files"] = []
@@ -8012,6 +8286,26 @@ def cmd_resolve_gate(args: argparse.Namespace) -> int:
     plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
     steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
     step = steps[int(state["current_step"]) - 1]
+    completion_witness = {}
+    # v1/v2 have no immutable outcome-result-contract binding. Preserve their
+    # approved confirmation flow exactly; only a bound v3 dispatch may turn an
+    # operator-confirmed result into an acceptance/progression effect under the
+    # explicit structured completed-outcome rule.
+    if core.approved_plan_version(plan) == core.APPROVED_PLAN_V3:
+        try:
+            _checkpoint, version, sandbox = verified_approved_plan_dispatch(state)
+            completion_witness = completed_outcome_witness(
+                state, version, operator_completed_outcome_result(getattr(args, "outcome", None)),
+            )
+            safety = record_post_turn_repository_verification(
+                state, step, sandbox, git_changed_paths(), loop=int(state.get("loop_count") or 0),
+            )
+            if safety.get("state") != "PASS":
+                raise RuntimeError(str(safety.get("error") or "human-gate safety verification refused"))
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            block(state, str(exc))
+            raise RuntimeError(f"resolve-gate refused: {exc}") from exc
+
     original_block = " ".join(str(state.get("block_reason") or "").split())
     resolution = {
         "gate_id": expected_gate,
@@ -8020,6 +8314,8 @@ def cmd_resolve_gate(args: argparse.Namespace) -> int:
         "step": int(state.get("current_step") or 0),
         "step_title": str(step.get("title") or ""),
         "result": "HUMAN_CONFIRMED",
+        "outcome": "completed",
+        "completion_witness": _json_copy(completion_witness),
         "reason": reason[:1200],
         "original_block": original_block[:1200],
         "resolved_at": utc_now(),
@@ -8028,7 +8324,7 @@ def cmd_resolve_gate(args: argparse.Namespace) -> int:
     state["human_gate_resolutions"] = [*history[-49:], resolution]
     update_context_after_human_confirmation(state, step, expected_gate, reason)
     append_human_gate_resolution(state, step, expected_gate, reason, original_block)
-    record_step_result(state, step, "HUMAN_CONFIRMED", summary=reason)
+    record_step_result(state, step, "HUMAN_CONFIRMED", summary=reason, completion_witness=completion_witness)
 
     clear_self_hosting_context(state)
     state["last_result"] = "HUMAN_CONFIRMED"
@@ -8438,6 +8734,9 @@ def _block_terminal_qualification(
 
 def finalize_completed_plan(state: dict) -> int:
     """Run terminal qualification once all approved steps have been consumed."""
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    repository_authority = str(plan.get(REPOSITORY_AUTHORITY_FIELD) or "")
+
     try:
         passed, final_gates, final_durations, final_output = run_final_qualification(state)
     except RuntimeError as exc:
@@ -8445,8 +8744,6 @@ def finalize_completed_plan(state: dict) -> int:
 
     provenance = None
     fingerprint = None
-    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
-    repository_authority = str(plan.get(REPOSITORY_AUTHORITY_FIELD) or "")
     if passed:
         try:
             if repository_authority == "read-only":
@@ -8463,6 +8760,27 @@ def finalize_completed_plan(state: dict) -> int:
                 state,
                 stage="delta-binding",
                 error=str(exc),
+                gates=final_gates,
+                durations=final_durations,
+                output=final_output,
+            )
+
+    # Terminal completion evidence is an acceptance effect, not a substitute
+    # for qualification or checkpoint-native provenance.  Preserve those
+    # independent fail-closed findings before evaluating v3 completion.
+    if passed:
+        missing_completion = [
+            int(step.get("id") or 0)
+            for step in list(((state.get("plan") or {}).get("steps") or []))
+            if not accepted_step_has_completed_outcome(
+                state, summarize_step_outcomes(state)["latest"].get(int(step.get("id") or 0)),
+            )
+        ]
+        if missing_completion:
+            return _block_terminal_qualification(
+                state,
+                stage="completed-outcome-evidence",
+                error=f"terminal readiness requires explicit completed outcome evidence for steps {missing_completion}",
                 gates=final_gates,
                 durations=final_durations,
                 output=final_output,
@@ -8599,6 +8917,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         raise RuntimeError(f"run requires APPROVED/PAUSED_USAGE_LIMIT status, found {state.get('status')}")
     try:
         _checkpoint, _version, sandbox = verified_approved_plan_dispatch(state)
+        # There is no active result-producing step once terminal readiness is
+        # being evaluated.  In particular, do not ask the active-step binding
+        # verifier to manufacture an N+1 binding: finalization independently
+        # verifies every accepted v3 completion witness below.
+        result_contract = (
+            verified_result_contract_for_active_step(state, _version)
+            if int(state.get("current_step") or 0) <= len(state["plan"]["steps"])
+            else None
+        )
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         block(state, str(exc))
         raise RuntimeError(f"{exc}; blocked for human review") from exc
@@ -8620,6 +8947,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         state = load_state()
         try:
             _checkpoint, _version, sandbox = verified_approved_plan_dispatch(state)
+            result_contract = verified_result_contract_for_active_step(state, _version)
         except (KeyError, TypeError, ValueError, RuntimeError) as exc:
             block(state, f"approved plan identity/authority is invalid before model admission: {exc}")
             raise RuntimeError("approved plan identity/authority changed before model admission; blocked for human review") from exc
@@ -8667,8 +8995,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         before_repo = repo_snapshot()
         authority = authority_snapshot()
         protected_before = protected_snapshot()
+        provider_block: tuple[str, str] | None = None
         try:
-            result = run_codex(step_prompt(state, step, active_fp, repair_no), RESULT_SCHEMA, sandbox, context=f"LOOP {loop_no:04d} STEP {step['id']} {'REPAIR' if active_fp else 'IMPLEMENT'}")
+            result = run_codex(
+                step_prompt(state, step, active_fp, repair_no), RESULT_SCHEMA, sandbox,
+                context=f"LOOP {loop_no:04d} STEP {step['id']} {'REPAIR' if active_fp else 'IMPLEMENT'}",
+                result_contract=result_contract,
+            )
             append_usage_ledger(
                 result.get("_ralph_metrics") if isinstance(result, dict) else {},
                 plan_hash_value=str(state.get("plan_hash") or ""),
@@ -8683,14 +9016,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                 goal=str((state.get("plan") or {}).get("goal") or ""),
                 scope="implementation", loop=loop_no, step=int(step["id"]), phase=phase,
             )
-            env_result = {"_ralph_metrics": exc.metrics, "context": {}}
-            append_journal(loop_no, step["id"], phase, "BLOCKED_ENVIRONMENT", summary=reason, repair=repair_no, next_action="fix environment then resume approved plan", stats=loop_stats(loop_started, env_result, repair=repair_no))
-            block_environment(state, reason)
-            return 2
+            result = {"summary": reason, "_ralph_metrics": exc.metrics, "context": {}}
+            provider_block = ("environment", reason)
         except Exception as exc:
-            append_journal(loop_no, step["id"], phase, "BLOCKED", summary=str(exc), repair=repair_no, next_action="human review", stats=loop_stats(loop_started, repair=repair_no))
-            block(state, str(exc))
-            return 2
+            result = {"summary": str(exc), "context": {}}
+            provider_block = ("provider", str(exc))
 
         after_repo = repo_snapshot()
         files = changed_paths(before_repo, after_repo)
@@ -8707,30 +9037,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                 state = load_state()
                 # The restoration guard is not a substitute for the required
                 # checkpoint comparison; record it even on this refusal path.
-                verification = record_post_turn_repository_verification(
-                    state, step, sandbox, files, loop=loop_no,
-                )
-                if verification["state"] == "PASS":
-                    _persist_pending_recovery_evidence(
-                        state, step, verification,
+                try:
+                    verification, _verified_paths = process_post_turn_safety(
+                        state, step, sandbox, files, loop=loop_no,
                         authority_enforcement_removals=changed_authority,
                     )
-                    # The restored controller path is absent from this
-                    # checkpoint delta.  Persist exact normal witnesses for
-                    # the independently verified survivors so a later
-                    # authorized retry cannot reissue their provenance.
-                    _persist_pending_current_step_provenance(
-                        state, step, verification, files, loop=loop_no,
-                    )
-                    state["pending_step_delta_paths"] = {
-                        "step": int(step["id"]),
-                        "paths": sorted({
-                            _normalize_repo_path(str(path))
-                            for path in verification.get("new_project_delta") or []
-                            if _normalize_repo_path(str(path))
-                        }),
-                        "updated_at": utc_now(),
-                    }
+                except RuntimeError as exc:
+                    verification = {"state": "REFUSED", "error": str(exc)}
                 candidate_paths = sorted(
                     path for path in changed_authority
                     if not PROJECT_PROFILE.is_runtime_path(path)
@@ -8767,26 +9080,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         if protected or test_violations:
             if protected:
                 restore_protected(protected_before, protected)
-            verification = record_post_turn_repository_verification(
-                state, step, sandbox, files, loop=loop_no,
-            )
-            if verification["state"] == "PASS":
-                # A protected-path restoration must not discard independently
-                # verified surviving siblings, nor let the attempted protected
-                # path re-enter pending evidence through the raw turn file list.
-                _persist_pending_recovery_evidence(
-                    state, step, verification,
+            try:
+                verification, _verified_paths = process_post_turn_safety(
+                    state, step, sandbox, files, loop=loop_no,
                     authority_enforcement_removals=protected,
                 )
-                state["pending_step_delta_paths"] = {
-                    "step": int(step["id"]),
-                    "paths": sorted({
-                        _normalize_repo_path(str(path))
-                        for path in verification.get("new_project_delta") or []
-                        if _normalize_repo_path(str(path))
-                    }),
-                    "updated_at": utc_now(),
-                }
+            except RuntimeError as exc:
+                verification = {"state": "REFUSED", "error": str(exc)}
             reason = "policy violation: " + "; ".join(filter(None, [f"protected paths {protected}" if protected else "", f"test paths {test_violations}" if test_violations else ""]))
             if verification["state"] == "REFUSED":
                 reason += f"; post-turn checkpoint verification: {verification['error']}"
@@ -8812,9 +9112,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         # their existing protective behavior remains intact, and before
         # continuation, controller gates, acceptance, progression, or terminal
         # readiness can consume the model result.
-        verification = record_post_turn_repository_verification(
-            state, step, sandbox, files, loop=loop_no,
-        )
+        try:
+            verification, files = process_post_turn_safety(
+                state, step, sandbox, files, loop=loop_no,
+            )
+        except RuntimeError as exc:
+            verification, files = {"state": "REFUSED", "error": str(exc)}, []
         if verification["state"] == "REFUSED":
             reason = str(verification["error"])
             append_journal(
@@ -8826,33 +9129,26 @@ def cmd_run(args: argparse.Namespace) -> int:
             live_write(f"loop={loop_no:04d} checkpoint verification refused: {reason}", "VERIFY")
             block(state, reason)
             return 2
-        _persist_pending_recovery_evidence(state, step, verification)
-        if sandbox == "workspace-write":
-            try:
-                pending_generation = _persist_pending_current_step_provenance(
-                    state, step, verification, files, loop=loop_no,
-                )
-            except RuntimeError as exc:
-                reason = str(exc)
-                append_journal(
-                    loop_no, step["id"], "pending-provenance", "BLOCKED",
-                    summary=reason, files=files, repair=repair_no, ideas=result.get("ideas", []),
-                    next_action="human review current-step pending provenance",
-                    change_class=change_class, stats=loop_stats(loop_started, result, repair=repair_no),
-                )
-                block(state, reason)
-                return 2
-            # From this point onward, no acceptance-facing control may consume the
-            # raw before/after path list.  The latest pending generation is the
-            # checkpoint-bound authority boundary until qualification promotes it.
-            files = list(pending_generation["paths"])
-            change_class = classify_changes(files)
+        # From this point onward, no acceptance-facing control may consume the
+        # raw before/after path list.  The safety pipeline returns only the
+        # checkpoint-bound pending generation until qualification promotes it.
+        change_class = classify_changes(files)
         save_state(state)
         live_write(
             f"loop={loop_no:04d} checkpoint verification=PASS sandbox={sandbox} "
             f"delta={len(verification['new_project_delta'])}",
             "VERIFY",
         )
+
+        if provider_block is not None:
+            kind, reason = provider_block
+            if kind == "environment":
+                append_journal(loop_no, step["id"], phase, "BLOCKED_ENVIRONMENT", summary=reason, files=files, repair=repair_no, next_action="fix environment then resume approved plan", change_class=change_class, stats=loop_stats(loop_started, result, repair=repair_no))
+                block_environment(state, reason)
+            else:
+                append_journal(loop_no, step["id"], phase, "BLOCKED", summary=reason, files=files, repair=repair_no, next_action="human review", change_class=change_class, stats=loop_stats(loop_started, result, repair=repair_no))
+                block(state, reason)
+            return 2
 
         save_state(state)
         entries = change_entries(files, base_ref=loop_git_base)
@@ -8872,25 +9168,53 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
 
         append_ideas(loop_no, result.get("ideas", []))
-        continuation, continuation_reason = codex_requests_continuation(result, step)
-        if continuation:
-            stats = loop_stats(loop_started, result, repair=repair_no)
-            state["last_result"] = "CONTINUE"
+        # Unbound v1/v2 dispatches retain their established continuation
+        # scheduling contract.  A v3 dispatch instead has to declare its
+        # structured outcome before it can take any acceptance-facing route.
+        if result_contract is None:
+            continuation, continuation_reason = codex_requests_continuation(result, step)
+            if continuation:
+                state["last_result"] = "CONTINUE"
+                state["block_reason"] = None
+                state["status"] = "APPROVED"
+                append_journal(
+                    loop_no, step["id"], phase, "CONTINUE", summary=continuation_reason,
+                    files=files, repair=repair_no, ideas=result.get("ideas", []),
+                    next_action="continue same approved step in next bounded loop",
+                    change_class=change_class, stats=loop_stats(loop_started, result, repair=repair_no),
+                )
+                save_state(state)
+                live_write(
+                    f"loop={loop_no:04d} step={step['id']} ordinary continuation requested; "
+                    "another bounded loop remains inside approved authority",
+                    "CONTINUE",
+                )
+                continue
+        try:
+            completion_witness = completed_outcome_witness(state, _version, result)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            outcome = str(result.get("outcome") or "missing")
+            reason = str(exc)
+            if outcome == "continuation" and result.get("blocker_class") == "continuation" and result.get("needs_human") is False:
+                state["last_result"] = "CONTINUE"
+                state["block_reason"] = None
+                append_journal(
+                    loop_no, step["id"], phase, "CONTINUE", summary=reason, files=files, repair=repair_no,
+                    ideas=result.get("ideas", []), next_action="continue same approved step in next bounded loop",
+                    change_class=change_class, stats=loop_stats(loop_started, result, repair=repair_no),
+                )
+                save_state(state)
+                continue
+            if outcome in {"blocked", "unmet_prerequisite", "skipped", "impossible", "fail_closed"} or result.get("blocker_class") in {"human-decision", "policy"}:
+                append_journal(loop_no, step["id"], phase, "BLOCKED", summary=reason, files=files, repair=repair_no, ideas=result.get("ideas", []), next_action="human review", change_class=change_class, stats=loop_stats(loop_started, result, repair=repair_no))
+                block(state, reason)
+                return 2
+            state["last_result"] = "INCOMPLETE"
             state["block_reason"] = None
-            append_journal(
-                loop_no, step["id"], phase, "CONTINUE",
-                summary=continuation_reason, files=files, repair=repair_no,
-                ideas=result.get("ideas", []),
-                next_action="continue same approved step in next bounded loop",
-                change_class=change_class, stats=stats,
-            )
+            state["status"] = "APPROVED"
+            append_journal(loop_no, step["id"], phase, "INCOMPLETE", summary=reason, files=files, repair=repair_no, ideas=result.get("ideas", []), next_action="retry same approved step with explicit completed outcome", change_class=change_class, stats=loop_stats(loop_started, result, repair=repair_no))
             save_state(state)
-            live_write(
-                f"loop={loop_no:04d} step={step['id']} ordinary continuation requested; "
-                "another bounded loop remains inside approved authority",
-                "CONTINUE",
-            )
-            continue
+            return 1
 
         requires_human, reason = codex_requires_human_before_gates(result, step)
         if requires_human:
@@ -8922,14 +9246,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             }
             attribution = None
             if sandbox == "workspace-write":
-                attribution, promoted_paths = _promote_pending_current_step_provenance(state, step)
+                attribution, promoted_paths = _promote_pending_current_step_provenance(state, step, completion_witness)
                 if promoted_paths != files:
                     raise RuntimeError("qualification promotion did not preserve the complete pending generation")
             remember_plan_files(state, files)
             update_context_after_pass(state, step, result, files)
             record_step_result(
                 state, step, "PASS", summary=result.get("summary", ""), files=files,
-                gates=gates, stats=stats, attribution=attribution,
+                gates=gates, stats=stats, attribution=attribution, completion_witness=completion_witness,
             )
             _clear_pending_step_paths(state)
             entry_stats = change_entries(files, base_ref=loop_git_base)
@@ -9173,6 +9497,131 @@ def cmd_recover_self_upgrade(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recover_pending_provenance(args: argparse.Namespace) -> int:
+    """Refresh exactly the operator-confirmed stale pending witnesses.
+
+    This is an explicit recovery transaction, not a normal retry path.  It
+    observes the named stale paths only for this verification, then replaces
+    only those witnesses; it does not attribute work or accept a step.
+    """
+    init_files()
+    state = load_state()
+    expected = str(state.get("plan_hash") or "")
+    if not expected or not secrets.compare_digest(str(args.plan_hash or ""), expected):
+        raise RuntimeError("recover-pending-provenance hash does not match the active plan")
+    if str(args.confirm or "") != "RECOVER_PENDING_PROVENANCE":
+        raise RuntimeError("recover-pending-provenance requires --confirm RECOVER_PENDING_PROVENANCE")
+    if state.get("status") not in {"APPROVED", "BLOCKED_HUMAN"}:
+        raise RuntimeError(
+            "recover-pending-provenance requires active APPROVED/BLOCKED_HUMAN plan, "
+            f"found {state.get('status')}"
+        )
+    checkpoint_id = str(state.get("recovery_checkpoint") or "")
+    if not checkpoint_id or str(args.checkpoint or "") != checkpoint_id:
+        raise RuntimeError("recover-pending-provenance requires the exact active recovery checkpoint")
+    _checkpoint, _version, sandbox = verified_approved_plan_dispatch(state)
+    if sandbox != "workspace-write":
+        raise RuntimeError("recover-pending-provenance is valid only for workspace-write execution")
+
+    step_no = int(state.get("current_step") or 0)
+    steps = list(((state.get("plan") or {}).get("steps") or []))
+    if not (1 <= step_no <= len(steps)) or int(getattr(args, "step", 0) or 0) != step_no:
+        raise RuntimeError("recover-pending-provenance requires the exact active current step")
+    step = steps[step_no - 1]
+    raw_paths = list(getattr(args, "stale_path", []) or [])
+    stale_paths = [_normalize_repo_path(str(path)) for path in raw_paths]
+    if not stale_paths or any(not path for path in stale_paths) or len(stale_paths) != len(set(stale_paths)):
+        raise RuntimeError("recover-pending-provenance requires distinct explicit --stale-path values")
+    stale_paths = sorted(stale_paths)
+
+    prior = _validated_pending_current_step_provenance(state, step, require_current_state=False)
+    if prior is None:
+        raise RuntimeError("recover-pending-provenance requires current-step pending provenance")
+    prior_records = {
+        str(record["path"]): _json_copy(record)
+        for record in prior.get("path_evidence", [])
+        if isinstance(record, dict) and isinstance(record.get("path"), str)
+    }
+    if set(prior_records) != set(prior.get("paths") or []):
+        raise RuntimeError("recover-pending-provenance pending path witnesses are malformed")
+    stale_now = sorted(
+        path for path, record in prior_records.items()
+        if record.get("current_fingerprint") != retirement_path_fingerprint(path)
+    )
+    if stale_paths != stale_now:
+        raise RuntimeError(
+            "recover-pending-provenance stale paths must exactly match the currently stale pending witnesses: "
+            f"{stale_now}"
+        )
+
+    # This shared verifier recomputes the complete checkpoint-relative delta,
+    # scope, approval residue, policy and present fingerprints.  The recovery
+    # command is its sole source for declaring stale paths observed.
+    verification = record_post_turn_repository_verification(
+        state, step, sandbox, stale_paths, loop=int(state.get("loop_count") or 0),
+    )
+    if verification.get("state") != "PASS":
+        raise RuntimeError(
+            "recover-pending-provenance fresh checkpoint verification refused: "
+            f"{verification.get('error') or 'unknown refusal'}"
+        )
+    if set(stale_paths) - set(verification.get("new_project_delta") or []):
+        raise RuntimeError("recover-pending-provenance declared path is absent from fresh checkpoint delta")
+
+    prior_witnesses = {path: str(prior_records[path]["witness_sha256"]) for path in stale_paths}
+    pending = _persist_pending_current_step_provenance(
+        state, step, verification, stale_paths,
+        loop=int(state.get("loop_count") or 0), recovery_prior_witnesses=prior_witnesses,
+    )
+    refreshed_records = {str(record["path"]): record for record in pending["path_evidence"]}
+    unchanged = set(prior_records) - set(stale_paths)
+    if any(refreshed_records.get(path) != prior_records[path] for path in unchanged):
+        raise RuntimeError("recover-pending-provenance refused to rewrite unchanged pending witnesses")
+    replacements = []
+    for path in stale_paths:
+        replacement = refreshed_records.get(path)
+        if not isinstance(replacement, dict) or replacement.get("schema") != PENDING_CURRENT_STEP_RECOVERY_PATH_WITNESS_SCHEMA:
+            raise RuntimeError("recover-pending-provenance did not create a recovery-specific witness")
+        if replacement.get("recovery", {}).get("prior_witness_sha256") != prior_witnesses[path]:
+            raise RuntimeError("recover-pending-provenance replacement witness lost prior evidence")
+        replacements.append({
+            "path": path,
+            "prior_witness_sha256": prior_witnesses[path],
+            "replacement_witness_sha256": replacement.get("witness_sha256"),
+        })
+    recovery = {
+        "schema": PENDING_PROVENANCE_RECOVERY_SCHEMA,
+        "plan_hash": expected, "checkpoint": checkpoint_id, "step": step_no,
+        "confirmation": "RECOVER_PENDING_PROVENANCE", "paths": stale_paths,
+        "replacements": replacements, "verification": _json_copy(verification),
+        "recovered_at": utc_now(),
+    }
+    recovery["evidence_sha256"] = _evidence_digest(recovery)
+    history = state.get("pending_provenance_recoveries")
+    state["pending_provenance_recoveries"] = [
+        *(history if isinstance(history, list) else [])[-49:], recovery,
+    ]
+    state["status"] = "APPROVED"
+    state["block_reason"] = None
+    state["last_result"] = "PENDING_PROVENANCE_RECOVERED"
+    save_state(state)
+    plan_control_event(
+        state, "pending_provenance_recovery",
+        f"operator-confirmed pending provenance recovery at step {step_no}",
+        step=step_no, path_count=len(stale_paths), checkpoint=checkpoint_id,
+    )
+    append_journal(
+        int(state.get("loop_count") or 0), step_no, "operator-pending-provenance-recovery", "RECOVERED",
+        summary=f"Refreshed only explicitly confirmed stale pending witnesses: {stale_paths}",
+        files=stale_paths, next_action="resume the same approved step; no attribution or acceptance was created",
+    )
+    print(
+        f"PENDING_PROVENANCE_RECOVERED plan={expected} checkpoint={checkpoint_id} step={step_no} "
+        f"paths={','.join(stale_paths)} status=APPROVED"
+    )
+    return 0
+
+
 def cmd_recover_validation_block(args: argparse.Namespace) -> int:
     """Human-triggered controller qualification for a validation-only historical block."""
     init_files()
@@ -9203,6 +9652,13 @@ def cmd_recover_validation_block(args: argparse.Namespace) -> int:
         reason = str(verification["error"])
         block(state, reason)
         raise RuntimeError(f"recovery qualification refused: {reason}")
+    try:
+        completion_witness = completed_outcome_witness(
+            state, _version, operator_completed_outcome_result(getattr(args, "outcome", None)),
+        )
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+        block(state, str(exc))
+        raise RuntimeError(f"recovery requires explicit completed outcome evidence: {exc}") from exc
     attribution = verified_attribution_result(
         state, step, verification, files,
         loop=int(state.get("loop_count") or 0), phase="human-qualification",
@@ -9241,11 +9697,11 @@ def cmd_recover_validation_block(args: argparse.Namespace) -> int:
         state["active_failure"] = None
         state["block_reason"] = None
         state["last_efficiency"] = {"status": "PASS", "findings": []}
-        record_accepted_operations(state, attribution)
+        record_accepted_operations(state, attribution, completion_witness=completion_witness)
         update_context_after_pass(state, step, result, files)
         record_step_result(
             state, step, "PASS", summary=result["summary"], files=files, gates=gates,
-            stats=stats, attribution=attribution,
+            stats=stats, attribution=attribution, completion_witness=completion_witness,
         )
         state["current_step"] += 1
         _invalidate_terminal_artifacts_for_recovery(state, "human-triggered validation recovery")
@@ -9425,6 +9881,7 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_gate.add_argument("plan_hash")
     resolve_gate.add_argument("--gate", required=True, help="exact current human-gate ID, for example HG-0015-04")
     resolve_gate.add_argument("--reason", required=True, help="human evidence/action satisfying the approved gate")
+    resolve_gate.add_argument("--outcome", choices=["completed"], help="explicit immutable-contract completion outcome (required for bound v3 dispatch)")
     resolve_gate.set_defaults(func=cmd_resolve_gate)
     interrupted_recover = sub.add_parser(
         "recover-interrupted-run",
@@ -9450,9 +9907,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     self_upgrade_recover.add_argument("--confirm", required=True, help="must be RECOVER")
     self_upgrade_recover.set_defaults(func=cmd_recover_self_upgrade)
-    recover = sub.add_parser("recover-validation-block")
-    recover.add_argument("plan_hash")
-    recover.set_defaults(func=cmd_recover_validation_block)
+    pending_recover = sub.add_parser(
+        "recover-pending-provenance",
+        help="operator-confirmed refresh of exactly the stale current-step pending witnesses",
+    )
+    pending_recover.add_argument("plan_hash")
+    pending_recover.add_argument("--checkpoint", required=True, help="exact active recovery checkpoint ID")
+    pending_recover.add_argument("--step", required=True, type=int, help="exact active approved step number")
+    pending_recover.add_argument(
+        "--stale-path", action="append", required=True, metavar="PATH",
+        help="exact currently stale pending path to refresh; repeat for every stale witness",
+    )
+    pending_recover.add_argument(
+        "--confirm", required=True, choices=["RECOVER_PENDING_PROVENANCE"],
+        help="explicit operator confirmation token",
+    )
+    pending_recover.set_defaults(func=cmd_recover_pending_provenance)
+    recover_validation = sub.add_parser("recover-validation-block", help="requalify a validation-only blocked implementation")
+    recover_validation.add_argument("plan_hash")
+    recover_validation.add_argument("--outcome", choices=["completed"], help="explicit immutable-contract completion outcome (required for bound v3 dispatch)")
+    recover_validation.set_defaults(func=cmd_recover_validation_block)
     sub.add_parser("checkpoints", help="list local Git-backed recovery checkpoints").set_defaults(func=cmd_checkpoints)
     checkpoint_info = sub.add_parser("checkpoint-info", help="show one recovery checkpoint manifest")
     checkpoint_info.add_argument("checkpoint_id")

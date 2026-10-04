@@ -11,7 +11,6 @@ import json
 import re
 from typing import Any, Iterable, Mapping
 
-
 PLAN_MIN_STEPS_DEFAULT = 5
 PLAN_MAX_STEPS_DEFAULT = 10
 PLAN_MAX_STEPS_LIMIT = 20
@@ -21,7 +20,15 @@ REPOSITORY_MUTATION_SCOPE_FIELD = "repository_mutation_scope"
 REPOSITORY_MUTATION_SCOPE_MAX_PATHS = 64
 APPROVED_PLAN_V1 = "v1"
 APPROVED_PLAN_V2 = "v2"
+APPROVED_PLAN_V3 = "v3"
 APPROVED_PLAN_V2_SCHEMA = "zen_ralph_plan_v2"
+APPROVED_PLAN_V3_SCHEMA = "zen_ralph_plan_v3"
+OUTCOME_RESULT_CONTRACT_FIELD = "outcome_result_contract"
+OUTCOME_RESULT_CONTRACT_NAME = "OUTCOME_RESULT_SCHEMA"
+OUTCOME_RESULT_BINDING_SCHEMA = "zen_ralph_outcome_result_contract_binding_v1"
+# This protocol literal is intentionally duplicated here: core is a pure
+# standard-library policy boundary and must not import protocol modules.
+OUTCOME_COMPLETED = "completed"
 
 
 @dataclass(frozen=True)
@@ -156,6 +163,21 @@ def controller_inject_repository_authority(proposal: object, authority: object) 
     return {**proposal, REPOSITORY_AUTHORITY_FIELD: authority}
 
 
+def controller_inject_outcome_result_contract(proposal: object) -> dict[str, Any]:
+    """Derive the v3 outcome-contract commitment without accepting model input."""
+    if not isinstance(proposal, Mapping):
+        raise ValueError("model proposal must be an object")
+    if OUTCOME_RESULT_CONTRACT_FIELD in proposal:
+        raise ValueError("model proposal must not supply an outcome result contract")
+    if proposal.get("schema") != APPROVED_PLAN_V2_SCHEMA:
+        raise ValueError("model proposal must use the v2 proposal schema")
+    return {
+        **proposal,
+        "schema": APPROVED_PLAN_V3_SCHEMA,
+        OUTCOME_RESULT_CONTRACT_FIELD: OUTCOME_RESULT_CONTRACT_NAME,
+    }
+
+
 def normalize_repository_mutation_scope(scope: object) -> tuple[str, ...]:
     """Return one finite, canonical representation of exact repository paths."""
     if not isinstance(scope, list):
@@ -192,13 +214,21 @@ def validate_v2_repository_mutation_scope(plan: Mapping[str, Any]) -> tuple[str,
     return scope
 
 
+def plan_requires_repository_mutation_scope(plan: object) -> bool:
+    """Return whether this approved execution contract binds an exact path scope."""
+    return approved_plan_version(plan) in {APPROVED_PLAN_V2, APPROVED_PLAN_V3}
+
+
 def validate_complete_plan(plan: object, expected_hash: str | None = None) -> None:
     validate_plan(plan)
     assert isinstance(plan, Mapping)
     if plan.get(REPOSITORY_AUTHORITY_FIELD) not in REPOSITORY_AUTHORITIES:
         raise ValueError("plan is missing controller-injected repository authority")
-    if approved_plan_version(plan) == APPROVED_PLAN_V2:
+    version = approved_plan_version(plan)
+    if plan_requires_repository_mutation_scope(plan):
         validate_v2_repository_mutation_scope(plan)
+    if version == APPROVED_PLAN_V3 and plan.get(OUTCOME_RESULT_CONTRACT_FIELD) != OUTCOME_RESULT_CONTRACT_NAME:
+        raise ValueError("v3 plan has an unsupported outcome result contract")
     if expected_hash is not None and (not str(expected_hash).strip() or plan_hash(plan) != str(expected_hash).strip()):
         raise ValueError("approved plan hash does not match controller state")
 
@@ -217,6 +247,8 @@ def approved_plan_version(plan: object) -> str:
         return APPROVED_PLAN_V1
     if schema == APPROVED_PLAN_V2_SCHEMA:
         return APPROVED_PLAN_V2
+    if schema == APPROVED_PLAN_V3_SCHEMA:
+        return APPROVED_PLAN_V3
     raise ValueError("approved plan has an unsupported schema")
 
 
@@ -238,6 +270,8 @@ def dispatch_approved_plan(plan: object, expected_hash: str | None = None) -> st
             raise ValueError("plan is missing controller-injected repository authority")
         if expected_hash is not None and (not str(expected_hash).strip() or plan_hash(plan) != str(expected_hash).strip()):
             raise ValueError("approved plan hash does not match controller state")
+    elif version == APPROVED_PLAN_V3:
+        validate_complete_plan(plan, expected_hash)
     else:  # Defensive guard for future discriminator extensions.
         raise ValueError("approved plan has an unsupported execution contract")
     return version
@@ -245,7 +279,7 @@ def dispatch_approved_plan(plan: object, expected_hash: str | None = None) -> st
 
 def sandbox_for_dispatched_approved_plan(plan: object, version: str) -> str:
     """Select the sandbox after ``dispatch_approved_plan`` has validated it."""
-    if version not in {APPROVED_PLAN_V1, APPROVED_PLAN_V2}:
+    if version not in {APPROVED_PLAN_V1, APPROVED_PLAN_V2, APPROVED_PLAN_V3}:
         raise ValueError("approved plan has an unsupported execution contract")
     assert isinstance(plan, Mapping)
     return "read-only" if plan[REPOSITORY_AUTHORITY_FIELD] == "read-only" else "workspace-write"
@@ -253,6 +287,93 @@ def sandbox_for_dispatched_approved_plan(plan: object, version: str) -> str:
 
 def sandbox_for_approved_plan(plan: object, expected_hash: str | None = None) -> str:
     return sandbox_for_dispatched_approved_plan(plan, dispatch_approved_plan(plan, expected_hash))
+
+
+def _active_step_authority(plan: Mapping[str, Any], current_step: object) -> dict[str, Any]:
+    if isinstance(current_step, bool) or not isinstance(current_step, int):
+        raise ValueError("active step authority is invalid")
+    steps = plan.get("steps")
+    if not isinstance(steps, list) or not 1 <= current_step <= len(steps):
+        raise ValueError("active step authority is invalid")
+    step = steps[current_step - 1]
+    if not isinstance(step, Mapping) or step.get("id") != current_step:
+        raise ValueError("active step authority does not match the approved plan")
+    return {"id": current_step, "sha256": sha256_fingerprint(step)}
+
+
+def outcome_result_contract_bindings(
+    plan: object, expected_hash: str, approved_plan_artifact: object, recovery_checkpoint: object,
+    dispatch_version: str, contract_digest: object,
+) -> list[dict[str, Any]]:
+    """Create immutable per-step outcome-contract witnesses for a v3 approval."""
+    if dispatch_version != APPROVED_PLAN_V3 or dispatch_approved_plan(plan, expected_hash) != dispatch_version:
+        raise ValueError("outcome result contracts require a verified v3 dispatch")
+    if not isinstance(plan, Mapping) or plan.get(OUTCOME_RESULT_CONTRACT_FIELD) != OUTCOME_RESULT_CONTRACT_NAME:
+        raise ValueError("approved plan does not select the required outcome result contract")
+    if not isinstance(approved_plan_artifact, Mapping) or approved_plan_artifact.get("plan_hash") != expected_hash:
+        raise ValueError("outcome result contract artifact does not match the approved plan")
+    checkpoint = str(recovery_checkpoint or "")
+    digest = str(contract_digest or "")
+    if not checkpoint or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("outcome result contract evidence is malformed")
+    bindings: list[dict[str, Any]] = []
+    for step_number in range(1, len(plan["steps"]) + 1):
+        payload = {
+            "schema": OUTCOME_RESULT_BINDING_SCHEMA,
+            "plan_hash": expected_hash,
+            "approved_plan_artifact_sha256": sha256_fingerprint(approved_plan_artifact),
+            "recovery_checkpoint": checkpoint,
+            "dispatch_version": dispatch_version,
+            "active_step": _active_step_authority(plan, step_number),
+            "contract_name": OUTCOME_RESULT_CONTRACT_NAME,
+            "contract_sha256": digest,
+        }
+        bindings.append({**payload, "binding_sha256": sha256_fingerprint(payload)})
+    return bindings
+
+
+def select_outcome_result_contract(
+    plan: object, expected_hash: str, approved_plan_artifact: object, recovery_checkpoint: object,
+    dispatch_version: str, current_step: object, bindings: object, contract_digest: object,
+) -> str | None:
+    """Verify and select the only result contract usable by this dispatch."""
+    if dispatch_approved_plan(plan, expected_hash) != dispatch_version:
+        raise ValueError("result contract dispatch version is stale or invalid")
+    if dispatch_version in {APPROVED_PLAN_V1, APPROVED_PLAN_V2}:
+        if bindings is not None:
+            raise ValueError("legacy dispatch has substituted outcome result-contract evidence")
+        return None
+    if dispatch_version != APPROVED_PLAN_V3 or not isinstance(plan, Mapping):
+        raise ValueError("result contract dispatch version is unsupported")
+    if not isinstance(bindings, list) or len(bindings) != len(plan.get("steps") or []):
+        raise ValueError("outcome result-contract evidence is missing or stale")
+    expected = outcome_result_contract_bindings(
+        plan, expected_hash, approved_plan_artifact, recovery_checkpoint, dispatch_version, contract_digest,
+    )
+    if bindings != expected:
+        raise ValueError("outcome result-contract evidence is substituted, stale, or digest-mismatched")
+    active = _active_step_authority(plan, current_step)
+    record = bindings[active["id"] - 1]
+    if record["active_step"] != active:
+        raise ValueError("outcome result-contract active step authority is stale")
+    return OUTCOME_RESULT_CONTRACT_NAME
+
+
+def result_reports_explicit_completed_outcome(result: object, selected_contract: object) -> bool:
+    """Accept completion only from the immutable selected outcome contract.
+
+    Summaries, blockers, and successful controller gates can explain a result,
+    but cannot manufacture its completion evidence. A legacy/no-contract
+    dispatch is therefore never PASS-eligible.
+    """
+    return (
+        selected_contract == OUTCOME_RESULT_CONTRACT_NAME
+        and isinstance(result, Mapping)
+        and result.get("outcome") == OUTCOME_COMPLETED
+        and result.get("blocker_class") in {"none", "validation-only"}
+        and result.get("needs_human") is False
+        and (result.get("blocker_class") == "validation-only" or not result.get("blockers"))
+    )
 
 
 def is_protected_path(path: object, policy: ProjectPathPolicy) -> bool:

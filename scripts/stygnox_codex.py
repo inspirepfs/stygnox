@@ -203,14 +203,16 @@ def run_codex(
     normalize_failure: Callable[[str], str], clip: Callable[[str, int], str],
     live_write: Callable[[str, str], None], selected_model: str | None = None,
     selected_effort: str | None = None, context: str = "Codex",
+    result_contract: dict | None = None,
     temporary_directory: Callable[..., tempfile.TemporaryDirectory] = tempfile.TemporaryDirectory,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict:
-    validate_output_schema(schema)
+    output_schema = schema if result_contract is None else result_contract
+    validate_output_schema(output_schema)
     with temporary_directory(prefix="ralph-lite-") as temp_dir:
         schema_path = Path(temp_dir) / "schema.json"
         output_path = Path(temp_dir) / "result.json"
-        schema_path.write_text(json.dumps(schema), encoding="utf-8")
+        schema_path.write_text(json.dumps(output_schema), encoding="utf-8")
         command = [*prefix, "exec"]
         if selected_model:
             command += ["--model", selected_model]

@@ -296,6 +296,19 @@ PLAN_V2_SCHEMA = {
     "additionalProperties": False,
 }
 
+# v3 is controller-authored after a model has supplied a v2-shaped proposal.
+# The model is intentionally never offered the result-contract selector.
+PLAN_V3_SCHEMA = {
+    "type": "object",
+    "properties": {
+        **PLAN_V2_SCHEMA["properties"],
+        "schema": {"type": "string", "enum": ["zen_ralph_plan_v3"]},
+        "outcome_result_contract": {"type": "string", "enum": ["OUTCOME_RESULT_SCHEMA"]},
+    },
+    "required": [*PLAN_V2_SCHEMA["required"], "outcome_result_contract"],
+    "additionalProperties": False,
+}
+
 RESULT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -320,6 +333,43 @@ RESULT_SCHEMA = {
     "additionalProperties": False,
 }
 
+# The unversioned result shape is a bootstrap compatibility contract.  Keep
+# ``RESULT_SCHEMA`` as its public legacy spelling so restored controllers can
+# continue to call newer provider support without an outcome field.
+LEGACY_RESULT_SCHEMA = RESULT_SCHEMA
+
+# Newer callers may opt into a distinct strict result shape.  This deliberately
+# does not alter the legacy contract above: selecting or binding this schema is
+# controller work performed by a later stage.
+OUTCOME_COMPLETED = "completed"
+OUTCOME_INCOMPLETE = "incomplete"
+OUTCOME_BLOCKED = "blocked"
+OUTCOME_CONTINUATION = "continuation"
+OUTCOME_FAILED = "failed"
+OUTCOME_UNMET_PREREQUISITE = "unmet_prerequisite"
+OUTCOME_SKIPPED = "skipped"
+OUTCOME_IMPOSSIBLE = "impossible"
+OUTCOME_FAIL_CLOSED = "fail_closed"
+
+OUTCOME_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        **LEGACY_RESULT_SCHEMA["properties"],
+        "outcome": {
+            "type": "string",
+            "enum": [
+                OUTCOME_COMPLETED, OUTCOME_INCOMPLETE, OUTCOME_BLOCKED,
+                OUTCOME_CONTINUATION, OUTCOME_FAILED, OUTCOME_UNMET_PREREQUISITE,
+                OUTCOME_SKIPPED, OUTCOME_IMPOSSIBLE, OUTCOME_FAIL_CLOSED,
+            ],
+        },
+    },
+    "required": [*LEGACY_RESULT_SCHEMA["required"], "outcome"],
+    "additionalProperties": False,
+}
+
+OUTCOME_RESULT_CONTRACT_NAME = "OUTCOME_RESULT_SCHEMA"
+
 
 _V1_CONTRACTS = MappingProxyType({
     "AgentWorkOrder": AgentWorkOrder,
@@ -335,6 +385,7 @@ _V1_CONTRACTS = MappingProxyType({
     "KnowledgeRef": KnowledgeRef,
     "PLAN_SCHEMA": PLAN_SCHEMA,
     "RESULT_SCHEMA": RESULT_SCHEMA,
+    "OUTCOME_RESULT_SCHEMA": OUTCOME_RESULT_SCHEMA,
 })
 PROTOCOL_REGISTRY = MappingProxyType({
     (STYGNOX_PROTOCOL_FAMILY, STYGNOX_PROTOCOL_MAJOR_VERSION): _V1_CONTRACTS,
@@ -354,11 +405,19 @@ def resolve_contract(name: str, major_version: int = STYGNOX_PROTOCOL_MAJOR_VERS
         raise LookupError(f"unknown Stygnox v{major_version} contract: {name}") from error
 
 
+def result_contract_digest(name: str) -> str:
+    """Return the canonical digest for a registered structured-result contract."""
+    contract = resolve_contract(name)
+    if not isinstance(contract, dict):
+        raise TypeError(f"registered contract is not a JSON schema: {name!r}")
+    return sha256_fingerprint(contract)
+
+
 __all__ = [
     "AgentAdapter", "AgentWorkOrder", "Capability", "CanonicalValue", "EffectIntent",
-    "Evaluator", "EvidenceBundle", "ExecutionReceipt", "KnowledgeRef", "PLAN_SCHEMA", "PLAN_V2_SCHEMA",
-    "PROTOCOL_REGISTRY", "RESULT_SCHEMA", "STYGNOX_PROTOCOL_FAMILY",
+    "Evaluator", "EvidenceBundle", "ExecutionReceipt", "KnowledgeRef", "LEGACY_RESULT_SCHEMA", "OUTCOME_BLOCKED", "OUTCOME_COMPLETED", "OUTCOME_CONTINUATION", "OUTCOME_FAIL_CLOSED", "OUTCOME_FAILED", "OUTCOME_IMPOSSIBLE", "OUTCOME_INCOMPLETE", "OUTCOME_RESULT_SCHEMA", "OUTCOME_SKIPPED", "OUTCOME_UNMET_PREREQUISITE",
+    "OUTCOME_RESULT_CONTRACT_NAME", "PLAN_SCHEMA", "PLAN_V2_SCHEMA", "PLAN_V3_SCHEMA", "PROTOCOL_REGISTRY", "RESULT_SCHEMA", "STYGNOX_PROTOCOL_FAMILY",
     "STYGNOX_PROTOCOL_MAJOR_VERSION", "SemanticResult", "StateFingerprint", "Task",
-    "TaskBackend", "WorkOrder", "canonical_data", "canonical_json_bytes", "resolve_contract",
+    "TaskBackend", "WorkOrder", "canonical_data", "canonical_json_bytes", "resolve_contract", "result_contract_digest",
     "sha256_fingerprint",
 ]
