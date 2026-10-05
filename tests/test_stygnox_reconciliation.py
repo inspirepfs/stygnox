@@ -75,7 +75,7 @@ def active_reviewed(repo: Path, external: Path) -> None:
         controller.activate_controller(repo, "Operator One", "ACTIVATE")
 
 
-def planning_result(test_policy: str = "modify") -> dict:
+def planning_result(test_policy: str = "modify", scope: list[str] | None = None) -> dict:
     return {
         "provider": "codex",
         "model": "gpt-test",
@@ -90,6 +90,7 @@ def planning_result(test_policy: str = "modify") -> dict:
                 "test_change_policy": test_policy,
             }],
             "files_inspected": ["README.md"],
+            "repository_mutation_scope": scope or ["README.md"],
         },
         "metrics": {
             "commands_executed": 1,
@@ -103,7 +104,7 @@ def planning_result(test_policy: str = "modify") -> dict:
     }
 
 
-def approve(repo: Path, *, test_policy: str = "modify") -> dict:
+def approve(repo: Path, *, test_policy: str = "modify", scope: list[str] | None = None) -> dict:
     preview = planning.build_proposal_preview(
         repo,
         "Operator One",
@@ -112,7 +113,7 @@ def approve(repo: Path, *, test_policy: str = "modify") -> dict:
         min_steps=1,
         max_steps=1,
     )
-    with mock.patch.object(provider_codex, "execute_structured", return_value=planning_result(test_policy)):
+    with mock.patch.object(provider_codex, "execute_structured", return_value=planning_result(test_policy, scope)):
         candidate = planning.propose_plan(
             repo,
             "Operator One",
@@ -169,7 +170,7 @@ class StygnoxReconciliationTests(TestCase):
         self.assertNotIn("path", parsed.__dict__)
         self.assertEqual("reconcile", cli.build_parser().parse_args(["reconcile"]).command)
 
-    def test_adopts_tracked_and_untracked_without_mutating_worktree_and_operator_view_changes(self) -> None:
+    def test_adopts_only_in_scope_candidates_without_mutating_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             repo = root / "repo"
@@ -180,16 +181,19 @@ class StygnoxReconciliationTests(TestCase):
             (repo / "retained.py").write_text("retained untracked content\n", encoding="utf-8")
             before = adoption.capture_baseline(repo).public()["sha256"]
             tracked = apply(repo, approved["plan_hash"], "README.md", "adopt")
-            untracked = apply(repo, approved["plan_hash"], "retained.py", "adopt")
+            with self.assertRaisesRegex(reconciliation.ReconciliationError, "outside the approved repository scope"):
+                reconciliation.build_action_preview(repo, "Operator One", approved["plan_hash"], "retained.py", "adopt")
+            untracked = apply(repo, approved["plan_hash"], "retained.py", "leave-outside", reason="external ownership")
             after = adoption.capture_baseline(repo).public()["sha256"]
             state = planning.plan_status(repo)["plan"]
             view = operator.classify_changes(repo)
             snapshot = reconciliation.reconciliation_snapshot(repo, "Operator One", approved["plan_hash"])
             self.assertEqual(before, after)
             self.assertEqual(reconciliation.ADOPTED, tracked["result"])
-            self.assertEqual(reconciliation.ADOPTED, untracked["result"])
-            self.assertEqual(["README.md", "retained.py"], state["carry_forward_adopted_paths"])
-            self.assertEqual({"README.md", "retained.py"}, set(view["categories"]["plan_carry_forward"]["paths"]))
+            self.assertEqual(reconciliation.LEFT_OUTSIDE, untracked["result"])
+            self.assertEqual(["README.md"], state["carry_forward_adopted_paths"])
+            self.assertEqual({"README.md"}, set(view["categories"]["plan_carry_forward"]["paths"]))
+            self.assertEqual(["retained.py"], state["carry_forward_outside_paths"])
             self.assertEqual(0, snapshot["pending_count"])
             self.assertFalse(snapshot["requires_human_decision"])
             with self.assertRaisesRegex(reconciliation.ReconciliationError, "already has a durable disposition"):
@@ -226,15 +230,15 @@ class StygnoxReconciliationTests(TestCase):
             init_repo(repo)
             active_reviewed(repo, root / "external")
             approved = approve(repo)
-            (repo / "candidate.txt").write_text("v1\n", encoding="utf-8")
-            preview = reconciliation.build_action_preview(repo, "Operator One", approved["plan_hash"], "candidate.txt", "adopt")
-            (repo / "candidate.txt").write_text("v2\n", encoding="utf-8")
+            (repo / "README.md").write_text("v1\n", encoding="utf-8")
+            preview = reconciliation.build_action_preview(repo, "Operator One", approved["plan_hash"], "README.md", "adopt")
+            (repo / "README.md").write_text("v2\n", encoding="utf-8")
             with self.assertRaisesRegex(reconciliation.ReconciliationError, "preview is stale"):
-                reconciliation.apply_action(repo, "Operator One", approved["plan_hash"], "candidate.txt", "adopt", preview["preview_sha256"], "ADOPT")
-            preview = reconciliation.build_action_preview(repo, "Operator One", approved["plan_hash"], "candidate.txt", "adopt")
+                reconciliation.apply_action(repo, "Operator One", approved["plan_hash"], "README.md", "adopt", preview["preview_sha256"], "ADOPT")
+            preview = reconciliation.build_action_preview(repo, "Operator One", approved["plan_hash"], "README.md", "adopt")
             controller.deactivate_controller(repo, "Operator One", "DEACTIVATE")
             with self.assertRaisesRegex(reconciliation.ReconciliationError, "active installed controller"):
-                reconciliation.apply_action(repo, "Operator One", approved["plan_hash"], "candidate.txt", "adopt", preview["preview_sha256"], "ADOPT")
+                reconciliation.apply_action(repo, "Operator One", approved["plan_hash"], "README.md", "adopt", preview["preview_sha256"], "ADOPT")
 
     def test_test_policy_is_rechecked_for_adoption_but_not_nonabsorption(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -242,7 +246,7 @@ class StygnoxReconciliationTests(TestCase):
             repo = root / "repo"
             init_repo(repo, existing_test=True)
             active_reviewed(repo, root / "external")
-            approved = approve(repo, test_policy="add-only")
+            approved = approve(repo, test_policy="add-only", scope=["tests/test_existing.py", "tests/test_new.py"])
             (repo / "tests" / "test_existing.py").write_text("assert False\n", encoding="utf-8")
             (repo / "tests" / "test_new.py").write_text("assert True\n", encoding="utf-8")
             with self.assertRaisesRegex(reconciliation.ReconciliationError, "add-only cannot adopt pre-existing"):
@@ -257,7 +261,7 @@ class StygnoxReconciliationTests(TestCase):
             repo = root / "repo"
             init_repo(repo)
             active_reviewed(repo, root / "external")
-            approved = approve(repo, test_policy="none")
+            approved = approve(repo, test_policy="none", scope=["tests/test_new.py"])
             (repo / "tests").mkdir()
             (repo / "tests" / "test_new.py").write_text("assert True\n", encoding="utf-8")
             with self.assertRaisesRegex(reconciliation.ReconciliationError, "test policy none"):
@@ -269,7 +273,7 @@ class StygnoxReconciliationTests(TestCase):
             repo = root / "repo"
             init_repo(repo, stygnox_self=True)
             active_reviewed(repo, root / "external")
-            approved = approve(repo)
+            approved = approve(repo, scope=["src/stygnox/product.py"])
             target = repo / "src" / "stygnox" / "product.py"
             target.write_text("NAME = 'changed'\n", encoding="utf-8")
             with self.assertRaisesRegex(reconciliation.ReconciliationError, "CAP-011"):
@@ -283,7 +287,7 @@ class StygnoxReconciliationTests(TestCase):
             repo = root / "repo"
             init_repo(repo)
             active_reviewed(repo, root / "external")
-            approved = approve(repo)
+            approved = approve(repo, scope=["candidate.txt"])
             (repo / "candidate.txt").write_text("candidate\n", encoding="utf-8")
             apply(repo, approved["plan_hash"], "candidate.txt", "adopt")
             state = planning._record(repo)
@@ -302,7 +306,7 @@ class StygnoxReconciliationTests(TestCase):
             repo = root / "repo"
             init_repo(repo)
             active_reviewed(repo, root / "external")
-            approved = approve(repo)
+            approved = approve(repo, scope=["candidate.txt"])
             (repo / "candidate.txt").write_text("candidate\n", encoding="utf-8")
             inspected = operator.dispatch_action(repo, "reconciliation.inspect", {"operator": "Operator One", "plan_hash": approved["plan_hash"]})
             previewed = operator.dispatch_action(repo, "reconciliation.preview", {

@@ -194,6 +194,8 @@ def build_schedule_preview(project: Path, operator: str) -> dict[str, Any]:
         "plan_record_sha256": context["plan_record_sha256"],
         "current_step": context["current_step"],
         "step_authority_baseline_sha256": context["step_authority_baseline_sha256"],
+        "repository_mutation_scope": list(context["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": context["repository_mutation_scope_sha256"],
         "transaction_id": turn["transaction_id"],
         "controller_record_sha256": turn["controller_record_sha256"],
         "tracked_config_sha256": turn["tracked_config_sha256"],
@@ -238,6 +240,8 @@ def run_schedule(project: Path, operator: str, preview_sha256: str, confirmation
         "plan_hash": preview["plan_hash"],
         "starting_plan_record_sha256": preview["plan_record_sha256"],
         "current_step": preview["current_step"],
+        "repository_mutation_scope": list(preview["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": preview["repository_mutation_scope_sha256"],
         "transaction_id": preview["transaction_id"],
         "controller_record_sha256": preview["controller_record_sha256"],
         "tracked_config_sha256": preview["tracked_config_sha256"],
@@ -258,7 +262,12 @@ def run_schedule(project: Path, operator: str, preview_sha256: str, confirmation
                 context = planning.approved_step_context(root, operator)
             except planning.PlanningError as exc:
                 raise SchedulerError(str(exc)) from exc
-            if context is None or context["plan_hash"] != preview["plan_hash"]:
+            if (
+                context is None
+                or context["plan_hash"] != preview["plan_hash"]
+                or context["repository_mutation_scope"] != preview["repository_mutation_scope"]
+                or context["repository_mutation_scope_sha256"] != preview["repository_mutation_scope_sha256"]
+            ):
                 raise SchedulerError("approved plan identity changed during scheduler execution")
             step = context["step"]
             turn = controller.build_run_preview(
@@ -379,6 +388,9 @@ def _recovery_authority(root: Path, operator: str, state: Mapping[str, Any]) -> 
         raise SchedulerError("interrupted recovery requires the same approved plan authority")
     if plan_state.get("plan_hash") != state.get("plan_hash") or int(plan_state.get("current_step") or 0) != int(state.get("current_step") or 0):
         raise SchedulerError("plan/step changed after scheduler interruption")
+    plan = planning._validate_plan(plan_state.get("plan"))
+    if state.get("repository_mutation_scope") != plan["repository_mutation_scope"] or state.get("repository_mutation_scope_sha256") != plan["repository_mutation_scope_sha256"]:
+        raise SchedulerError("approved repository scope changed after scheduler interruption")
     if name != state.get("operator") or tx.get("transaction_id") != state.get("transaction_id"):
         raise SchedulerError("transaction/operator authority changed after scheduler interruption")
     if active.get("record_sha256") != state.get("controller_record_sha256"):
@@ -402,6 +414,7 @@ def build_recovery_preview(project: Path, operator: str, pending_paths: Iterable
         raise SchedulerError("interrupted scheduler state lacks an exact turn preview")
     receipt = _controller_receipt(root, turn_preview)
     declared = _normalize_paths(pending_paths)
+    scope = set(plan_state["repository_mutation_scope"])
     if receipt is not None:
         if declared:
             raise SchedulerError("completed interrupted turn recovery requires no pending-path declaration")
@@ -415,6 +428,8 @@ def build_recovery_preview(project: Path, operator: str, pending_paths: Iterable
             "schedule_preview_sha256": state["schedule_preview_sha256"],
             "plan_hash": state["plan_hash"],
             "current_step": state["current_step"],
+            "repository_mutation_scope": list(state["repository_mutation_scope"]),
+            "repository_mutation_scope_sha256": state["repository_mutation_scope_sha256"],
             "turn_preview_sha256": turn_preview,
             "controller_result_sha256": receipt["record_sha256"],
             "pending_paths": [],
@@ -431,6 +446,9 @@ def build_recovery_preview(project: Path, operator: str, pending_paths: Iterable
     changed = changed_manifest_paths(before_manifest, current_manifest)
     if declared != changed:
         raise SchedulerError(f"interrupted recovery requires exact pending paths: declared={declared} expected={changed}")
+    outside_scope = sorted(set(declared) - scope)
+    if outside_scope:
+        raise SchedulerError(f"interrupted recovery refuses paths outside approved repository scope: {outside_scope}")
     plan = planning._validate_plan(plan_state.get("plan"))
     policy_error = _policy_forbids_pending_tests(plan, int(state["current_step"]), before_manifest, declared)
     if policy_error:
@@ -461,6 +479,8 @@ def build_recovery_preview(project: Path, operator: str, pending_paths: Iterable
         "schedule_preview_sha256": state["schedule_preview_sha256"],
         "plan_hash": state["plan_hash"],
         "current_step": state["current_step"],
+        "repository_mutation_scope": list(state["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": state["repository_mutation_scope_sha256"],
         "turn_preview_sha256": turn_preview,
         "before_baseline_sha256": state["turn_before_baseline_sha256"],
         "pending_paths": declared,

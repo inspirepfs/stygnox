@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
-import runpy
-import sys
 from pathlib import Path
-from types import SimpleNamespace
+import runpy
+import tomllib
 import unittest
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,29 +21,20 @@ def load_entrypoint(name: str):
 
 
 class StygnoxEntrypointTests(unittest.TestCase):
-    def test_cli_loads_and_delegates_with_process_arguments_unchanged(self):
+    def test_installed_console_script_is_the_only_supported_command_identity(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual("stygnox.cli:main", project["project"]["scripts"]["stygnox"])
+
+    def test_retired_wrapper_never_delegates_or_mutates_process_arguments(self) -> None:
         entrypoint = load_entrypoint("stygnox_cli.py")
-        delegate = mock.Mock(return_value=17)
-        observed_argv: list[str] = []
-        delegate.side_effect = lambda: observed_argv.extend(sys.argv) or 17
+        arguments = ["controller", "status", "--project", "/external/project"]
+        with self.assertRaisesRegex(SystemExit, "will not execute commands"):
+            entrypoint.main(arguments)
+        self.assertEqual(["controller", "status", "--project", "/external/project"], arguments)
 
-        with mock.patch.dict(sys.modules, {"ralph": SimpleNamespace(main=delegate)}), mock.patch.object(
-            sys, "argv", ["stygnox_cli.py", "status", "--json"]
-        ):
-            self.assertEqual(17, entrypoint.main())
-
-        delegate.assert_called_once_with()
-        self.assertEqual(["stygnox_cli.py", "status", "--json"], observed_argv)
-
-    def test_script_execution_uses_delegate_exit_code(self):
-        delegate = mock.Mock(return_value=23)
-
-        with mock.patch.dict(sys.modules, {"ralph": SimpleNamespace(main=delegate)}):
-            with self.assertRaises(SystemExit) as raised:
-                runpy.run_path(str(SCRIPTS / "stygnox_cli.py"), run_name="__main__")
-
-        self.assertEqual(23, raised.exception.code)
-        delegate.assert_called_once_with()
+    def test_script_execution_emits_only_migration_instruction(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "install Stygnox independently"):
+            runpy.run_path(str(SCRIPTS / "stygnox_cli.py"), run_name="__main__")
 
 
 if __name__ == "__main__":

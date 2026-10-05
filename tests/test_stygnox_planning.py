@@ -66,7 +66,7 @@ def active_reviewed(repo: Path, external: Path) -> adoption.CommandIdentity:
     return resolved
 
 
-def proposal_payload(count: int) -> dict:
+def proposal_payload(count: int, *, repository_authority: str = "write") -> dict:
     return {
         "steps": [
             {
@@ -79,16 +79,17 @@ def proposal_payload(count: int) -> dict:
             for index in range(1, count + 1)
         ],
         "files_inspected": ["src/example.py", "tests/test_example.py"],
+        "repository_mutation_scope": [] if repository_authority == "read-only" else ["src/example.py"],
     }
 
 
-def provider_result(count: int) -> dict:
+def provider_result(count: int, *, repository_authority: str = "write") -> dict:
     return {
         "provider": "codex",
         "model": "gpt-test",
         "effort": "high",
         "sandbox": "read-only",
-        "payload": proposal_payload(count),
+        "payload": proposal_payload(count, repository_authority=repository_authority),
         "metrics": {
             "commands_executed": 2,
             "input_tokens": 100,
@@ -166,6 +167,9 @@ class StygnoxPlanningTests(TestCase):
         self.assertFalse(state["execution_authority_granted"])
         self.assertEqual("Restore planning", state["plan"]["goal"])
         self.assertEqual("write", state["plan"]["repository_authority"])
+        self.assertEqual(["src/example.py"], state["repository_mutation_scope"])
+        self.assertEqual(state["repository_mutation_scope"], state["plan"]["repository_mutation_scope"])
+        self.assertEqual(state["repository_mutation_scope_sha256"], state["plan"]["repository_mutation_scope_sha256"])
         self.assertEqual([1, 2, 3], [step["id"] for step in state["plan"]["steps"]])
         self.assertEqual(planning._plan_hash(state["plan"]), state["plan_hash"])
         self.assertEqual(1, len(rows))
@@ -196,6 +200,29 @@ class StygnoxPlanningTests(TestCase):
         self.assertEqual(approved["proposal_baseline_sha256"], approved["approval_baseline_sha256"])
         self.assertEqual(approved["approval_baseline_sha256"], approved["transaction_recovery_baseline_sha256"])
         self.assertEqual(approved["approval_baseline_sha256"], approved["approval_repository_evidence"]["sha256"])
+        self.assertEqual(["src/example.py"], approved["repository_mutation_scope"])
+
+    def test_scope_admission_and_runtime_record_evidence_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            init_repo(repo)
+            active_reviewed(repo, root / "external")
+            preview = planning.build_proposal_preview(repo, "Operator One", "Scope proof", "write", min_steps=1, max_steps=1)
+            malformed = provider_result(1)
+            malformed["payload"]["repository_mutation_scope"] = ["src/example.py", "src/example.py"]
+            with mock.patch.object(provider_codex, "execute_structured", return_value=malformed):
+                with self.assertRaisesRegex(planning.PlanningError, "sorted and duplicate-free"):
+                    planning.propose_plan(repo, "Operator One", "Scope proof", "write", preview["preview_sha256"], "PROPOSE", min_steps=1, max_steps=1)
+
+            preview = planning.build_proposal_preview(repo, "Operator One", "Scope proof", "write", min_steps=1, max_steps=1)
+            with mock.patch.object(provider_codex, "execute_structured", return_value=provider_result(1)):
+                candidate = planning.propose_plan(repo, "Operator One", "Scope proof", "write", preview["preview_sha256"], "PROPOSE", min_steps=1, max_steps=1)
+            raw = dict(candidate)
+            raw["repository_mutation_scope"] = []
+            planning._write(repo, raw)
+            with self.assertRaisesRegex(planning.PlanningError, "scope evidence"):
+                planning.plan_status(repo)
 
     def test_rejection_is_durable_and_grants_no_execution_authority(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -204,7 +231,7 @@ class StygnoxPlanningTests(TestCase):
             init_repo(repo)
             active_reviewed(repo, root / "external")
             preview = planning.build_proposal_preview(repo, "Operator One", "Reject me", "read-only", min_steps=1, max_steps=2)
-            with mock.patch.object(provider_codex, "execute_structured", return_value=provider_result(1)):
+            with mock.patch.object(provider_codex, "execute_structured", return_value=provider_result(1, repository_authority="read-only")):
                 candidate = planning.propose_plan(
                     repo, "Operator One", "Reject me", "read-only", preview["preview_sha256"], "PROPOSE", min_steps=1, max_steps=2
                 )

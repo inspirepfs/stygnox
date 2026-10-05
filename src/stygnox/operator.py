@@ -103,6 +103,23 @@ def _controller_receipts(root: Path) -> list[dict[str, Any]]:
     return output
 
 
+def _controller_delta_evidence(root: Path) -> dict[str, Any] | None:
+    """Project only receipt-bound scope/delta evidence; never classify or mutate it."""
+    for receipt in reversed(_controller_receipts(root)):
+        binding = receipt.get("plan_binding") if isinstance(receipt.get("plan_binding"), Mapping) else None
+        delta = receipt.get("actual_delta") if isinstance(receipt.get("actual_delta"), Mapping) else None
+        if binding is not None and delta is not None:
+            return {
+                "record_sha256": receipt.get("record_sha256"),
+                "plan_hash": binding.get("plan_hash"),
+                "current_step": binding.get("current_step"),
+                "repository_mutation_scope": binding.get("repository_mutation_scope"),
+                "repository_mutation_scope_sha256": binding.get("repository_mutation_scope_sha256"),
+                "actual_delta": delta,
+            }
+    return None
+
+
 def _handoff_native_paths(handoff: Mapping[str, Any] | None) -> set[str]:
     paths: set[str] = set()
     if not isinstance(handoff, Mapping):
@@ -226,6 +243,7 @@ def operator_snapshot(project: Path, *, server_pid: int | None = None) -> dict[s
         "adoption": handoff,
         "transaction": tx,
         "controller": ctl,
+        "controller_delta_evidence": _controller_delta_evidence(root),
         "execution_policy": policy,
         "current_baseline": current,
         "attribution": attribution,

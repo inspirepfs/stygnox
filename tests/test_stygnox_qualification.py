@@ -82,7 +82,15 @@ def plan_payload(steps: int, *, repository_authority: str = "write") -> dict:
         "model": "gpt-test",
         "effort": "high",
         "sandbox": "read-only",
-        "payload": {"steps": rows, "files_inspected": ["README.md"]},
+        "payload": {
+            "steps": rows,
+            "files_inspected": ["README.md"],
+            # These tests simulate only the named, repository-relative write
+            # paths below; every simulated execution remains scope-bound.
+            "repository_mutation_scope": [] if repository_authority == "read-only" else [
+                "README.md", "src/fail.txt", "src/final.txt", "src/one.txt", "src/work.txt",
+            ],
+        },
         "metrics": {
             "commands_executed": 1, "input_tokens": 10, "cached_input_tokens": 5,
             "cache_write_input_tokens": 0, "output_tokens": 5, "reasoning_output_tokens": 1,
@@ -195,6 +203,14 @@ class StygnoxQualificationTests(TestCase):
             final = state["final_qualification"]
             self.assertEqual("PASS", final["state"])
             self.assertEqual(["src/final.txt"], final["plan_owned_paths"])
+            # Qualification accepts a strict subset of the immutable scope;
+            # unused approved paths must never be treated as required writes.
+            self.assertGreater(len(approved["repository_mutation_scope"]), len(final["plan_owned_paths"]))
+            self.assertEqual(["src/final.txt"], final["accepted_controller_attribution"]["accepted_controller_paths"])
+            self.assertEqual(
+                final["repository_mutation_scope_sha256"],
+                final["accepted_controller_attribution"]["repository_mutation_scope_sha256"],
+            )
             self.assertRegex(final["qualified_delta_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(adoption.capture_baseline(repo).public()["sha256"], final["repository_baseline_sha256"])
             report = qualification.completion_report(repo, approved["plan_hash"])
@@ -244,7 +260,7 @@ class StygnoxQualificationTests(TestCase):
             with self.assertRaisesRegex(qualification.QualificationError, "unresolved repository ownership|stale"):
                 qualification.run_qualification(repo, "Operator One", approved["plan_hash"], preview["preview_sha256"], "QUALIFY")
 
-    def test_requalification_allows_only_previously_qualified_path_set(self) -> None:
+    def test_requalification_rejects_current_checkpoint_fingerprint_drift(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             repo = root / "repo"
@@ -254,13 +270,7 @@ class StygnoxQualificationTests(TestCase):
             execute_step(repo, approved, filename="src/final.txt", content="final v1\n")
             qualify(repo, approved["plan_hash"])
             (repo / "src" / "final.txt").write_text("final v2\n", encoding="utf-8")
-            preview = qualification.build_requalify_preview(repo, "Operator One", approved["plan_hash"])
-            result = qualification.run_qualification(repo, "Operator One", approved["plan_hash"], preview["preview_sha256"], "REQUALIFY", requalify=True)
-            self.assertEqual("REQUALIFIED_READY_TO_COMMIT", result["result"])
-            first = planning.plan_status(repo)["plan"]["final_qualification"]["qualified_delta_sha256"]
-            self.assertRegex(first, r"^[0-9a-f]{64}$")
-            (repo / "new-unqualified.txt").write_text("new\n", encoding="utf-8")
-            with self.assertRaises(qualification.QualificationError):
+            with self.assertRaisesRegex(qualification.QualificationError, "current checkpoint-relative manifest"):
                 qualification.build_requalify_preview(repo, "Operator One", approved["plan_hash"])
 
     def test_read_only_plan_finishes_read_only_complete(self) -> None:

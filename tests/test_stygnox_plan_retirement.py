@@ -83,20 +83,20 @@ def active_reviewed(repo: Path, external: Path) -> None:
         controller.activate_controller(repo, "Operator One", "ACTIVATE")
 
 
-def plan_result(goal: str = "Retirement plan") -> dict:
+def plan_result(goal: str = "Retirement plan", repository_mutation_scope: list[str] | None = None) -> dict:
     return {
         "provider": "codex", "model": "gpt-test", "effort": "high", "sandbox": "read-only",
         "payload": {"steps": [{
             "id": 1, "title": "Implement", "objective": "Implement exact retirement fixture",
             "acceptance": ["Retirement fixture is complete"], "test_change_policy": "modify",
-        }], "files_inspected": ["app.py"]},
+        }], "files_inspected": ["app.py"], "repository_mutation_scope": repository_mutation_scope or ["app.py"]},
         "metrics": {"commands_executed": 1, "input_tokens": 10, "cached_input_tokens": 5, "cache_write_input_tokens": 0, "output_tokens": 5, "reasoning_output_tokens": 1, "codex_seconds": 0.1},
     }
 
 
-def approve(repo: Path, *, goal: str = "Retirement plan", from_retirement: str | None = None) -> dict:
+def approve(repo: Path, *, goal: str = "Retirement plan", from_retirement: str | None = None, repository_mutation_scope: list[str] | None = None) -> dict:
     preview = planning.build_proposal_preview(repo, "Operator One", goal, "write", min_steps=1, max_steps=1, from_retirement=from_retirement)
-    with mock.patch.object(provider_codex, "execute_structured", return_value=plan_result(goal)):
+    with mock.patch.object(provider_codex, "execute_structured", return_value=plan_result(goal, repository_mutation_scope)):
         candidate = planning.propose_plan(repo, "Operator One", goal, "write", preview["preview_sha256"], "PROPOSE", min_steps=1, max_steps=1, from_retirement=from_retirement)
     return planning.approve_plan(repo, "Operator One", candidate["plan_hash"], "APPROVE")
 
@@ -142,7 +142,7 @@ class StygnoxPlanRetirementTests(TestCase):
             git(repo, "add", "residue.py")
             (repo / "operator.txt").write_text("untracked approval residue\n", encoding="utf-8")
             active_reviewed(repo, root / "external")
-            approved = approve(repo)
+            approved = approve(repo, repository_mutation_scope=["app.py", "created.py", "deleted.py"])
             state = planning.plan_status(repo)["plan"]
             self.assertEqual(retirement.APPROVAL_SNAPSHOT_SCHEMA, state["approval_rollback_snapshot"]["schema"])
 
@@ -176,7 +176,7 @@ class StygnoxPlanRetirementTests(TestCase):
 
     def test_carry_forward_is_non_mutating_and_replacement_must_consume_latest_retirement(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td); repo = root / "repo"; init_repo(repo); active_reviewed(repo, root / "external"); approved = approve(repo)
+            root = Path(td); repo = root / "repo"; init_repo(repo); active_reviewed(repo, root / "external"); approved = approve(repo, repository_mutation_scope=["retained.py"])
             run_mutating_turn(repo, approved, lambda: (repo / "retained.py").write_text("retained\n", encoding="utf-8"))
             before = adoption.capture_baseline(repo).public()["sha256"]
             result = retire(repo, approved["plan_hash"], "carry-forward", "replacement required")
@@ -191,7 +191,7 @@ class StygnoxPlanRetirementTests(TestCase):
             preview = planning.build_proposal_preview(repo, "Operator One", "replacement", "write", min_steps=1, max_steps=1, from_retirement=record_id)
             self.assertEqual(record_id, preview["retirement_context"]["record_id"])
             self.assertEqual(["retained.py"], preview["retirement_context"]["preserved_paths"])
-            replacement = approve(repo, goal="replacement", from_retirement=record_id)
+            replacement = approve(repo, goal="replacement", from_retirement=record_id, repository_mutation_scope=["retained.py"])
             snapshot = reconciliation.reconciliation_snapshot(repo, "Operator One", replacement["plan_hash"])
             candidate = next(row for row in snapshot["candidates"] if row["path"] == "retained.py")
             self.assertEqual("retired-carry-forward", candidate["classification"])
@@ -202,12 +202,12 @@ class StygnoxPlanRetirementTests(TestCase):
 
     def test_replacement_adoption_refuses_content_changed_since_retirement(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td); repo = root / "repo"; init_repo(repo); active_reviewed(repo, root / "external"); approved = approve(repo)
+            root = Path(td); repo = root / "repo"; init_repo(repo); active_reviewed(repo, root / "external"); approved = approve(repo, repository_mutation_scope=["retained.py"])
             run_mutating_turn(repo, approved, lambda: (repo / "retained.py").write_text("retained\n", encoding="utf-8"))
             retire(repo, approved["plan_hash"], "carry-forward")
             idle = planning.plan_status(repo)["plan"]
             record_id = idle["retired_plans"][-1]["record_id"]
-            replacement = approve(repo, goal="replacement", from_retirement=record_id)
+            replacement = approve(repo, goal="replacement", from_retirement=record_id, repository_mutation_scope=["retained.py"])
             (repo / "retained.py").write_text("changed after retirement\n", encoding="utf-8")
             with self.assertRaisesRegex(reconciliation.ReconciliationError, "changed since retirement"):
                 reconciliation.build_action_preview(repo, "Operator One", replacement["plan_hash"], "retained.py", "adopt")
@@ -251,11 +251,11 @@ class StygnoxPlanRetirementTests(TestCase):
 
     def test_replacement_plan_rollback_restores_adopted_inherited_path_to_replacement_approval_state(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td); repo = root / "repo"; init_repo(repo); active_reviewed(repo, root / "external"); first = approve(repo)
+            root = Path(td); repo = root / "repo"; init_repo(repo); active_reviewed(repo, root / "external"); first = approve(repo, repository_mutation_scope=["retained.py"])
             run_mutating_turn(repo, first, lambda: (repo / "retained.py").write_text("retained\n", encoding="utf-8"))
             retire(repo, first["plan_hash"], "carry-forward")
             record_id = planning.plan_status(repo)["plan"]["retired_plans"][-1]["record_id"]
-            replacement = approve(repo, goal="replacement", from_retirement=record_id)
+            replacement = approve(repo, goal="replacement", from_retirement=record_id, repository_mutation_scope=["retained.py"])
             ap = reconciliation.build_action_preview(repo, "Operator One", replacement["plan_hash"], "retained.py", "adopt")
             reconciliation.apply_action(repo, "Operator One", replacement["plan_hash"], "retained.py", "adopt", ap["preview_sha256"], "ADOPT")
             run_mutating_turn(repo, replacement, lambda: (repo / "retained.py").write_text("replacement changed it\n", encoding="utf-8"))

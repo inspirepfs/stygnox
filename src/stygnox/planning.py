@@ -26,6 +26,8 @@ PLAN_RECORD = "plan.json"
 PLAN_SCHEMA = "stygnox_plan_state_v1"
 PLAN_PROPOSAL_PREVIEW_SCHEMA = "stygnox_plan_proposal_preview_v1"
 PLAN_REJECTION_SCHEMA = "stygnox_plan_rejection_v1"
+REPOSITORY_MUTATION_SCOPE_FIELD = "repository_mutation_scope"
+REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD = "repository_mutation_scope_sha256"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _AUTHORITIES = {"read-only", "write"}
 _TEST_POLICIES = {"none", "add-only", "modify"}
@@ -97,12 +99,38 @@ def _plan_hash(plan: Mapping[str, Any]) -> str:
     return _digest(plan)
 
 
+def _repository_mutation_scope(value: object, authority: object) -> list[str]:
+    """Validate immutable native write authority without inferring legacy scope."""
+    if not isinstance(value, list):
+        raise PlanningError("plan repository_mutation_scope must be an explicit array")
+    if authority == "read-only" and value != []:
+        raise PlanningError("read-only plans must use an explicit empty repository_mutation_scope")
+    if authority == "write" and not value:
+        raise PlanningError("write plans require a non-empty repository_mutation_scope")
+    normalized: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str) or not raw or "\x00" in raw or "\\" in raw:
+            raise PlanningError("repository_mutation_scope paths must be non-empty canonical repository-relative paths")
+        path = Path(raw)
+        if path.is_absolute() or raw.startswith("/") or raw in {".", ".."} or ".." in path.parts:
+            raise PlanningError("repository_mutation_scope paths must be repository-relative without traversal")
+        canonical = path.as_posix()
+        if canonical != raw or raw.startswith("./") or raw.endswith("/"):
+            raise PlanningError("repository_mutation_scope paths must be canonical")
+        normalized.append(raw)
+    if normalized != sorted(normalized) or len(set(normalized)) != len(normalized):
+        raise PlanningError("repository_mutation_scope must be sorted and duplicate-free")
+    return normalized
+
+
 def _validate_plan(plan: object) -> dict[str, Any]:
     if not isinstance(plan, Mapping):
         raise PlanningError("plan must be an object")
     goal = plan.get("goal")
     planning = plan.get("planning")
     authority = plan.get("repository_authority")
+    scope = plan.get(REPOSITORY_MUTATION_SCOPE_FIELD)
+    scope_digest = plan.get(REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD)
     steps = plan.get("steps")
     if not isinstance(goal, str) or not goal.strip():
         raise PlanningError("plan goal must be a non-empty string")
@@ -111,6 +139,9 @@ def _validate_plan(plan: object) -> dict[str, Any]:
     minimum, maximum = proposal_step_bounds(planning.get("min_steps"), planning.get("max_steps"))
     if authority not in _AUTHORITIES:
         raise PlanningError("plan is missing controller-injected repository authority")
+    canonical_scope = _repository_mutation_scope(scope, authority)
+    if not isinstance(scope_digest, str) or not _HEX64.fullmatch(scope_digest) or scope_digest != _digest(canonical_scope):
+        raise PlanningError("plan repository_mutation_scope digest is missing, stale, or mismatched")
     if not isinstance(steps, list) or not minimum <= len(steps) <= maximum:
         raise PlanningError(f"plan must contain {minimum}-{maximum} steps")
     for index, raw in enumerate(steps, 1):
@@ -150,6 +181,11 @@ def _record(root: Path, *, required: bool = True) -> dict[str, Any] | None:
         plan = _validate_plan(value["plan"])
         if value.get("plan_hash") != _plan_hash(plan):
             raise PlanningError("plan runtime record does not match its plan hash")
+        if (
+            value.get(REPOSITORY_MUTATION_SCOPE_FIELD) != plan[REPOSITORY_MUTATION_SCOPE_FIELD]
+            or value.get(REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD) != plan[REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD]
+        ):
+            raise PlanningError("plan runtime scope evidence is missing, stale, altered, or mismatched")
     return value
 
 
@@ -187,6 +223,11 @@ def _proposal_schema(minimum: int, maximum: int) -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "properties": {
+            REPOSITORY_MUTATION_SCOPE_FIELD: {
+                "type": "array",
+                "maxItems": 256,
+                "items": {"type": "string", "minLength": 1},
+            },
             "steps": {
                 "type": "array",
                 "minItems": minimum,
@@ -199,7 +240,7 @@ def _proposal_schema(minimum: int, maximum: int) -> dict[str, Any]:
                 "items": {"type": "string", "minLength": 1},
             },
         },
-        "required": ["steps", "files_inspected"],
+        "required": [REPOSITORY_MUTATION_SCOPE_FIELD, "steps", "files_inspected"],
     }
 
 
@@ -214,6 +255,7 @@ def _planning_prompt(goal: str, minimum: int, maximum: int, retirement_context: 
         f"Return between {minimum} and {maximum} ordered, concrete implementation steps. "
         "Keep steps small enough to implement and qualify independently. "
         "For each step choose test_change_policy none, add-only, or modify; prefer add-only unless existing tests genuinely require modification. "
+        "Return repository_mutation_scope as the exact sorted, duplicate-free repository-relative paths this plan may mutate; use [] exactly for read-only authority. "
         "Do not execute implementation work and do not modify the repository. "
         "Report every repository file inspected in files_inspected.\n\n"
         f"Operator goal:\n{goal}\n"
@@ -353,6 +395,8 @@ def propose_plan(
     raw_files = payload.get("files_inspected")
     if not isinstance(raw_files, list) or any(not isinstance(item, str) or not item.strip() for item in raw_files):
         raise PlanningError("planning provider returned invalid files_inspected evidence")
+    raw_scope = payload.get(REPOSITORY_MUTATION_SCOPE_FIELD)
+    canonical_scope = _repository_mutation_scope(raw_scope, preview["repository_authority"])
     metrics = dict(provider.get("metrics") or {})
     metrics["files_inspected"] = len(raw_files)
     provider_result = {**provider, "metrics": metrics}
@@ -362,6 +406,8 @@ def propose_plan(
         "planning": dict(preview["planning"]),
         "steps": steps,
         "repository_authority": preview["repository_authority"],
+        REPOSITORY_MUTATION_SCOPE_FIELD: canonical_scope,
+        REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD: _digest(canonical_scope),
     })
     digest = _plan_hash(plan)
     usage_record = usage.record_provider_turn(
@@ -402,6 +448,8 @@ def propose_plan(
         "review_sha256": preview["review_sha256"],
         "plan_hash": digest,
         "plan": plan,
+        REPOSITORY_MUTATION_SCOPE_FIELD: list(plan[REPOSITORY_MUTATION_SCOPE_FIELD]),
+        REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD: plan[REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD],
         "current_step": 1,
         "proposed_at": _utc_now(),
         "approved_at": None,
@@ -513,6 +561,8 @@ def approved_step_context(project: Path, operator: str) -> dict[str, Any] | None
         "total_steps": len(steps),
         "step": step,
         "repository_authority": plan["repository_authority"],
+        REPOSITORY_MUTATION_SCOPE_FIELD: list(plan[REPOSITORY_MUTATION_SCOPE_FIELD]),
+        REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD: plan[REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD],
         "approval_baseline_sha256": state["approval_baseline_sha256"],
         "step_authority_baseline_sha256": authority_baseline,
         "human_direction": (resume or {}).get("direction"),
@@ -547,6 +597,8 @@ def record_same_step_continuation(
         plan_binding.get("plan_hash") != expected_hash
         or plan_binding.get("plan_record_sha256") != state.get("record_sha256")
         or int(plan_binding.get("current_step") or 0) != step_no
+        or plan_binding.get(REPOSITORY_MUTATION_SCOPE_FIELD) != plan[REPOSITORY_MUTATION_SCOPE_FIELD]
+        or plan_binding.get(REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD) != plan[REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD]
     ):
         raise PlanningError("same-step continuation source is stale for the approved plan")
     if state.get("operator") != name or state.get("transaction_id") != tx.get("transaction_id"):
@@ -645,6 +697,55 @@ def recover_interrupted_same_step(
     updated["interrupted_recoveries"] = [*history[-49:], record]
     written = _write(root, updated)
     return {**record, "plan_record_sha256": written["record_sha256"], "result": "INTERRUPTED_STEP_RECOVERED"}
+
+
+def recover_pending_provenance_same_step(project: Path, operator: str, *, witness: Mapping[str, Any]) -> dict[str, Any]:
+    """Advance only the step checkpoint backed by a controller-created pending witness.
+
+    This has no scheduler input or scheduler record dependency.  Scheduler interruption
+    recovery remains a separate mechanism with its own authority and evidence contract.
+    """
+    root, active, tx, policy_status, name = _active_context(project, operator)
+    state = _record(root)
+    assert state is not None
+    if state.get("status") != "APPROVED" or state.get("execution_authority_granted") is not True:
+        raise PlanningError("pending provenance recovery requires an approved executable plan")
+    value = dict(witness)
+    claimed = str(value.pop("witness_sha256", ""))
+    if value.get("schema") != "stygnox_pending_provenance_witness_v1" or not _HEX64.fullmatch(claimed) or _digest(value) != claimed:
+        raise PlanningError("pending provenance witness is malformed or failed its integrity check")
+    plan = _validate_plan(state.get("plan"))
+    expected_hash = _plan_hash(plan)
+    step = int(state.get("current_step") or 0)
+    authority_before = state.get("step_authority_baseline_sha256") or state.get("approval_baseline_sha256")
+    if value.get("plan_hash") != expected_hash or value.get("current_step") != step or value.get("repository_mutation_scope") != plan[REPOSITORY_MUTATION_SCOPE_FIELD] or value.get("repository_mutation_scope_sha256") != plan[REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD]:
+        raise PlanningError("pending provenance witness plan, step, or scope is stale")
+    if value.get("approval_baseline_sha256") != state.get("approval_baseline_sha256") or value.get("step_checkpoint_baseline_sha256") != authority_before or value.get("before_baseline_sha256") != authority_before:
+        raise PlanningError("pending provenance witness checkpoint baseline is stale")
+    if state.get("operator") != name or state.get("transaction_id") != tx.get("transaction_id") or state.get("controller_record_sha256") != active.get("record_sha256"):
+        raise PlanningError("pending provenance recovery authority changed")
+    if state.get("tracked_config_sha256") != policy_status.get("tracked_config_sha256") or state.get("review_sha256") != (policy_status.get("review") or {}).get("review_sha256"):
+        raise PlanningError("pending provenance recovery execution policy changed")
+    after = str(value.get("after_baseline_sha256") or "")
+    if not _HEX64.fullmatch(after) or adoption.capture_baseline(root).public().get("sha256") != after:
+        raise PlanningError("pending provenance witness no longer matches the live repository baseline")
+    paths = value.get("paths")
+    if not isinstance(paths, list) or not paths or len({item.get("path") for item in paths if isinstance(item, Mapping)}) != len(paths):
+        raise PlanningError("pending provenance witness paths are malformed")
+    history = list(state.get("pending_provenance_witnesses") or [])
+    if any(isinstance(item, Mapping) and item.get("controller_receipt_sha256") == value.get("controller_receipt_sha256") for item in history):
+        raise PlanningError("pending provenance witness receipt origin was already consumed")
+    record = {**value, "witness_sha256": claimed, "recovered_at": _utc_now()}
+    updated = dict(state)
+    updated["step_authority_baseline_sha256"] = after
+    updated["step_resume"] = {
+        "step": step, "gate_id": None,
+        "reason": "controller-receipt-bound pending provenance recovered; continue the same approved step",
+        "allowed_new_tests": [], "recorded_at": record["recovered_at"], "decision_sha256": claimed,
+    }
+    updated["pending_provenance_witnesses"] = [*history[-49:], record]
+    written = _write(root, updated)
+    return {**record, "plan_record_sha256": written["record_sha256"], "result": "PENDING_PROVENANCE_RECOVERED"}
 
 
 def approve_plan(project: Path, operator: str, plan_hash: str, confirmation: str) -> dict[str, Any]:

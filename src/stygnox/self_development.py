@@ -223,6 +223,11 @@ def active_grant_for_context(root: Path, state: Mapping[str, Any], *, plan_hash:
         raise SelfDevelopmentError("self-development grant contains non-tooling paths")
     if any(is_runtime_or_protected(path) or is_secret_path(path) for path in paths):
         raise SelfDevelopmentError("self-development grant contains non-grantable paths")
+    plan = planning._validate_plan(state.get("plan"))
+    if set(paths) - set(plan["repository_mutation_scope"]):
+        raise SelfDevelopmentError("self-development grant exceeds the approved repository scope")
+    if grant.get("repository_mutation_scope_sha256") != plan["repository_mutation_scope_sha256"]:
+        raise SelfDevelopmentError("self-development grant repository scope identity changed")
     return grant
 
 
@@ -284,6 +289,8 @@ def build_authorize_preview(project: Path, operator: str, plan_hash: str, gate_i
         raise SelfDevelopmentError("self-development authorization requires at least one exact --path")
     candidates = [dict(row) for row in gate.get("self_development_candidates") or [] if isinstance(row, Mapping)]
     candidate_paths = sorted(str(row.get("path") or "") for row in candidates)
+    plan = planning._validate_plan(state.get("plan"))
+    scope = set(plan["repository_mutation_scope"])
     for path in requested:
         if is_runtime_or_protected(path):
             raise SelfDevelopmentError(f"self-development grant refuses runtime/protected path: {path}")
@@ -291,6 +298,8 @@ def build_authorize_preview(project: Path, operator: str, plan_hash: str, gate_i
             raise SelfDevelopmentError(f"self-development grant refuses secret/credential path: {path}")
         if not is_self_development_path(root, path):
             raise SelfDevelopmentError(f"self-development grant requires exact Stygnox tooling path: {path}")
+        if path not in scope:
+            raise SelfDevelopmentError(f"self-development grant exceeds approved repository scope: {path}")
     if requested != candidate_paths:
         raise SelfDevelopmentError(f"self-development paths must exactly match the controller-derived candidate: {candidate_paths}")
     body: dict[str, Any] = {
@@ -301,6 +310,8 @@ def build_authorize_preview(project: Path, operator: str, plan_hash: str, gate_i
         "plan_hash": state["plan_hash"],
         "plan_record_sha256": state["record_sha256"],
         "step": int(state["current_step"]),
+        "repository_mutation_scope": list(plan["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": plan["repository_mutation_scope_sha256"],
         "gate_id": gate["gate_id"],
         "gate_sha256": gate["gate_sha256"],
         "transaction_id": state["transaction_id"],
@@ -346,6 +357,8 @@ def authorize(project: Path, operator: str, plan_hash: str, gate_id: str, paths:
         "tracked_config_sha256": preview["tracked_config_sha256"],
         "review_sha256": preview["review_sha256"],
         "authority_baseline_sha256": preview["authority_baseline_sha256"],
+        "repository_mutation_scope": list(preview["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": preview["repository_mutation_scope_sha256"],
         "paths": list(preview["paths"]),
         "candidates": list(preview["candidates"]),
         "reason": preview["reason"],
@@ -383,6 +396,7 @@ def authorize(project: Path, operator: str, plan_hash: str, gate_id: str, paths:
         "gate_id": preview["gate_id"],
         "gate_sha256": preview["gate_sha256"],
         "grant_sha256": grant_body["grant_sha256"],
+        "repository_mutation_scope_sha256": preview["repository_mutation_scope_sha256"],
         "preview_sha256": expected,
         "paths": list(preview["paths"]),
         "reason": preview["reason"],

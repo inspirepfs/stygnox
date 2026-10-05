@@ -225,6 +225,8 @@ def _validate_adoption(root: Path, state: Mapping[str, Any], candidate: Mapping[
     if _self_development_path(root, path):
         raise ReconciliationError(f"carry-forward adoption of Stygnox tooling remains outside ownership reconciliation; CAP-011 requires exact supervised controller self-development authority: {path}")
     plan = planning._validate_plan(state.get("plan"))
+    if path not in set(plan["repository_mutation_scope"]):
+        raise ReconciliationError(f"carry-forward adoption is outside the approved repository scope: {path}")
     step = plan["steps"][int(state["current_step"]) - 1]
     if _is_test_path(path):
         policy = str(step.get("test_change_policy") or "none")
@@ -291,6 +293,8 @@ def reconciliation_snapshot(project: Path, operator_name: str, plan_hash: str) -
         "plan_hash": state["plan_hash"],
         "plan_record_sha256": state["record_sha256"],
         "current_step": int(state["current_step"]),
+        "repository_mutation_scope": list(planning._validate_plan(state["plan"])["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": planning._validate_plan(state["plan"])["repository_mutation_scope_sha256"],
         "test_change_policy": planning._validate_plan(state["plan"])["steps"][int(state["current_step"]) - 1]["test_change_policy"],
         "transaction_id": tx["transaction_id"],
         "tracked_config_sha256": policy_status["tracked_config_sha256"],
@@ -325,6 +329,10 @@ def build_action_preview(project: Path, operator_name: str, plan_hash: str, path
     assert state is not None
     if action_name == "adopt":
         _validate_adoption(root, state, candidate)
+        if candidate["path"] not in snapshot["repository_mutation_scope"]:
+            raise ReconciliationError(
+                f"cannot adopt path outside the approved repository scope: {candidate['path']}"
+            )
         reason_value = None
     else:
         reason_value = " ".join(str(reason or "").split())
@@ -339,6 +347,8 @@ def build_action_preview(project: Path, operator_name: str, plan_hash: str, path
         "plan_hash": snapshot["plan_hash"],
         "plan_record_sha256": snapshot["plan_record_sha256"],
         "current_step": snapshot["current_step"],
+        "repository_mutation_scope": list(snapshot["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": snapshot["repository_mutation_scope_sha256"],
         "test_change_policy": snapshot["test_change_policy"],
         "transaction_id": snapshot["transaction_id"],
         "tracked_config_sha256": snapshot["tracked_config_sha256"],
@@ -370,6 +380,9 @@ def apply_action(project: Path, operator_name: str, plan_hash: str, path: str, d
     root = Path(preview["worktree"])
     state = planning._record(root)
     assert state is not None
+    plan = planning._validate_plan(state.get("plan"))
+    if preview["repository_mutation_scope"] != plan["repository_mutation_scope"] or preview["repository_mutation_scope_sha256"] != plan["repository_mutation_scope_sha256"]:
+        raise ReconciliationError("reconciliation preview repository scope identity changed")
     # Re-evaluate durable state immediately before mutation.
     actions = _actions(state)
     if any(item.get("path") == preview["path"] for item in actions):
@@ -381,6 +394,7 @@ def apply_action(project: Path, operator_name: str, plan_hash: str, path: str, d
         "path": preview["path"],
         "disposition": preview["disposition"],
         "claiming_step": preview["current_step"],
+        "repository_mutation_scope_sha256": preview["repository_mutation_scope_sha256"],
         "classification": preview["classification"],
         "candidate_sha256": preview["candidate_sha256"],
         "approval_presence": preview["approval_presence"],

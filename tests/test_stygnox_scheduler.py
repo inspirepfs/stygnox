@@ -89,6 +89,7 @@ def planning_result(*, test_policy: str = "add-only", delegated: bool = False) -
                 "test_change_policy": test_policy,
             }],
             "files_inspected": ["README.md"],
+            "repository_mutation_scope": ["README.md", "src/partial.py", "src/stygnox/controller.py", "src/stygnox/product.py", "src/stygnox/secrets.py", "src/work.txt", "tests/test_partial.py", "tests/test_stygnox_existing.py"],
         },
         "metrics": {
             "commands_executed": 1,
@@ -255,6 +256,57 @@ class StygnoxSchedulerTests(TestCase):
             self.assertEqual("BLOCKED_HUMAN", plan_state["status"])
             self.assertEqual(approved["plan_hash"], plan_state["active_gate"]["plan_hash"])
 
+    def test_write_turn_restores_out_of_scope_delta_and_receipts_exact_in_scope_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            init_repo(repo)
+            (repo / "external-edit.txt").write_text("original\n", encoding="utf-8")
+            (repo / "external-delete.txt").write_text("original\n", encoding="utf-8")
+            git(repo, "add", "external-edit.txt", "external-delete.txt")
+            git(repo, "commit", "-q", "-m", "add external baseline")
+            active_reviewed(repo, root / "external")
+            approved = approve(repo)
+            objective = approved["plan"]["steps"][0]["objective"]
+            preview = controller.build_run_preview(repo, "Operator One", objective, "write")
+
+            def outside_scope(**_kwargs: object) -> dict:
+                (repo / "external-edit.txt").write_text("mutated\n", encoding="utf-8")
+                (repo / "external-delete.txt").unlink()
+                (repo / "outside-created.txt").write_text("unexpected\n", encoding="utf-8")
+                (repo / "src").mkdir(exist_ok=True)
+                (repo / "src" / "work.txt").write_text("also restore this\n", encoding="utf-8")
+                return implementation_result("attempted scope escape")
+
+            with mock.patch.object(provider_codex, "execute", side_effect=outside_scope):
+                with self.assertRaisesRegex(controller.ControllerError, "exceeded approved repository scope"):
+                    controller.run_controller(repo, "Operator One", objective, "write", preview["preview_sha256"], "RUN")
+            self.assertEqual("original\n", (repo / "external-edit.txt").read_text(encoding="utf-8"))
+            self.assertEqual("original\n", (repo / "external-delete.txt").read_text(encoding="utf-8"))
+            self.assertFalse((repo / "outside-created.txt").exists())
+            self.assertFalse((repo / "src" / "work.txt").exists())
+            self.assertFalse((repo / adoption.RUNTIME_NAME / f"controller-run-{preview['preview_sha256'][:16]}.json").exists())
+
+            in_scope_preview = controller.build_run_preview(repo, "Operator One", objective, "write")
+
+            def in_scope(**_kwargs: object) -> dict:
+                (repo / "src").mkdir(exist_ok=True)
+                (repo / "src" / "work.txt").write_text("approved\n", encoding="utf-8")
+                return implementation_result("scoped change complete")
+
+            with mock.patch.object(provider_codex, "execute", side_effect=in_scope):
+                result = controller.run_controller(
+                    repo, "Operator One", objective, "write", in_scope_preview["preview_sha256"], "RUN"
+                )
+            self.assertEqual(
+                [{"path": "src/work.txt", "kind": "created", "before_fingerprint": None, "after_fingerprint": result["actual_delta"]["paths"][0]["after_fingerprint"]}],
+                result["actual_delta"]["paths"],
+            )
+            self.assertEqual(approved["repository_mutation_scope_sha256"], result["plan_binding"]["repository_mutation_scope_sha256"])
+            self.assertEqual(approved["plan_hash"], result["plan_binding"]["plan_hash"])
+            self.assertEqual(1, result["plan_binding"]["current_step"])
+            self.assertEqual(controller._digest({key: result["actual_delta"][key] for key in ("before_manifest_sha256", "after_manifest_sha256", "paths")}), result["actual_delta"]["delta_sha256"])
+
     def test_partial_interruption_requires_exact_pending_paths_and_recovers_same_step(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -291,6 +343,61 @@ class StygnoxSchedulerTests(TestCase):
             objective = approved["plan"]["steps"][0]["objective"]
             turn = controller.build_run_preview(repo, "Operator One", objective, "write")
             self.assertEqual(plan_state["step_authority_baseline_sha256"], turn["project_baseline"]["sha256"])
+
+    def test_controller_pending_provenance_recovery_requires_its_own_exact_receipt_witness(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            init_repo(repo)
+            active_reviewed(repo, root / "external")
+            approved = approve(repo)
+            objective = approved["plan"]["steps"][0]["objective"]
+            turn_preview = controller.build_run_preview(repo, "Operator One", objective, "write")
+
+            def completed_turn(**_kwargs: object) -> dict:
+                (repo / "src").mkdir(exist_ok=True)
+                (repo / "src" / "work.txt").write_text("witnessed\n", encoding="utf-8")
+                return implementation_result("post-turn delta awaits qualification")
+
+            with mock.patch.object(provider_codex, "execute", side_effect=completed_turn):
+                receipt = controller.run_controller(repo, "Operator One", objective, "write", turn_preview["preview_sha256"], "RUN")
+            witness_preview = controller.build_pending_provenance_recovery_preview(repo, "Operator One", receipt["preview_sha256"])
+            witness = witness_preview["witness"]
+            self.assertEqual("created", witness["paths"][0]["kind"])
+            self.assertIsNone(witness["paths"][0]["before_fingerprint"])
+            self.assertIsNotNone(witness["paths"][0]["after_fingerprint"])
+            recovered = controller.recover_pending_provenance(
+                repo, "Operator One", receipt["preview_sha256"], witness_preview["preview_sha256"], "RECOVER_PENDING_PROVENANCE"
+            )
+            self.assertEqual("PENDING_PROVENANCE_RECOVERED", recovered["result"])
+            state = planning.plan_status(repo)["plan"]
+            self.assertEqual(receipt["after_baseline_sha256"], state["step_authority_baseline_sha256"])
+            self.assertEqual(receipt["record_sha256"], state["pending_provenance_witnesses"][-1]["controller_receipt_sha256"])
+            with self.assertRaisesRegex(controller.ControllerError, "already originated"):
+                controller.build_pending_provenance_recovery_preview(repo, "Operator One", receipt["preview_sha256"])
+            with self.assertRaisesRegex(scheduler.SchedulerError, "no scheduler state exists"):
+                scheduler.build_recovery_preview(repo, "Operator One", [])
+
+    def test_pending_provenance_preview_refuses_live_fingerprint_drift_and_unknown_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            init_repo(repo)
+            active_reviewed(repo, root / "external")
+            approved = approve(repo)
+            objective = approved["plan"]["steps"][0]["objective"]
+            turn_preview = controller.build_run_preview(repo, "Operator One", objective, "write")
+
+            def completed_turn(**_kwargs: object) -> dict:
+                (repo / "src").mkdir(exist_ok=True)
+                (repo / "src" / "work.txt").write_text("witnessed\n", encoding="utf-8")
+                return implementation_result("post-turn delta awaits qualification")
+
+            with mock.patch.object(provider_codex, "execute", side_effect=completed_turn):
+                receipt = controller.run_controller(repo, "Operator One", objective, "write", turn_preview["preview_sha256"], "RUN")
+            (repo / "src" / "work.txt").write_text("drifted\n", encoding="utf-8")
+            with self.assertRaisesRegex(controller.ControllerError, "live checkpoint-relative state"):
+                controller.build_pending_provenance_recovery_preview(repo, "Operator One", receipt["preview_sha256"])
 
     def test_interrupted_recovery_does_not_launder_test_policy_violation(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -340,6 +447,8 @@ class StygnoxSchedulerTests(TestCase):
                 "plan_hash": approved["plan_hash"],
                 "starting_plan_record_sha256": approved["record_sha256"],
                 "current_step": 1,
+                "repository_mutation_scope": context["repository_mutation_scope"],
+                "repository_mutation_scope_sha256": context["repository_mutation_scope_sha256"],
                 "transaction_id": turn["transaction_id"],
                 "controller_record_sha256": turn["controller_record_sha256"],
                 "tracked_config_sha256": turn["tracked_config_sha256"],

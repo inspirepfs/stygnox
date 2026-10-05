@@ -138,6 +138,29 @@ def _final_qualification(state: Mapping[str, Any]) -> dict[str, Any]:
         raise FinalizationError("final qualification path fingerprints do not match qualified path set")
     if qualification._qualified_delta_sha256({str(k): str(v) for k, v in fingerprints.items()}, paths) != value.get("qualified_delta_sha256"):
         raise FinalizationError("final qualification delta fingerprint is invalid")
+    plan = planning._validate_plan(state.get("plan"))
+    scope = list(plan["repository_mutation_scope"])
+    approval = state.get("approval_repository_manifest")
+    attribution = value.get("accepted_controller_attribution")
+    if (
+        not isinstance(approval, Mapping)
+        or value.get("approval_manifest_sha256") != qualification._digest(approval)
+        or value.get("repository_mutation_scope_sha256") != plan["repository_mutation_scope_sha256"]
+        or not isinstance(attribution, Mapping)
+        or attribution.get("repository_mutation_scope") != scope
+        or attribution.get("repository_mutation_scope_sha256") != plan["repository_mutation_scope_sha256"]
+        or attribution.get("accepted_controller_paths") != paths
+    ):
+        raise FinalizationError("final qualification lacks exact approval-scope controller attribution")
+    delta = attribution.get("qualified_delta") if isinstance(attribution.get("qualified_delta"), Mapping) else None
+    if not isinstance(delta, Mapping):
+        raise FinalizationError("final qualification lacks checkpoint-relative controller delta evidence")
+    delta_body = {key: delta.get(key) for key in ("approval_manifest_sha256", "current_manifest_sha256", "paths")}
+    if delta.get("delta_sha256") != qualification._digest(delta_body):
+        raise FinalizationError("final qualification controller delta fingerprint is invalid")
+    delta_paths = [row.get("path") for row in delta.get("paths") or [] if isinstance(row, Mapping)]
+    if sorted(map(str, delta_paths)) != paths or len(delta_paths) != len(set(delta_paths)) or any(str(path) not in scope for path in delta_paths):
+        raise FinalizationError("final qualification controller delta paths do not exactly equal the qualified scope-bound delta")
     return value
 
 
@@ -363,6 +386,7 @@ def commit(project: Path, operator: str, plan_hash: str, message: str, preview_s
         "branch": preview["qualified_branch"],
         "message": preview["message"],
         "plan_owned_paths": verified["paths"],
+        "path_fingerprints": verified["path_fingerprints"],
         "completed_at": _utc_now(),
     }
     written = _record_commit_state(root, state, row, reconciled=False)
@@ -544,6 +568,7 @@ def reconcile_commit(project: Path, operator: str, plan_hash: str, commit_sha: s
         "branch": preview["branch"],
         "message": _git(root, "show", "-s", "--format=%s", preview["commit_sha"]).strip(),
         "plan_owned_paths": preview["plan_owned_paths"],
+        "path_fingerprints": _verify_commit(root, state, _final_qualification(state), preview["commit_sha"])["path_fingerprints"],
         "reason": preview["reason"],
         "completed_at": _utc_now(),
     }

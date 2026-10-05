@@ -85,6 +85,7 @@ class StygnoxFinalizationTests(TestCase):
             self.assertEqual("COMMITTED", result["result"])
             self.assertEqual("COMMITTED", state["status"])
             self.assertEqual(git(repo, "rev-parse", "HEAD").stdout.strip(), state["commit_sha"])
+            self.assertEqual(state["final_qualification"]["qualified_path_fingerprints"], state["commit_record"]["path_fingerprints"])
             self.assertEqual(["src/final.txt"], git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD^", "HEAD").stdout.split())
             self.assertEqual("test: qualified commit", git(repo, "show", "-s", "--format=%s", "HEAD").stdout.strip())
             # Controller bootstrap/config residue is deliberately not staged into the plan commit.

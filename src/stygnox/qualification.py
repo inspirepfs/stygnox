@@ -232,21 +232,171 @@ def _completion_coverage(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [by_step[index][0] for index in range(1, len(plan["steps"]) + 1)]
 
 
-def _manifest_delta(state: Mapping[str, Any], root: Path, attribution: Mapping[str, Any]) -> tuple[list[str], list[str], dict[str, str]]:
+def _manifest_delta(state: Mapping[str, Any], root: Path) -> tuple[list[str], dict[str, str]]:
+    """Return the approval-checkpoint-relative live delta without ownership inference.
+
+    Change classification remains useful to reject unresolved reconciliation
+    residue, but it is not evidence that a path belongs to this plan.  Final
+    ownership is established exclusively by replaying accepted controller
+    receipts against this approval manifest in ``_accepted_controller_attribution``.
+    """
     approval = state.get("approval_repository_manifest")
     if not isinstance(approval, Mapping):
         raise QualificationError("approved plan predates qualification manifest binding; regenerate/reapprove the plan")
     before = {str(key): str(value) for key, value in approval.items()}
     current = scheduler.repository_manifest(root)
     changed = scheduler.changed_manifest_paths(before, current)
-    categories = attribution.get("categories") if isinstance(attribution.get("categories"), Mapping) else {}
-    outside = set(map(str, (categories.get("outside_plan") or {}).get("paths") or []))
-    plan_owned = sorted(path for path in changed if path not in outside)
-    return changed, plan_owned, current
+    return changed, current
 
 
 def _qualified_delta_sha256(manifest: Mapping[str, str], paths: Sequence[str]) -> str:
     return _digest({"paths": {path: manifest.get(path, "missing") for path in sorted(set(paths))}})
+
+
+def _checkpoint_delta(before: Mapping[str, str], after: Mapping[str, str]) -> dict[str, Any]:
+    """Return canonical approval-checkpoint-relative path evidence."""
+    paths: list[dict[str, Any]] = []
+    for path in sorted(set(before) | set(after)):
+        previous, current = before.get(path), after.get(path)
+        if previous != current:
+            paths.append({
+                "path": path,
+                "kind": "created" if previous is None else "deleted" if current is None else "modified",
+                "before_fingerprint": previous,
+                "after_fingerprint": current,
+            })
+    body: dict[str, Any] = {
+        "approval_manifest_sha256": _digest(dict(before)),
+        "current_manifest_sha256": _digest(dict(after)),
+        "paths": paths,
+    }
+    body["delta_sha256"] = _digest(body)
+    return body
+
+
+def _accepted_controller_attribution(
+    state: Mapping[str, Any],
+    root: Path,
+    plan: Mapping[str, Any],
+    current_manifest: Mapping[str, str],
+    *,
+    pending_receipt: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Replay accepted controller deltas and bind them to the live checkpoint.
+
+    Status-derived ownership is intentionally not proof of authorship: a dirty
+    path can predate a turn or be changed more than once.  The controller's
+    integrity-checked receipts are the sole accepted attribution source here.
+    Replaying them from the immutable approval manifest makes an omitted,
+    injected, reverted, stale, or out-of-scope path fail closed.
+    """
+    approval = state.get("approval_repository_manifest")
+    if not isinstance(approval, Mapping):
+        raise QualificationError("approved plan predates controller-delta manifest binding; regenerate/reapprove the plan")
+    before = {str(path): str(fingerprint) for path, fingerprint in approval.items()}
+    scope = sorted(map(str, plan["repository_mutation_scope"]))
+    scope_set = set(scope)
+    scope_digest = str(plan["repository_mutation_scope_sha256"])
+    if scope_digest != _digest(scope):
+        raise QualificationError("approved repository mutation scope digest is stale or mismatched")
+    if plan.get("repository_authority") == "read-only":
+        qualified = _checkpoint_delta(before, current_manifest)
+        if scope or qualified["paths"] or pending_receipt is None:
+            raise QualificationError("read-only qualification requires an unchanged empty-scope checkpoint")
+        return {
+            "repository_mutation_scope": scope,
+            "repository_mutation_scope_sha256": scope_digest,
+            "accepted_controller_receipts": [],
+            "accepted_controller_paths": [],
+            "qualified_delta": qualified,
+            "attribution_sha256": _digest({"scope_digest": scope_digest, "receipts": [], "paths": [], "qualified_delta_sha256": qualified["delta_sha256"]}),
+        }
+
+    receipts_by_sha = {str(row.get("record_sha256")): row for row in _controller_receipts(root)}
+    accepted: list[dict[str, Any]] = []
+    seen_receipts: set[str] = set()
+    for result in _completion_coverage(state) if state.get("status") in {"STEPS_COMPLETE", "READY_TO_COMMIT"} else [
+        dict(row) for row in state.get("step_results") or [] if isinstance(row, Mapping) and row.get("result") == "PASS"
+    ]:
+        receipt_sha = str(result.get("controller_receipt_sha256") or "")
+        if not receipt_sha:
+            # A human-confirmed step has no controller mutation attribution.
+            if result.get("result") == "HUMAN_CONFIRMED":
+                continue
+            raise QualificationError("accepted step lacks controller receipt attribution")
+        if receipt_sha in seen_receipts or receipt_sha not in receipts_by_sha:
+            raise QualificationError("accepted controller receipt attribution is missing or duplicated")
+        seen_receipts.add(receipt_sha)
+        accepted.append(receipts_by_sha[receipt_sha])
+    if pending_receipt is not None:
+        receipt_sha = str(pending_receipt.get("record_sha256") or "")
+        if not receipt_sha or receipt_sha in seen_receipts:
+            raise QualificationError("pending controller receipt attribution is missing or duplicated")
+        accepted.append(dict(pending_receipt))
+
+    replayed = dict(before)
+    attributed_paths: set[str] = set()
+    receipt_hashes: list[str] = []
+    for receipt in accepted:
+        receipt_sha = str(receipt.get("record_sha256") or "")
+        binding = receipt.get("plan_binding") if isinstance(receipt.get("plan_binding"), Mapping) else None
+        delta = receipt.get("actual_delta") if isinstance(receipt.get("actual_delta"), Mapping) else None
+        if (
+            binding is None
+            or binding.get("plan_hash") != state.get("plan_hash")
+            or binding.get("repository_mutation_scope") != scope
+            or binding.get("repository_mutation_scope_sha256") != scope_digest
+            or receipt.get("repository_authority") != "write"
+            or not isinstance(delta, Mapping)
+        ):
+            raise QualificationError("accepted controller attribution plan/scope evidence is stale or malformed")
+        body = {key: delta.get(key) for key in ("before_manifest_sha256", "after_manifest_sha256", "paths")}
+        if delta.get("delta_sha256") != _digest(body) or not isinstance(delta.get("paths"), list):
+            raise QualificationError("accepted controller attribution delta evidence is malformed")
+        if delta.get("before_manifest_sha256") != _digest(replayed):
+            raise QualificationError("accepted controller attribution checkpoint sequence is stale or discontinuous")
+        seen_paths: set[str] = set()
+        for row in delta["paths"]:
+            if not isinstance(row, Mapping):
+                raise QualificationError("accepted controller attribution contains malformed path evidence")
+            path, kind = row.get("path"), row.get("kind")
+            previous, current = row.get("before_fingerprint"), row.get("after_fingerprint")
+            expected_kind = "created" if previous is None else "deleted" if current is None else "modified"
+            if not isinstance(path, str) or path in seen_paths or path not in scope_set or kind != expected_kind:
+                raise QualificationError("accepted controller attribution contains unresolved or out-of-scope path evidence")
+            if replayed.get(path) != previous:
+                raise QualificationError("accepted controller attribution fingerprint does not match its checkpoint")
+            seen_paths.add(path)
+            attributed_paths.add(path)
+            if current is None:
+                replayed.pop(path, None)
+            else:
+                replayed[path] = str(current)
+        if delta.get("after_manifest_sha256") != _digest(replayed):
+            raise QualificationError("accepted controller attribution after-checkpoint fingerprint is stale or mismatched")
+        receipt_hashes.append(receipt_sha)
+
+    qualified = _checkpoint_delta(before, current_manifest)
+    qualified_paths = {str(row["path"]) for row in qualified["paths"]}
+    if qualified_paths - scope_set:
+        raise QualificationError("qualified controller delta exceeds the approved repository mutation scope")
+    if replayed != dict(current_manifest):
+        raise QualificationError("accepted controller attribution does not reproduce the current checkpoint-relative manifest")
+    if attributed_paths != qualified_paths:
+        raise QualificationError("accepted controller attribution paths do not exactly equal the qualified delta")
+    return {
+        "repository_mutation_scope": scope,
+        "repository_mutation_scope_sha256": scope_digest,
+        "accepted_controller_receipts": receipt_hashes,
+        "accepted_controller_paths": sorted(attributed_paths),
+        "qualified_delta": qualified,
+        "attribution_sha256": _digest({
+            "scope_digest": scope_digest,
+            "receipts": receipt_hashes,
+            "paths": sorted(attributed_paths),
+            "qualified_delta_sha256": qualified["delta_sha256"],
+        }),
+    }
 
 
 def _git_finalization_path_fingerprint(path: Path) -> str:
@@ -297,10 +447,6 @@ def _build_preview(project: Path, operator: str, plan_hash: str, *, requalify: b
         if final.get("qualification_config_sha256") != config["sha256"]:
             raise QualificationError("qualification configuration changed after READY_TO_COMMIT; explicit replanning is required")
         _completion_coverage(state)
-        _changed, plan_owned, current_manifest = _manifest_delta(state, root, attribution)
-        expected_paths = sorted(map(str, final.get("plan_owned_paths") or []))
-        if plan_owned != expected_paths:
-            raise QualificationError("requalification refuses path-set drift outside the previously qualified plan-owned delta")
         phase = "requalify-final"
     elif status == "APPROVED":
         if step < 1 or step > len(plan["steps"]):
@@ -325,9 +471,21 @@ def _build_preview(project: Path, operator: str, plan_hash: str, *, requalify: b
     else:
         raise QualificationError(f"qualification cannot run from plan status {status}")
 
+    controller_attribution: dict[str, Any] | None = None
     if phase in {"final", "requalify-final"}:
-        changed, derived_owned, manifest = _manifest_delta(state, root, attribution)
-        plan_owned = derived_owned
+        changed, manifest = _manifest_delta(state, root)
+        controller_attribution = _accepted_controller_attribution(
+            state,
+            root,
+            plan,
+            manifest,
+            pending_receipt=receipt if phase == "final" and status == "APPROVED" else None,
+        )
+        if requalify:
+            final = state.get("final_qualification") if isinstance(state.get("final_qualification"), Mapping) else {}
+            if controller_attribution != final.get("accepted_controller_attribution"):
+                raise QualificationError("requalification refuses controller-delta path or fingerprint drift")
+        plan_owned = list(controller_attribution["accepted_controller_paths"])
         current_manifest = manifest
     else:
         changed = []
@@ -356,6 +514,7 @@ def _build_preview(project: Path, operator: str, plan_hash: str, *, requalify: b
         "current_manifest_sha256": _digest(current_manifest) if current_manifest else None,
         "changed_since_approval": changed,
         "plan_owned_paths": plan_owned,
+        "accepted_controller_attribution": controller_attribution,
         "requires_explicit_confirmation": True,
         "confirmation": "REQUALIFY" if requalify else "QUALIFY",
     }
@@ -474,6 +633,12 @@ def _write_completion_report(root: Path, state: Mapping[str, Any]) -> dict[str, 
 def _final_pass_state(root: Path, state: Mapping[str, Any], preview: Mapping[str, Any], gates: Sequence[Mapping[str, Any]], current_baseline: Mapping[str, Any], current_manifest: Mapping[str, str], *, requalified: bool) -> dict[str, Any]:
     plan = planning._validate_plan(state.get("plan"))
     plan_owned = list(preview.get("plan_owned_paths") or [])
+    attribution = preview.get("accepted_controller_attribution")
+    if not isinstance(attribution, Mapping) or attribution.get("accepted_controller_paths") != plan_owned:
+        raise QualificationError("final qualification lacks an exact accepted controller attribution")
+    qualified = attribution.get("qualified_delta") if isinstance(attribution.get("qualified_delta"), Mapping) else None
+    if not isinstance(qualified, Mapping) or qualified.get("current_manifest_sha256") != _digest(current_manifest):
+        raise QualificationError("final qualification controller attribution is stale against the current manifest")
     git_fingerprints = {path: _git_finalization_path_fingerprint(root / path) for path in plan_owned}
     qualified_delta = _qualified_delta_sha256(git_fingerprints, plan_owned)
     final = {
@@ -488,7 +653,9 @@ def _final_pass_state(root: Path, state: Mapping[str, Any], preview: Mapping[str
         "qualified_branch": current_baseline.get("branch"),
         "current_manifest_sha256": _digest(current_manifest),
         "approval_manifest_sha256": preview.get("approval_manifest_sha256"),
+        "repository_mutation_scope_sha256": plan["repository_mutation_scope_sha256"],
         "plan_owned_paths": plan_owned,
+        "accepted_controller_attribution": dict(attribution),
         "qualified_path_fingerprints": git_fingerprints,
         "qualified_delta_sha256": qualified_delta,
         "gates": [dict(row) for row in gates],
@@ -610,10 +777,14 @@ def run_qualification(project: Path, operator: str, plan_hash: str, preview_sha2
     elif phase == "final":
         _completion_coverage(state)
 
-    attribution = _attribution_guard(root)
-    _changed, plan_owned, current_manifest = _manifest_delta(state, root, attribution)
-    if sorted(plan_owned) != sorted(preview.get("plan_owned_paths") or []):
-        raise QualificationError("final qualified path set changed after gate execution")
+    _attribution_guard(root)
+    _changed, current_manifest = _manifest_delta(state, root)
+    accepted = preview.get("accepted_controller_attribution")
+    if not isinstance(accepted, Mapping) or sorted(accepted.get("accepted_controller_paths") or []) != sorted(preview.get("plan_owned_paths") or []):
+        raise QualificationError("final qualification lacks an exact controller-owned delta")
+    refreshed_attribution = refreshed.get("accepted_controller_attribution")
+    if refreshed_attribution != preview.get("accepted_controller_attribution"):
+        raise QualificationError("accepted controller attribution changed after gate execution")
     final_state = _final_pass_state(root, state, preview, gate_results, after, current_manifest, requalified=requalify)
     persisted = _record_result(root, {**record, "state": "PASS", "qualified_delta_sha256": final_state["final_qualification"]["qualified_delta_sha256"], "provenance_sha256": final_state["final_qualification"]["provenance_sha256"], "plan_record_sha256": final_state["record_sha256"]})
     return {**persisted, "result": "REQUALIFIED_READY_TO_COMMIT" if requalify else final_state["status"], "plan_status": final_state["status"], "completion_report_sha256": final_state.get("completion_report_sha256")}

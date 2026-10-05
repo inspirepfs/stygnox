@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 from typing import Any, Mapping, Sequence
 
 from . import adoption, efficiency, execution_policy, transactions
@@ -23,6 +25,8 @@ from . import provider_codex, usage
 CONTROLLER_SCHEMA = "stygnox_controller_state_v1"
 RUN_PREVIEW_SCHEMA = "stygnox_controller_run_preview_v1"
 RUN_RESULT_SCHEMA = "stygnox_controller_run_result_v1"
+PENDING_PROVENANCE_PREVIEW_SCHEMA = "stygnox_pending_provenance_preview_v1"
+PENDING_PROVENANCE_WITNESS_SCHEMA = "stygnox_pending_provenance_witness_v1"
 CONTROLLER_RECORD = "controller.json"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -187,6 +191,67 @@ def _objective(value: str) -> str:
     return text
 
 
+def _actual_delta(before: Mapping[str, str], after: Mapping[str, str]) -> dict[str, Any]:
+    """Return immutable evidence for every repository file changed by one turn."""
+    paths: list[dict[str, Any]] = []
+    for path in sorted(set(before) | set(after)):
+        previous, current = before.get(path), after.get(path)
+        if previous != current:
+            paths.append({"path": path, "kind": "created" if previous is None else "deleted" if current is None else "modified", "before_fingerprint": previous, "after_fingerprint": current})
+    evidence: dict[str, Any] = {"before_manifest_sha256": _digest(dict(before)), "after_manifest_sha256": _digest(dict(after)), "paths": paths}
+    evidence["delta_sha256"] = _digest(evidence)
+    return evidence
+
+
+def _snapshot_manifest(root: Path, manifest: Mapping[str, str]) -> dict[str, dict[str, Any]]:
+    """Capture reversible pre-turn content for the repository manifest only."""
+    snapshot: dict[str, dict[str, Any]] = {}
+    for path in manifest:
+        target = root / path
+        try:
+            mode = target.lstat().st_mode
+        except FileNotFoundError:
+            # ``git ls-files`` retains tracked paths that an earlier approved
+            # turn deliberately removed.  Their pre-turn state is absence;
+            # leaving them out makes a later unauthorised recreation removable
+            # by _restore_manifest_snapshot without inventing file content.
+            continue
+        try:
+            if stat.S_ISLNK(mode):
+                snapshot[path] = {"kind": "symlink", "target": os.readlink(target)}
+            elif stat.S_ISREG(mode):
+                snapshot[path] = {"kind": "file", "content": target.read_bytes(), "mode": stat.S_IMODE(mode)}
+            else:
+                raise ControllerError(f"repository manifest contains unsupported path type: {path}")
+        except OSError as exc:
+            raise ControllerError(f"cannot snapshot repository path {path}: {exc}") from exc
+    return snapshot
+
+
+def _restore_manifest_snapshot(root: Path, snapshot: Mapping[str, Mapping[str, Any]], changed_paths: Sequence[str]) -> list[str]:
+    """Restore every changed manifest path, including unauthorised creations/deletions."""
+    restored: list[str] = []
+    for path in sorted(set(changed_paths)):
+        target = root / path
+        original = snapshot.get(path)
+        try:
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.exists():
+                raise ControllerError(f"cannot restore unauthorised non-file path: {path}")
+            if original is not None:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if original.get("kind") == "symlink":
+                    target.symlink_to(str(original["target"]))
+                else:
+                    target.write_bytes(bytes(original["content"]))
+                    target.chmod(int(original["mode"]))
+            restored.append(path)
+        except OSError as exc:
+            raise ControllerError(f"cannot restore unauthorised repository path {path}: {exc}") from exc
+    return restored
+
+
 def build_run_preview(
     project: Path,
     operator: str,
@@ -248,6 +313,8 @@ def build_run_preview(
             "step_objective": step["objective"],
             "acceptance": list(step["acceptance"]),
             "test_change_policy": step["test_change_policy"],
+            "repository_mutation_scope": list(plan_context["repository_mutation_scope"]),
+            "repository_mutation_scope_sha256": plan_context["repository_mutation_scope_sha256"],
             "approval_baseline_sha256": plan_context["approval_baseline_sha256"],
             "step_authority_baseline_sha256": plan_context["step_authority_baseline_sha256"],
             "human_direction": plan_context.get("human_direction"),
@@ -326,6 +393,9 @@ def _prompt(preview: Mapping[str, Any]) -> str:
             f"This turn is bound to approved plan {binding['plan_hash']}, "
             f"step {binding['current_step']} of {binding['total_steps']} ({binding['step_title']}). "
             f"The step test-change policy is {binding['test_change_policy']}. "
+            "Its immutable repository mutation scope is "
+            f"{', '.join(binding['repository_mutation_scope']) or '[]'} "
+            f"(digest {binding['repository_mutation_scope_sha256']}). "
             "Do not perform work outside this exact approved step.\n"
             f"{steering}"
             f"Acceptance criteria:\n{acceptance}\n\n"
@@ -388,15 +458,24 @@ def run_controller(
     before = adoption.capture_baseline(root).public()
     before_paths: set[str] = set()
     before_manifest: dict[str, str] = {}
+    before_snapshot: dict[str, dict[str, Any]] = {}
     self_snapshot: dict[str, dict[str, Any]] = {}
     active_self_grant = plan_binding.get("self_development_grant") if isinstance(plan_binding, Mapping) and isinstance(plan_binding.get("self_development_grant"), Mapping) else None
     if preview["repository_authority"] == "write":
         from . import scheduler, self_development
         before_manifest = scheduler.repository_manifest(root)
+        before_snapshot = _snapshot_manifest(root, before_manifest)
         self_snapshot = self_development.authority_snapshot(root)
         if plan_binding is not None:
             from . import human_control
             before_paths = human_control.repository_paths(root)
+    else:
+        # The provider adapter is separately configured as read-only, but the
+        # controller remains the enforcement point.  Preserve enough evidence
+        # to undo a compromised or faulty adapter before refusing the turn.
+        from . import scheduler
+        before_manifest = scheduler.repository_manifest(root)
+        before_snapshot = _snapshot_manifest(root, before_manifest)
     try:
         provider_result = provider_codex.execute(
             cwd=root,
@@ -408,15 +487,42 @@ def run_controller(
     except provider_codex.ProviderError as exc:
         raise ControllerError(str(exc)) from exc
     attempted_after = adoption.capture_baseline(root).public()
-    if preview["repository_authority"] == "read-only" and attempted_after.get("sha256") != before.get("sha256"):
-        raise ControllerError("read-only provider turn changed the project baseline")
+    if preview["repository_authority"] == "read-only":
+        from . import scheduler
+        attempted_manifest = scheduler.repository_manifest(root)
+        read_only_delta = _actual_delta(before_manifest, attempted_manifest)
+        changed_paths = [str(item["path"]) for item in read_only_delta["paths"]]
+        if changed_paths:
+            restored = _restore_manifest_snapshot(root, before_snapshot, changed_paths)
+            if scheduler.repository_manifest(root) != before_manifest:
+                raise ControllerError("read-only provider mutation could not be restored exactly")
+            raise ControllerError(f"read-only provider turn changed repository paths; restored paths: {restored}")
 
     self_development_evidence: dict[str, Any] | None = None
     self_development_candidates: list[dict[str, Any]] = []
     after = attempted_after
+    actual_delta: dict[str, Any] = {"before_manifest_sha256": None, "after_manifest_sha256": None, "paths": [], "delta_sha256": _digest([])}
     if preview["repository_authority"] == "write":
         from . import scheduler, self_development
         attempted_manifest = scheduler.repository_manifest(root)
+        actual_delta = _actual_delta(before_manifest, attempted_manifest)
+        changed_paths = [str(item["path"]) for item in actual_delta["paths"]]
+        if plan_binding is None:
+            restored = _restore_manifest_snapshot(root, before_snapshot, changed_paths)
+            if scheduler.repository_manifest(root) != before_manifest:
+                raise ControllerError("write turn without approved scope changed the repository and restoration was incomplete")
+            raise ControllerError(
+                "write execution requires an approved immutable scope; "
+                "provider mutation is without an approved plan/gate authority; "
+                f"restored paths: {restored}"
+            )
+        approved_scope = set(plan_binding["repository_mutation_scope"])
+        outside_scope = sorted({str(item["path"]) for item in actual_delta["paths"]} - approved_scope)
+        if outside_scope:
+            restored = _restore_manifest_snapshot(root, before_snapshot, changed_paths)
+            if scheduler.repository_manifest(root) != before_manifest:
+                raise ControllerError("out-of-scope repository delta could not be restored exactly")
+            raise ControllerError(f"write execution exceeded approved repository scope: {outside_scope}; restored paths: {restored}")
         self_development_candidates = self_development.candidate_evidence(root, before_manifest, attempted_manifest)
         if self_development_candidates:
             changed_self = [str(row["path"]) for row in self_development_candidates]
@@ -584,6 +690,7 @@ def run_controller(
         "after_baseline_sha256": after["sha256"],
         "project_changed": before["sha256"] != after["sha256"],
         "change_attribution": attribution,
+        "actual_delta": actual_delta,
         "self_development": self_development_evidence,
         "self_development_expiration": self_development_expiration,
         "human_gate": human_gate,
@@ -599,6 +706,168 @@ def run_controller(
     result["record_sha256"] = _digest(result)
     adoption.write_runtime_record(root, f"controller-run-{expected[:16]}.json", result, actor="controller")
     return result
+
+
+def _controller_receipt(root: Path, turn_preview_sha256: str) -> dict[str, Any]:
+    """Load one exact controller-produced receipt; scheduler records are never inputs."""
+    turn = str(turn_preview_sha256 or "").strip().lower()
+    if not _HEX64.fullmatch(turn):
+        raise ControllerError("--turn-preview must be the exact 64-character controller turn preview SHA-256")
+    receipt = _runtime_json(root, f"controller-run-{turn[:16]}.json")
+    assert receipt is not None
+    recorded = str(receipt.get("record_sha256") or "")
+    body = dict(receipt)
+    body.pop("record_sha256", None)
+    if receipt.get("schema") != RUN_RESULT_SCHEMA or receipt.get("preview_sha256") != turn or not _HEX64.fullmatch(recorded) or recorded != _digest(body):
+        raise ControllerError("controller receipt is missing, malformed, or has failed its integrity check")
+    return receipt
+
+
+def _pending_provenance_witness(project: Path, operator: str, turn_preview_sha256: str) -> tuple[Path, dict[str, Any]]:
+    """Derive one recovery witness from a receipt and live state, never operator paths."""
+    root = adoption.resolve_worktree(project)
+    name = _operator(operator)
+    receipt = _controller_receipt(root, turn_preview_sha256)
+    binding = receipt.get("plan_binding")
+    if not isinstance(binding, Mapping) or receipt.get("repository_authority") != "write":
+        raise ControllerError("pending provenance recovery requires a plan-bound write controller receipt")
+    if receipt.get("operator") != name or receipt.get("provider_result", {}).get("status") != "PASS":
+        raise ControllerError("pending provenance recovery requires an accepted PASS controller receipt for this operator")
+    if receipt.get("human_gate") is not None or receipt.get("next_action") != "qualification-required":
+        raise ControllerError("pending provenance recovery refuses controller receipts with a gate, continuation, or non-qualification outcome")
+
+    from . import planning, scheduler, self_development
+    try:
+        bound_root, active, tx, policy_status, active_operator = planning._active_context(root, name)
+    except planning.PlanningError as exc:
+        raise ControllerError(str(exc)) from exc
+    state = planning._record(bound_root)
+    assert state is not None
+    if state.get("status") != "APPROVED" or state.get("execution_authority_granted") is not True:
+        raise ControllerError("pending provenance recovery requires the same approved executable plan")
+    prior = state.get("pending_provenance_witnesses") if isinstance(state.get("pending_provenance_witnesses"), list) else []
+    if any(isinstance(item, Mapping) and item.get("controller_receipt_sha256") == receipt.get("record_sha256") for item in prior):
+        raise ControllerError("controller receipt has already originated a pending-provenance witness")
+    plan = planning._validate_plan(state.get("plan"))
+    step = int(state.get("current_step") or 0)
+    authority_before = state.get("step_authority_baseline_sha256") or state.get("approval_baseline_sha256")
+    required = {
+        "plan_hash": state.get("plan_hash"),
+        "current_step": step,
+        "repository_mutation_scope": plan["repository_mutation_scope"],
+        "repository_mutation_scope_sha256": plan["repository_mutation_scope_sha256"],
+        "approval_baseline_sha256": state.get("approval_baseline_sha256"),
+        "step_authority_baseline_sha256": authority_before,
+    }
+    if any(binding.get(key) != value for key, value in required.items()):
+        raise ControllerError("controller receipt plan, step, scope, or checkpoint evidence is stale")
+    if state.get("operator") != active_operator or state.get("transaction_id") != tx.get("transaction_id") or receipt.get("transaction_id") != tx.get("transaction_id"):
+        raise ControllerError("controller receipt transaction/operator authority changed")
+    if state.get("controller_record_sha256") != active.get("record_sha256") or receipt.get("plan_binding", {}).get("plan_record_sha256") != binding.get("plan_record_sha256"):
+        # The receipt binding below is separately constrained by immutable plan/step/checkpoint evidence;
+        # this comparison merely rejects an obviously foreign or hand-spliced receipt.
+        raise ControllerError("controller receipt authority lineage changed")
+    if state.get("tracked_config_sha256") != policy_status.get("tracked_config_sha256") or state.get("review_sha256") != (policy_status.get("review") or {}).get("review_sha256"):
+        raise ControllerError("execution policy changed after controller receipt")
+    if receipt.get("before_baseline_sha256") != authority_before:
+        raise ControllerError("controller receipt does not begin at the current step checkpoint")
+
+    delta = receipt.get("actual_delta")
+    if not isinstance(delta, Mapping):
+        raise ControllerError("controller receipt lacks exact manifest delta evidence")
+    delta_body = {key: delta.get(key) for key in ("before_manifest_sha256", "after_manifest_sha256", "paths")}
+    if delta.get("delta_sha256") != _digest(delta_body) or not isinstance(delta.get("paths"), list) or not delta["paths"]:
+        raise ControllerError("controller receipt manifest delta evidence is malformed or empty")
+    current_manifest = scheduler.repository_manifest(root)
+    if _digest(current_manifest) != delta.get("after_manifest_sha256"):
+        raise ControllerError("live checkpoint-relative state no longer exactly matches the controller receipt")
+    current = adoption.capture_baseline(root).public()
+    if current.get("sha256") != receipt.get("after_baseline_sha256"):
+        raise ControllerError("live repository baseline no longer matches the controller receipt")
+    scope = set(plan["repository_mutation_scope"])
+    witnessed_paths: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in delta["paths"]:
+        if not isinstance(raw, Mapping):
+            raise ControllerError("controller receipt contains malformed path evidence")
+        path, kind = raw.get("path"), raw.get("kind")
+        before_fingerprint, after_fingerprint = raw.get("before_fingerprint"), raw.get("after_fingerprint")
+        if not isinstance(path, str) or path in seen or kind not in {"created", "modified", "deleted"}:
+            raise ControllerError("controller receipt contains duplicate or malformed path evidence")
+        seen.add(path)
+        if path not in scope or self_development.is_runtime_or_protected(path) or self_development.is_secret_path(path):
+            raise ControllerError(f"pending provenance recovery refuses unapproved or protected path: {path}")
+        expected_kind = "created" if before_fingerprint is None else "deleted" if after_fingerprint is None else "modified"
+        if kind != expected_kind or current_manifest.get(path) != after_fingerprint:
+            raise ControllerError(f"controller receipt fingerprint evidence is stale or malformed: {path}")
+        witnessed_paths.append({"path": path, "kind": kind, "before_fingerprint": before_fingerprint, "after_fingerprint": after_fingerprint})
+    if sorted(seen) != sorted(item["path"] for item in delta["paths"]):
+        raise ControllerError("controller receipt path evidence is not canonical")
+
+    self_paths = sorted(path for path in seen if self_development.is_self_development_path(root, path))
+    grant_lineage: dict[str, Any] | None = None
+    if self_paths:
+        evidence = receipt.get("self_development")
+        grant_sha = evidence.get("grant_sha256") if isinstance(evidence, Mapping) else None
+        history = state.get("self_development_grant_history") if isinstance(state.get("self_development_grant_history"), list) else []
+        expirations = state.get("self_development_expirations") if isinstance(state.get("self_development_expirations"), list) else []
+        grant = next((item for item in history if isinstance(item, Mapping) and item.get("grant_sha256") == grant_sha), None)
+        expired = next((item for item in expirations if isinstance(item, Mapping) and item.get("grant_sha256") == grant_sha), None)
+        if not isinstance(evidence, Mapping) or evidence.get("status") != "AUTHORIZED" or sorted(evidence.get("changed_paths") or []) != self_paths or not isinstance(grant, Mapping) or not isinstance(expired, Mapping):
+            raise ControllerError("pending provenance recovery lacks applicable self-development grant lineage")
+        if grant.get("plan_hash") != state.get("plan_hash") or int(grant.get("step") or 0) != step or grant.get("repository_mutation_scope_sha256") != plan["repository_mutation_scope_sha256"]:
+            raise ControllerError("self-development grant lineage is stale for the current plan authority")
+        grant_lineage = {"grant_sha256": grant_sha, "grant": dict(grant), "expiration": dict(expired)}
+    elif receipt.get("self_development") is not None:
+        raise ControllerError("controller receipt self-development evidence does not match its pending delta")
+
+    witness: dict[str, Any] = {
+        "schema": PENDING_PROVENANCE_WITNESS_SCHEMA,
+        "plan_hash": state["plan_hash"], "current_step": step,
+        "repository_mutation_scope": list(plan["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": plan["repository_mutation_scope_sha256"],
+        "approval_baseline_sha256": state["approval_baseline_sha256"],
+        "step_checkpoint_baseline_sha256": authority_before,
+        "before_baseline_sha256": receipt["before_baseline_sha256"],
+        "after_baseline_sha256": receipt["after_baseline_sha256"],
+        "controller_turn_preview_sha256": receipt["preview_sha256"],
+        "controller_receipt_sha256": receipt["record_sha256"],
+        "paths": witnessed_paths,
+        "self_development_grant_lineage": grant_lineage,
+    }
+    witness["witness_sha256"] = _digest(witness)
+    return root, witness
+
+
+def build_pending_provenance_recovery_preview(project: Path, operator: str, turn_preview_sha256: str) -> dict[str, Any]:
+    root, witness = _pending_provenance_witness(project, operator, turn_preview_sha256)
+    body: dict[str, Any] = {
+        "schema": PENDING_PROVENANCE_PREVIEW_SCHEMA, "product_version": PRODUCT.version,
+        "operator": _operator(operator), "worktree": str(root), "witness": witness,
+        "requires_explicit_confirmation": True, "confirmation": "RECOVER_PENDING_PROVENANCE",
+    }
+    body["preview_sha256"] = _digest(body)
+    return body
+
+
+def recover_pending_provenance(project: Path, operator: str, turn_preview_sha256: str, preview_sha256: str, confirmation: str) -> dict[str, Any]:
+    if confirmation != "RECOVER_PENDING_PROVENANCE":
+        raise ControllerError("explicit confirmation required: --confirm RECOVER_PENDING_PROVENANCE")
+    expected = str(preview_sha256 or "").strip().lower()
+    if not _HEX64.fullmatch(expected):
+        raise ControllerError("--preview must be the exact 64-character recovery preview SHA-256")
+    preview = build_pending_provenance_recovery_preview(project, operator, turn_preview_sha256)
+    if preview["preview_sha256"] != expected:
+        raise ControllerError("pending provenance recovery preview is stale; authority or live evidence changed")
+    root = Path(preview["worktree"])
+    witness = dict(preview["witness"])
+    adoption.write_runtime_record(root, f"pending-provenance-{witness['controller_turn_preview_sha256'][:16]}.json", witness, actor="controller")
+    from . import planning
+    try:
+        recovered = planning.recover_pending_provenance_same_step(root, _operator(operator), witness=witness)
+    except planning.PlanningError as exc:
+        raise ControllerError(str(exc)) from exc
+    return {"schema": "stygnox_pending_provenance_recovery_result_v1", "preview_sha256": expected, "witness": witness, "plan_record_sha256": recovered["plan_record_sha256"], "result": "PENDING_PROVENANCE_RECOVERED"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -637,6 +906,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--repository-authority", required=True, choices=["read-only", "write"])
     run.add_argument("--preview", required=True)
     run.add_argument("--confirm", required=True)
+
+    pending_preview = sub.add_parser("recover-pending-provenance-preview", help="preview controller-receipt-bound pending provenance recovery")
+    project_arg(pending_preview)
+    pending_preview.add_argument("--operator", required=True)
+    pending_preview.add_argument("--turn-preview", required=True)
+    pending = sub.add_parser("recover-pending-provenance", help="apply one exact controller-receipt-bound pending provenance recovery")
+    project_arg(pending)
+    pending.add_argument("--operator", required=True)
+    pending.add_argument("--turn-preview", required=True)
+    pending.add_argument("--preview", required=True)
+    pending.add_argument("--confirm", required=True)
     return parser
 
 
@@ -654,6 +934,10 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
             result = deactivate_controller(args.project, args.operator, args.confirm)
         elif args.action == "run-preview":
             result = build_run_preview(args.project, args.operator, args.objective, args.repository_authority)
+        elif args.action == "recover-pending-provenance-preview":
+            result = build_pending_provenance_recovery_preview(args.project, args.operator, args.turn_preview)
+        elif args.action == "recover-pending-provenance":
+            result = recover_pending_provenance(args.project, args.operator, args.turn_preview, args.preview, args.confirm)
         else:
             result = run_controller(
                 args.project,

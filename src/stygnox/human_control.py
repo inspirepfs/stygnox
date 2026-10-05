@@ -307,6 +307,8 @@ def _decision_preview(
     reason_text = _clean_text(reason, label=f"{action} reason") if action in {"resume", "resolve"} else None
     allowed: list[str] = []
     if action == "steer":
+        plan = planning._validate_plan(state.get("plan"))
+        scope = set(plan["repository_mutation_scope"])
         candidates = set(gate.get("allowed_new_test_candidates") or [])
         if gate.get("kind") == "test-policy":
             candidates = set(_approval_new_test_candidates(state, candidates))
@@ -318,6 +320,8 @@ def _decision_preview(
                 raise HumanControlError("--allow-new-test is valid only for the current test-policy gate")
             if path not in candidates:
                 raise HumanControlError(f"--allow-new-test path is not part of the current policy gate: {path}")
+            if path not in scope:
+                raise HumanControlError(f"--allow-new-test path is outside the approved repository scope: {path}")
             if path not in allowed:
                 allowed.append(path)
     elif list(allow_new_tests):
@@ -343,6 +347,8 @@ def _decision_preview(
         "plan_hash": state["plan_hash"],
         "plan_record_sha256": state["record_sha256"],
         "current_step": int(state["current_step"]),
+        "repository_mutation_scope": list(planning._validate_plan(state["plan"])["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": planning._validate_plan(state["plan"])["repository_mutation_scope_sha256"],
         "gate_id": gate["gate_id"],
         "gate_sha256": gate["gate_sha256"],
         "blocked_baseline_sha256": current["sha256"],
@@ -391,6 +397,8 @@ def _apply_decision(preview: Mapping[str, Any], supplied_preview: str, confirmat
         or preview["plan_record_sha256"] != state.get("record_sha256")
         or preview["plan_hash"] != state.get("plan_hash")
         or preview["current_step"] != int(state["current_step"])
+        or preview["repository_mutation_scope"] != planning._validate_plan(state["plan"])["repository_mutation_scope"]
+        or preview["repository_mutation_scope_sha256"] != planning._validate_plan(state["plan"])["repository_mutation_scope_sha256"]
         or preview["gate_id"] != gate.get("gate_id")
         or preview["gate_sha256"] != gate.get("gate_sha256")
         or preview["blocked_baseline_sha256"] != current.get("sha256")
@@ -405,6 +413,8 @@ def _apply_decision(preview: Mapping[str, Any], supplied_preview: str, confirmat
         "operator": preview["operator"],
         "plan_hash": preview["plan_hash"],
         "step": preview["current_step"],
+        "repository_mutation_scope": list(preview["repository_mutation_scope"]),
+        "repository_mutation_scope_sha256": preview["repository_mutation_scope_sha256"],
         "gate_id": preview["gate_id"],
         "gate_sha256": preview["gate_sha256"],
         "preview_sha256": expected,

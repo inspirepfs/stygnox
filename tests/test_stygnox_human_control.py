@@ -80,13 +80,27 @@ def active_reviewed(repo: Path, external: Path) -> None:
         controller.activate_controller(repo, "Operator One", "ACTIVATE")
 
 
-def planning_provider(steps: list[dict]) -> dict:
+def planning_provider(steps: list[dict], scope: list[str] | None = None) -> dict:
     return {
         "provider": "codex",
         "model": "gpt-test",
         "effort": "high",
         "sandbox": "read-only",
-        "payload": {"steps": steps, "files_inspected": ["README.md"]},
+        "payload": {
+            "steps": steps,
+            "files_inspected": ["README.md"],
+            # These fixtures exercise policy gating for test deltas.  They
+            # deliberately keep the potential test paths inside the immutable
+            # plan ceiling so policy—not an unrelated scope rejection—is the
+            # behavior under test.  Individual tests may supply a narrower
+            # ceiling when that distinction matters.
+            "repository_mutation_scope": scope or [
+                "README.md",
+                "tests/test_added.py",
+                "tests/test_existing.py",
+                "tests/test_new.py",
+            ],
+        },
         "metrics": {
             "commands_executed": 1,
             "input_tokens": 10,
@@ -121,7 +135,7 @@ def implementation_result(status: str, summary: str) -> dict:
     }
 
 
-def approve(repo: Path, steps: list[dict]) -> dict:
+def approve(repo: Path, steps: list[dict], *, scope: list[str] | None = None) -> dict:
     preview = planning.build_proposal_preview(
         repo,
         "Operator One",
@@ -130,7 +144,7 @@ def approve(repo: Path, steps: list[dict]) -> dict:
         min_steps=len(steps),
         max_steps=len(steps),
     )
-    with mock.patch.object(provider_codex, "execute_structured", return_value=planning_provider(steps)):
+    with mock.patch.object(provider_codex, "execute_structured", return_value=planning_provider(steps, scope)):
         candidate = planning.propose_plan(
             repo,
             "Operator One",

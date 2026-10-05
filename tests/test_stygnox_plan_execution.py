@@ -82,6 +82,7 @@ def proposal_result() -> dict:
                 }
             ],
             "files_inspected": ["README.md"],
+            "repository_mutation_scope": ["README.md"],
         },
         "metrics": {
             "commands_executed": 1,
@@ -177,6 +178,8 @@ class StygnoxPlanExecutionBindingTests(TestCase):
             self.assertEqual(1, binding["current_step"])
             self.assertEqual(1, binding["total_steps"])
             self.assertEqual("add-only", binding["test_change_policy"])
+            self.assertEqual(["README.md"], binding["repository_mutation_scope"])
+            self.assertEqual(approved["repository_mutation_scope_sha256"], binding["repository_mutation_scope_sha256"])
             self.assertEqual(approved["plan"]["steps"][0]["acceptance"], binding["acceptance"])
             with self.assertRaisesRegex(controller.ControllerError, "exactly match the current approved plan step"):
                 controller.build_run_preview(repo, "Operator One", "different objective", "write")
