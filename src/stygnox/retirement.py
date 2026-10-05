@@ -63,7 +63,13 @@ def _record_id(plan_hash: str, reason: str) -> str:
     return f"RT-{now.strftime('%Y%m%dT%H%M%SZ')}-{suffix}"
 
 
-def _normalize_path(value: str) -> str:
+def _is_protected_runtime_path(path: str) -> bool:
+    return path in {".git", adoption.RUNTIME_NAME, ".ralph"} or path.startswith(
+        (".git/", f"{adoption.RUNTIME_NAME}/", ".ralph/")
+    )
+
+
+def _normalize_path(value: str, *, allow_protected: bool = False) -> str:
     raw = str(value or "").strip().replace("\\", "/")
     while raw.startswith("./"):
         raw = raw[2:]
@@ -71,7 +77,7 @@ def _normalize_path(value: str) -> str:
     if not raw or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise RetirementError(f"invalid retirement path: {value!r}")
     normalized = path.as_posix()
-    if normalized in {".git", adoption.RUNTIME_NAME, ".ralph"} or normalized.startswith((".git/", f"{adoption.RUNTIME_NAME}/", ".ralph/")):
+    if _is_protected_runtime_path(normalized) and not allow_protected:
         raise RetirementError(f"retirement refuses protected/runtime path: {normalized}")
     return normalized
 
@@ -93,7 +99,11 @@ def capture_approval_snapshot(root: Path, plan_hash: str, manifest: Mapping[str,
     """Capture exact approval-time project bytes/modes in ignored controller runtime."""
     if not _HEX64.fullmatch(str(plan_hash or "")):
         raise RetirementError("approval snapshot requires exact plan hash")
-    paths = sorted(_normalize_path(path) for path in manifest)
+    paths = sorted(
+        normalized
+        for normalized in (_normalize_path(path, allow_protected=True) for path in manifest)
+        if not _is_protected_runtime_path(normalized)
+    )
     target = _runtime_path(root, _archive_name(plan_hash))
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:

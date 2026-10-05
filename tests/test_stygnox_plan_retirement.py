@@ -263,6 +263,34 @@ class StygnoxPlanRetirementTests(TestCase):
             self.assertEqual("ROLLED_BACK", result["result"])
             self.assertEqual("retained\n", (repo / "retained.py").read_text(encoding="utf-8"))
 
+    def test_approval_snapshot_binds_but_does_not_archive_protected_legacy_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            init_repo(repo)
+
+            legacy = repo / ".ralph" / "policy.md"
+            legacy.parent.mkdir()
+            legacy.write_text("# historical policy\n", encoding="utf-8")
+            git(repo, "add", ".ralph/policy.md")
+            git(repo, "commit", "-q", "-m", "track historical policy")
+
+            active_reviewed(repo, root / "external")
+            approved = approve(repo)
+
+            state = planning.plan_status(repo)["plan"]
+            self.assertIn(".ralph/policy.md", state["approval_repository_manifest"])
+
+            snapshot = state["approval_rollback_snapshot"]
+            manifest_sha = retirement._digest(
+                {str(k): str(v) for k, v in state["approval_repository_manifest"].items()}
+            )
+            self.assertEqual(manifest_sha, snapshot["manifest_sha256"])
+
+            archive = repo / adoption.RUNTIME_NAME / snapshot["archive"]
+            with tarfile.open(archive, "r") as captured:
+                self.assertNotIn(".ralph/policy.md", captured.getnames())
+
     def test_cli_routes_retirement_and_approval_snapshot_is_integrity_bound(self) -> None:
         self.assertEqual("retirement", cli.build_parser().parse_args(["retirement"]).command)
         with tempfile.TemporaryDirectory() as td:
