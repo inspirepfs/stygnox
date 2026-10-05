@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,6 +106,76 @@ class RepositoryMutationScopeV2Tests(unittest.TestCase):
         unordered_scope = {**candidate, "repository_mutation_scope": ["tests/test_scope.py", "scripts/ralph.py"]}
         with self.assertRaisesRegex(ValueError, "normalized representation"):
             ralph.validate_complete_plan(unordered_scope)
+
+    def test_unapproved_provider_scope_can_be_canonicalized_before_strict_admission(self):
+        candidate = plan(scope=["tests/test_scope.py", "./scripts/ralph.py"])
+        candidate.pop("repository_authority")
+        candidate["repository_mutation_scope"] = list(
+            ralph.core.normalize_repository_mutation_scope(
+                candidate["repository_mutation_scope"]
+            )
+        )
+        ralph.controller_inject_repository_authority(candidate, "write")
+        self.assertEqual(
+            ["scripts/ralph.py", "tests/test_scope.py"],
+            candidate["repository_mutation_scope"],
+        )
+        ralph.validate_complete_plan(candidate)
+
+    def test_unapproved_provider_scope_canonicalization_still_rejects_duplicate_semantics(self):
+        candidate = plan(scope=["scripts/ralph.py", "./scripts/ralph.py"])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            ralph.core.normalize_repository_mutation_scope(
+                candidate["repository_mutation_scope"]
+            )
+
+    def test_cmd_propose_canonicalizes_provider_scope_before_immutable_admission(self):
+        proposal = plan(scope=["tests/test_scope.py", "./scripts/ralph.py"])
+        proposal.pop("repository_authority")
+        proposal.pop("planning")
+
+        args = argparse.Namespace(
+            goal=proposal["goal"],
+            from_rejection=None,
+            from_retirement=None,
+            repository_authority="write",
+            min_steps=1,
+            max_steps=1,
+        )
+
+        with (
+            RepoHarness(),
+            mock.patch.object(
+                ralph,
+                "query_codex_rate_limits",
+                return_value={},
+            ),
+            mock.patch.object(
+                ralph,
+                "codex_usage_guard",
+                return_value=("SAFE", []),
+            ),
+            mock.patch.object(
+                ralph,
+                "run_codex",
+                return_value=proposal,
+            ),
+        ):
+            self.assertEqual(0, ralph.cmd_propose(args))
+
+            state = ralph.load_state()
+
+            self.assertEqual("AWAITING_APPROVAL", state["status"])
+
+            self.assertEqual(
+                ["scripts/ralph.py", "tests/test_scope.py"],
+                state["plan"]["repository_mutation_scope"],
+            )
+
+            ralph.validate_complete_plan(
+                state["plan"],
+                state["plan_hash"],
+            )
 
     def test_write_v2_requires_a_present_bounded_nonempty_scope(self):
         cases = (

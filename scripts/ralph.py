@@ -6186,6 +6186,7 @@ Goal: {goal}
 {rejection_text}
 Return between {min_steps} and {max_steps} ordered, concrete implementation steps. Keep steps small enough to implement and qualify independently.
 For each step choose test_change_policy: none, add-only, or modify. Prefer add-only; use modify only when modifying existing tests is genuinely required.
+Return repository_mutation_scope as exact repository-relative paths with no globs, duplicates, or root entry; order the paths lexicographically. The controller will independently canonicalize and validate this unapproved field before immutable admission.
 Use targeted symbol/range reads instead of broad repository ingestion. Avoid reading docs, README, CHANGELOG, or Git history unless directly needed for the goal.
 Do not execute or edit anything. Respect {PROJECT_PROFILE.policy_reference()}. Put discovered nice-to-have work into later plan steps only if it directly serves the goal; otherwise it belongs in the ideas bucket during execution.
 """
@@ -7547,6 +7548,16 @@ def cmd_propose(args: argparse.Namespace) -> int:
         "read-only",
         context="REPLACEMENT PLAN PROPOSAL" if carry_forward or rejection_binding else "PLAN PROPOSAL",
     )
+    # The provider schema can require an array of exact paths, but it cannot
+    # express the controller's canonical lexical ordering. Normalize the
+    # unapproved provider field before controller-owned bindings, hashing, or
+    # immutable admission. The stored-plan validator remains strict.
+    if core.REPOSITORY_MUTATION_SCOPE_FIELD in plan:
+        plan[core.REPOSITORY_MUTATION_SCOPE_FIELD] = list(
+            core.normalize_repository_mutation_scope(
+                plan[core.REPOSITORY_MUTATION_SCOPE_FIELD]
+            )
+        )
     if rejection_binding is not None:
         if "rejection_lineage" in plan:
             raise RuntimeError("model proposal must not supply controller-owned rejection-lineage binding")
