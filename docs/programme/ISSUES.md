@@ -179,8 +179,8 @@ Do not delete historical evidence merely to make tests pass.
 
 ## STYX-005 — Installed Product Cannot Yet Perform Full Qualified Self-Rebind
 
-**Status:** OPEN  
-**Target:** R3D.1  
+**Status:** CLOSED — R3D.1 exact-artifact qualification 2026-10-07
+**Target:** R3D.1
 **Severity:** BLOCKING FOR LATER R3D
 
 ### Finding
@@ -209,6 +209,15 @@ and lineage before a fresh-process controller rebind.  The issue remains open
 until the controlled installed-artifact qualification demonstrates the full
 handoff and hostile cases.
 
+### Step 1 exact-artifact qualification
+
+The D8.7 build-once gate now invokes an R3D.1 installed-successor qualifier.
+It installs the supplied wheel into a fresh virtual environment, binds the
+pending handoff to exact wheel/RECORD/executable identities, and requires the
+fresh successor receipt before later work opens.  Hostile refusals retain the
+predecessor records; CAP-011 history is neither provider attribution nor
+executable authority.
+
 ### Step 3 transition gate
 
 An accepted R3D.1 step can now require an independently attested
@@ -223,15 +232,25 @@ installed-successor handoff as its current use.
 The stalled Step 1 runtime exposed a self-hosting deadlock rather than a reason
 to relax authority.  The operator froze that runtime and performed one bounded
 source-level closure that preserves its evidence but does not treat the stalled
-transaction as successful execution.  STYX-005 remains OPEN until a fresh
-installed artifact proves the successor handoff end to end.
+transaction as successful execution.
+
+### Final resolution
+
+The D8.7 build-once gate now qualifies the exact release wheel through a fresh
+installed successor.  The qualification binds wheel/package/RECORD/executable,
+canonical worktree, plan/scope/provenance/checkpoint lineage, transaction,
+controller and runtime epoch.  It proves a separately-started installed
+successor becomes live before later work opens and proves hostile source-tree,
+PYTHONPATH/Ralph-decoy, copied-launcher, substituted-artifact and failed-handoff
+cases retain predecessor authority.  The success receipt explicitly records
+`source_tree_fallback=false` and `ralph_fallback=false`.  STYX-005 is closed.
 
 ---
 
 ## STYX-006 — Bootstrap Configuration Requires Separate Provenance
 
-**Status:** OPEN  
-**Target:** R3D.1  
+**Status:** CLOSED — R3D.1 bootstrap disposition 2026-10-07
+**Target:** R3D.1
 **Severity:** HIGH
 
 ### Finding
@@ -261,12 +280,13 @@ qualified provider delta
 finalized provider delta
 ```
 
-### Step 1 reconciliation
+### Final resolution
 
-The existing bootstrap configuration remains operator adoption material.  It
-has not been reattributed to provider implementation by the R3D.1 rebind work;
-separate disposition and controlled qualification remain required before this
-issue can close.
+The installed-successor qualification records `stygnox.toml` and
+`stygnox.policy.md` as `OPERATOR_ADOPTION_MATERIAL`, with provider attribution
+`EXCLUDED` and accepted/qualified/finalized provider-delta flags all false.
+The rebind lineage preserves that disposition rather than absorbing bootstrap
+material into provider implementation.  STYX-006 is closed.
 
 ---
 
@@ -449,6 +469,39 @@ Repeated full planning passes, giant manually reconstructed prompts, duplicated 
 - repository evidence preferred over rediscovery through conversation.
 
 Token efficiency is a legitimate engineering requirement.
+
+---
+
+## STYX-014 — `add-only` Continuation Used Per-Turn Instead of Approval Baseline
+
+**Status:** CLOSED — consolidated R3D.1 closure patch 2026-10-07
+**Target:** R3D.1
+**Severity:** HIGH
+
+### Finding
+
+A fresh installed R3D.1 controller legally created an approval-time-new test
+under `test_change_policy=add-only`, continued the same approved step, then
+incorrectly treated refinement of that same test as modification of a
+pre-existing test.  The worker prompt encoded the same per-turn rule.
+
+### Root Cause
+
+Native enforcement supplied repository paths from the beginning of each
+provider turn to the test-policy evaluator.  This reset test presence across
+continuation turns instead of preserving the immutable plan-approval baseline.
+
+### Resolution
+
+`add-only` presence is now evaluated against `approval_repository_manifest`.
+Tests present at plan approval remain read-only; tests absent at plan approval
+remain new-test paths across bounded continuation turns, subject to immutable
+mutation scope and separate self-development authority.  Worker guidance
+describes the same rule.
+
+A behavioral regression creates an approval-time-new test on turn one, records
+a same-step continuation, refines it on turn two, and proves no test-policy
+gate opens.
 
 ---
 

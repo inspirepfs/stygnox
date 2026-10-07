@@ -674,6 +674,45 @@ class StygnoxHumanControlTests(TestCase):
             self.assertIsNone(modify_result["human_gate"])
             self.assertEqual("qualification-required", modify_result["next_action"])
 
+    def test_add_only_new_test_remains_refinable_across_same_step_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            init_repo(repo)
+            active_reviewed(repo, root / "external")
+            approved = approve(repo, [step(1, policy="add-only")])
+            self.assertNotIn("tests/test_added.py", approved["approval_repository_manifest"])
+            objective = approved["plan"]["steps"][0]["objective"]
+
+            first_preview = controller.build_run_preview(repo, "Operator One", objective, "write")
+
+            def create_test(**_kwargs: object) -> dict:
+                (repo / "tests").mkdir()
+                (repo / "tests" / "test_added.py").write_text("value = 1\n", encoding="utf-8")
+                result = implementation_result("PASS", "new test needs one refinement turn")
+                result["blocker_class"] = "continuation"
+                return result
+
+            with mock.patch.object(provider_codex, "execute", side_effect=create_test):
+                first = controller.run_controller(
+                    repo, "Operator One", objective, "write", first_preview["preview_sha256"], "RUN"
+                )
+            self.assertIsNone(first["human_gate"])
+            self.assertEqual("continue-same-step", first["next_action"])
+            second_preview = controller.build_run_preview(repo, "Operator One", objective, "write")
+
+            def refine_test(**_kwargs: object) -> dict:
+                (repo / "tests" / "test_added.py").write_text("value = 2\n", encoding="utf-8")
+                return implementation_result("PASS", "approval-time-new test refined")
+
+            with mock.patch.object(provider_codex, "execute", side_effect=refine_test):
+                second = controller.run_controller(
+                    repo, "Operator One", objective, "write", second_preview["preview_sha256"], "RUN"
+                )
+            self.assertIsNone(second["human_gate"])
+            self.assertEqual("qualification-required", second["next_action"])
+            self.assertEqual("value = 2\n", (repo / "tests" / "test_added.py").read_text(encoding="utf-8"))
+
     def test_steer_refuses_new_test_grant_for_preexisting_test_path(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

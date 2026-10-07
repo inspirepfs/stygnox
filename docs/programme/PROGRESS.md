@@ -115,21 +115,23 @@ Disposition:
 
 ## R3D.1 — Installed Identity / Upgrade-Rebind
 
-- [ ] establish fresh repaired controller authority
-- [ ] reproduce accepted R3D plan against repaired baseline
-- [ ] approve plan
-- [ ] separately disposition `stygnox.toml`
-- [ ] separately disposition `stygnox.policy.md`
-- [ ] deterministic accepted implementation artifact
-- [ ] installed artifact verification
-- [ ] package/RECORD binding
-- [ ] executable binding
-- [ ] quiescent handoff
-- [ ] runtime epoch/controller rebind
-- [ ] fresh-process proof
-- [ ] hostile upgrade/rebind regressions
-- [ ] Stage 1 qualification
-- [ ] reconcile roadmap/progress/issues
+**Status: CLOSED**
+
+- [x] establish fresh repaired controller authority
+- [x] reproduce accepted R3D plan against repaired baseline
+- [x] approve plan
+- [x] separately disposition `stygnox.toml`
+- [x] separately disposition `stygnox.policy.md`
+- [x] deterministic accepted implementation artifact
+- [x] installed artifact verification
+- [x] package/RECORD binding
+- [x] executable binding
+- [x] quiescent handoff
+- [x] runtime epoch/controller rebind
+- [x] fresh-process proof
+- [x] hostile upgrade/rebind regressions
+- [x] Stage 1 qualification
+- [x] reconcile roadmap/progress/issues
 
 ### 2026-10-05 — Step 1 implementation evidence
 
@@ -168,6 +170,35 @@ carry-forward evolution and installed-successor binding guards.  It is not a
 claim that the stalled plan autonomously completed.  After commit/push, R3D.1
 must resume from a fresh installed authority epoch and re-prove the remaining
 installed-successor handoff/qualification work.
+
+### 2026-10-07 — Exact installed-successor qualification
+
+The D8.7 exact-wheel gate includes R3D.1 installed-successor qualification.
+It reports wheel, installed package/RECORD/executable, lineage, epoch and the
+successor receipt, while hostile handoffs must retain predecessor authority.
+
+### 2026-10-07 — R3D.1 final closure
+
+R3D.1 is closed by one consolidated operator patch after the fresh installed
+controller exposed an approval-baseline regression in native `add-only` test
+policy.  The repaired controller evaluates test presence against the immutable
+plan-approval repository manifest, so a test absent at approval remains an
+authorised new-test path across bounded same-step continuation turns while
+approval-time tests remain read-only.  A two-turn behavioral regression guards
+that semantic contract.
+
+The build-once D8.7 gate now composes the R3D.1 exact-wheel installed-successor
+qualifier.  It proves the wheel/package/RECORD/executable binding, canonical
+worktree and lineage, quiescent fresh-process successor transaction/controller,
+runtime epoch advancement, bootstrap provenance exclusion, and fail-closed
+source-tree, PYTHONPATH/Ralph-decoy, copied-launcher, substituted-artifact and
+failed-handoff cases with predecessor authority retained.
+
+`stygnox.toml` and `stygnox.policy.md` are explicitly recorded as operator
+adoption material and excluded from provider attribution.  STYX-005 and
+STYX-006 are therefore closed.  Do not start R3D.2 until the locked post-R3D.1
+`stygnox top` programme amendment has been assessed and integrated into the
+authoritative programme documents.
 
 ## R3D.2 — Canonical Runtime Seam
 

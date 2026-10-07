@@ -254,6 +254,8 @@ Exactly five architectural stages are intended.
 
 ## R3D.1 — Installed Product Identity and Upgrade/Rebind
 
+**Status: CLOSED (2026-10-07)**
+
 Build the native self-development lifecycle.
 
 Requirements include:
@@ -287,6 +289,29 @@ explicit operator source intervention, not by widening controller authority.
 The stalled runtime remains historical evidence; after the closure commit a
 fresh installed authority epoch must re-prove the native rebase, provenance and
 installed-successor semantics before R3D.1 can close.
+
+Qualification note (2026-10-07): the D8.7 build-once exact-wheel gate exercises
+the pending installed-successor transition from a fresh virtual environment.
+The successor must make its transaction/controller live and attest the same
+wheel, installed identity, canonical worktree, plan lineage and runtime epoch;
+source/PYTHONPATH/Ralph decoys, copied launchers, artifact substitution and
+handoff failures retain predecessor authority.
+
+Closure note (2026-10-07): R3D.1 closed after the fresh installed authority
+exposed and the consolidated closure patch repaired a native `add-only`
+continuation regression.  Test-policy presence is now measured against the
+immutable plan-approval repository manifest rather than each provider-turn
+baseline, preserving approval-time test immutability while permitting
+approval-time-new tests to be refined across bounded same-step continuations.
+The exact-wheel qualifier is composed into D8.7 and proves installed successor
+identity/lineage, fresh-process rebind, runtime epoch transfer, failure-safe
+predecessor retention and zero source/Ralph fallback.  Bootstrap config/policy
+are operator adoption material with provider attribution explicitly excluded.
+
+Before R3D.2 begins, assess and integrate the locked R3D.4 `stygnox top`
+programme amendment into ROADMAP/PROGRESS/ISSUES; this is programme
+reconciliation only and does not authorise R3D.4 implementation ahead of its
+stage.
 
 - `stygnox.toml`
 - `stygnox.policy.md`

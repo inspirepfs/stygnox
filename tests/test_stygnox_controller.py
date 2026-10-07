@@ -148,9 +148,10 @@ class StygnoxControllerTests(TestCase):
 
         prompt = controller._prompt(preview)
 
-        self.assertIn("add-only makes every test path already present at the start of this controller turn read-only", prompt)
-        self.assertIn("including a test created by an earlier turn of this same step", prompt)
-        self.assertIn("Being listed in the repository mutation scope does not override this restriction", prompt)
+        self.assertIn("add-only makes every test path present in the immutable plan-approval repository baseline read-only", prompt)
+        self.assertIn("absent at plan approval remains an authorised new-test path", prompt)
+        self.assertIn("created or refined across bounded continuation turns", prompt)
+        self.assertIn("Being listed in the mutation scope never permits editing a test that existed at plan approval", prompt)
         self.assertIn("change the implementation instead", prompt)
         self.assertIn("Bounded human direction for this retry: Do not modify tests/test_existing.py.", prompt)
 

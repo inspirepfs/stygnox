@@ -84,10 +84,10 @@ def repository_paths(root: Path) -> set[str]:
 def test_policy_violations(
     attribution: Mapping[str, Any],
     policy: str,
-    before_paths: Iterable[str],
+    approval_paths: Iterable[str],
     allowed_new_tests: Iterable[str] = (),
 ) -> tuple[list[str], list[str]]:
-    """Return (violations, exact-new-test candidates) for the current controller turn."""
+    """Return violations/candidates against the immutable plan-approval repository baseline."""
     if policy not in {"none", "add-only", "modify"}:
         raise HumanControlError(f"unsupported test_change_policy: {policy!r}")
     changed: set[str] = set()
@@ -98,17 +98,17 @@ def test_policy_violations(
                 changed.add(path)
     if policy == "modify":
         return [], []
-    before = {_normalize_repo_path(path) for path in before_paths}
+    approval = {_normalize_repo_path(path) for path in approval_paths}
     allowed = {_normalize_repo_path(path) for path in allowed_new_tests}
     violations: list[str] = []
     candidates: list[str] = []
     for path in sorted(changed):
         if path in allowed:
             continue
-        if policy == "add-only" and path not in before:
+        if policy == "add-only" and path not in approval:
             continue
         violations.append(path)
-        if path not in before and path.startswith("tests/"):
+        if path not in approval and path.startswith("tests/"):
             candidates.append(path)
     return violations, candidates
 

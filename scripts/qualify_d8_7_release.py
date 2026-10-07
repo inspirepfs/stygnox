@@ -27,6 +27,7 @@ QUALIFIERS = [
     ("D8.4", "qualify_d8_4_lifecycle.py"),
     ("D8.5", "qualify_d8_5_controller.py"),
     ("D8.6B", "qualify_d8_6b_tui.py"),
+    ("R3D.1", "qualify_r3d_1_installed_successor.py"),
 ]
 REQUIRED_RELEASE_FILES = {
     "OPERATOR-GUIDE.md",
@@ -49,10 +50,12 @@ REQUIRED_SOURCE_MEMBERS = {
     "docs/web-ui-retirement.md",
     "scripts/build_d8_7_release.py",
     "scripts/qualify_d8_7_release.py",
+    "scripts/qualify_r3d_1_installed_successor.py",
     "scripts/stygnox_qualification_artifact.py",
     "branding/docs/STYLE_GUIDE.md",
     "provenance/stygnox-extraction-seed.json",
     "tests/test_stygnox_release.py",
+    "tests/test_stygnox_r3d_installed_successor_qualification.py",
     "tests/test_stygnox_presentation_boundary.py",
     "CLA.md",
     "COMMERCIAL-LICENSING.md",

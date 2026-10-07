@@ -538,12 +538,13 @@ def _prompt(preview: Mapping[str, Any]) -> str:
         test_policy = str(binding.get("test_change_policy") or "none")
         if test_policy == "add-only":
             steering += (
-                "Test-policy enforcement for this turn: add-only makes every test path already present at the start "
-                "of this controller turn read-only. Do not edit, delete, rename, move, or rewrite an existing test "
-                "file, including a test created by an earlier turn of this same step. Being listed in the repository "
-                "mutation scope does not override this restriction. If an existing test conflicts with the implementation, "
-                "change the implementation instead. You may create only genuinely new test files that are inside the "
-                "immutable repository mutation scope or explicitly listed as human-authorised new test paths.\n"
+                "Test-policy enforcement for this approved plan: add-only makes every test path present in the immutable "
+                "plan-approval repository baseline read-only. A test path absent at plan approval remains an authorised "
+                "new-test path for the lifetime of this approved plan and may be created or refined across bounded "
+                "continuation turns, provided it remains inside the immutable repository mutation scope and any separate "
+                "self-development authority requirements are satisfied. Being listed in the mutation scope never permits "
+                "editing a test that existed at plan approval. If an approval-time test conflicts with the implementation, "
+                "change the implementation instead.\n"
             )
         elif test_policy == "none":
             steering += (
@@ -620,7 +621,7 @@ def run_controller(
     except provider_usage.ProviderUsageError as exc:
         raise ControllerUsageBlocked(str(exc)) from exc
     before = adoption.capture_baseline(root).public()
-    before_paths: set[str] = set()
+    approval_paths: set[str] = set()
     before_manifest: dict[str, str] = {}
     before_snapshot: dict[str, dict[str, Any]] = {}
     self_snapshot: dict[str, dict[str, Any]] = {}
@@ -631,8 +632,12 @@ def run_controller(
         before_snapshot = _snapshot_manifest(root, before_manifest)
         self_snapshot = self_development.authority_snapshot(root)
         if plan_binding is not None:
-            from . import human_control
-            before_paths = human_control.repository_paths(root)
+            if not isinstance(plan_state, Mapping):
+                raise ControllerError("approved plan state is unavailable for test-policy enforcement")
+            approval_manifest = plan_state.get("approval_repository_manifest")
+            if not isinstance(approval_manifest, Mapping):
+                raise ControllerError("approved plan lacks repository manifest evidence for test-policy enforcement")
+            approval_paths = {str(path) for path in approval_manifest}
     else:
         # The provider adapter is separately configured as read-only, but the
         # controller remains the enforcement point.  Preserve enough evidence
@@ -759,7 +764,7 @@ def run_controller(
             violations, candidates = human_control.test_policy_violations(
                 attribution,
                 str(plan_binding.get("test_change_policy") or "none"),
-                before_paths,
+                approval_paths,
                 plan_binding.get("allowed_new_tests") or [],
             )
         if self_development_evidence is not None and self_development_evidence.get("status") == "RESTORED_UNAUTHORIZED":
