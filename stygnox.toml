@@ -1,0 +1,44 @@
+schema = "stygnox_project_config_v1"
+runtime_directory = ".stygnox"
+policy_file = "stygnox.policy.md"
+
+[profile]
+name = "stygnox-default"
+identity = "Stygnox"
+controller_command = "stygnox controller"
+artifact_namespace = "stygnox"
+
+[defaults]
+provider = "codex"
+model = "gpt-5.6-terra"
+effort = "high"
+
+[execution]
+efficiency_mode = "RELAXED"
+reserve_percent = 5.0
+wait_for_limits = true
+usage_poll_seconds = 60
+max_loops = 16
+strict_prompt_command_budget = 4
+strict_max_commands = 6
+strict_max_reported_files = 6
+strict_max_cumulative_input = 450000
+strict_max_noncached_input = 75000
+normal_prompt_command_budget = 6
+normal_max_commands = 8
+normal_max_reported_files = 8
+normal_max_cumulative_input = 600000
+normal_max_noncached_input = 100000
+relaxed_prompt_command_budget = 12
+relaxed_max_commands = 32
+relaxed_max_reported_files = 32
+relaxed_max_cumulative_input = 2400000
+relaxed_max_noncached_input = 400000
+runaway_max_commands = 40
+runaway_max_reported_files = 64
+runaway_max_cumulative_input = 3000000
+runaway_max_noncached_input = 500000
+
+[authority]
+stage = "neutral-controller-authority"
+controller_execution = false

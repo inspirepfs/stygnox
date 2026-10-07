@@ -8,12 +8,14 @@ approved step explicitly delegates human-owned runtime/operator evidence.
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import hashlib
 import json
 from pathlib import Path
 import re
 import sys
+import tarfile
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import adoption, planning
@@ -168,6 +170,8 @@ def open_gate(
     human_resolvable: bool,
     allowed_new_test_candidates: Iterable[str] = (),
     self_development_candidates: Iterable[Mapping[str, Any]] = (),
+    test_policy_violations: Iterable[str] = (),
+    test_policy_violations_restored: bool = False,
 ) -> dict[str, Any]:
     """Latch one exact human gate for the currently approved plan step."""
     root, active, tx, policy_status, name = planning._active_context(project, operator)
@@ -227,6 +231,8 @@ def open_gate(
         "blocked_repository_evidence": dict(blocked_baseline),
         "allowed_new_test_candidates": candidates,
         "self_development_candidates": self_candidates,
+        "test_policy_violations": sorted({_normalize_repo_path(path) for path in test_policy_violations}),
+        "test_policy_violations_restored": bool(test_policy_violations_restored),
         "human_resolvable": bool(human_resolvable),
         "opened_at": _utc_now(),
     }
@@ -286,6 +292,77 @@ def _active_gate_context(project: Path, operator: str, plan_hash: str, gate_id: 
     return root, state, gate, current, name
 
 
+
+def _legacy_test_policy_restore_preview(root: Path, state: Mapping[str, Any], gate: Mapping[str, Any], action: str) -> dict[str, Any] | None:
+    """Describe the exact repair needed for pre-fix test-policy gates.
+
+    Older controllers bound a test-policy gate to the post-violation baseline.
+    Only Step 1/add-only gates with approval-present violating test files can be
+    recovered in place.  Everything else remains fail-closed and requires
+    retirement/re-plan rather than guessed restoration semantics.
+    """
+    if gate.get("kind") != "test-policy" or gate.get("test_policy_violations_restored") is True:
+        return None
+    explicit = gate.get("test_policy_violations")
+    if isinstance(explicit, list) and explicit:
+        return None
+    if action != "steer":
+        raise HumanControlError("legacy test-policy gate requires bounded steer so forbidden test edits can be restored before retry")
+    plan = planning._validate_plan(state.get("plan"))
+    step_no = int(state.get("current_step") or 0)
+    step = plan["steps"][step_no - 1]
+    if step_no != 1 or str(step.get("test_change_policy") or "none") != "add-only":
+        raise HumanControlError("legacy test-policy gate cannot be safely recovered in place; retire/re-plan is required")
+    prefix = "policy violation: test paths "
+    reason = str(gate.get("reason") or "")
+    if not reason.startswith(prefix):
+        raise HumanControlError("legacy test-policy gate lacks exact violation evidence")
+    raw = reason[len(prefix):].split(";", 1)[0].strip()
+    try:
+        parsed = ast.literal_eval(raw)
+    except (SyntaxError, ValueError) as exc:
+        raise HumanControlError("legacy test-policy gate violation evidence is malformed") from exc
+    if not isinstance(parsed, list) or not parsed:
+        raise HumanControlError("legacy test-policy gate violation evidence is empty")
+    paths = sorted({_normalize_repo_path(str(path)) for path in parsed})
+    if any(not path.startswith("tests/") for path in paths):
+        raise HumanControlError("legacy test-policy gate contains a non-test violation path")
+    manifest = state.get("approval_repository_manifest")
+    if not isinstance(manifest, Mapping) or any(path not in manifest for path in paths):
+        raise HumanControlError("legacy add-only gate recovery requires approval-present violating tests")
+    from . import retirement
+    snapshot, _archive = retirement._validate_snapshot(root, state)
+    return {
+        "paths": paths,
+        "approval_snapshot_record_sha256": snapshot["record_sha256"],
+        "approval_snapshot_archive_sha256": snapshot["archive_sha256"],
+    }
+
+
+def _restore_legacy_test_policy_paths(root: Path, state: Mapping[str, Any], restore: Mapping[str, Any]) -> dict[str, Any]:
+    from . import retirement, scheduler
+    snapshot, archive_path = retirement._validate_snapshot(root, state)
+    if (
+        snapshot.get("record_sha256") != restore.get("approval_snapshot_record_sha256")
+        or snapshot.get("archive_sha256") != restore.get("approval_snapshot_archive_sha256")
+    ):
+        raise HumanControlError("approval snapshot authority changed before test-policy restoration")
+    paths = [_normalize_repo_path(str(path)) for path in restore.get("paths") or []]
+    manifest = state.get("approval_repository_manifest")
+    if not isinstance(manifest, Mapping) or not paths:
+        raise HumanControlError("test-policy restoration lacks exact approval manifest evidence")
+    with tarfile.open(archive_path, mode="r") as archive:
+        for path in paths:
+            if path not in manifest:
+                raise HumanControlError(f"test-policy restoration refuses non-approval path: {path}")
+            retirement._restore_path(root, archive, path)
+    current = scheduler.repository_manifest(root)
+    for path in paths:
+        if current.get(path) != manifest.get(path):
+            raise HumanControlError(f"test-policy restoration failed exact approval fingerprint check: {path}")
+    baseline = adoption.capture_baseline(root).public()
+    return {"paths": paths, "repository_baseline_sha256": baseline["sha256"]}
+
 def _decision_preview(
     project: Path,
     operator: str,
@@ -327,6 +404,8 @@ def _decision_preview(
     elif list(allow_new_tests):
         raise HumanControlError("--allow-new-test is valid only with steer")
 
+    legacy_test_policy_restore = _legacy_test_policy_restore_preview(root, state, gate, action)
+
     if action == "resolve":
         if gate.get("human_resolvable") is not True:
             raise HumanControlError("current human gate is not operator-resolvable")
@@ -355,6 +434,7 @@ def _decision_preview(
         "direction": direction_text,
         "reason": reason_text,
         "allowed_new_tests": allowed,
+        "legacy_test_policy_restore": legacy_test_policy_restore,
         "requires_explicit_confirmation": True,
         "confirmation": action.upper(),
     }
@@ -405,6 +485,11 @@ def _apply_decision(preview: Mapping[str, Any], supplied_preview: str, confirmat
     ):
         raise HumanControlError("human decision preview is stale; gate, authority, baseline, or decision changed")
     action = str(preview["action"])
+    legacy_restore_result = None
+    if preview.get("legacy_test_policy_restore") is not None:
+        legacy_restore_result = _restore_legacy_test_policy_paths(root, state, preview["legacy_test_policy_restore"])
+        current = adoption.capture_baseline(root).public()
+
     now = _utc_now()
     decision = {
         "schema": DECISION_RECEIPT_SCHEMA,
@@ -422,13 +507,19 @@ def _apply_decision(preview: Mapping[str, Any], supplied_preview: str, confirmat
         "direction": preview.get("direction"),
         "reason": preview.get("reason"),
         "allowed_new_tests": list(preview.get("allowed_new_tests") or []),
+        "legacy_test_policy_restore": preview.get("legacy_test_policy_restore"),
+        "legacy_test_policy_restore_result": legacy_restore_result,
         "decided_at": now,
     }
     decision["record_sha256"] = _digest(decision)
 
     updated = dict(state)
     updated["active_gate"] = None
-    updated["step_authority_baseline_sha256"] = preview["blocked_baseline_sha256"]
+    updated["step_authority_baseline_sha256"] = (
+        legacy_restore_result["repository_baseline_sha256"]
+        if legacy_restore_result is not None
+        else preview["blocked_baseline_sha256"]
+    )
     history = list(updated.get("human_gate_history") or [])
     updated["human_gate_history"] = [*history[-49:], {**gate, "state": action.upper(), "decision_sha256": decision["record_sha256"], "decided_at": now}]
 
@@ -440,6 +531,7 @@ def _apply_decision(preview: Mapping[str, Any], supplied_preview: str, confirmat
             "step": preview["current_step"],
             "direction": preview["direction"],
             "allowed_new_tests": list(preview.get("allowed_new_tests") or []),
+            "legacy_test_policy_restore_result": legacy_restore_result,
             "recorded_at": now,
             "decision_sha256": decision["record_sha256"],
         }

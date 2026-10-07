@@ -201,6 +201,31 @@ Implement:
 - fresh-process proof;
 - failure-safe old authority retention.
 
+### Step 1 evidence
+
+The native `stygnox rebind` preview/confirm/activate path now binds wheel and
+installed RECORD identities, executable, canonical project, active-plan scope
+and lineage before a fresh-process controller rebind.  The issue remains open
+until the controlled installed-artifact qualification demonstrates the full
+handoff and hostile cases.
+
+### Step 3 transition gate
+
+An accepted R3D.1 step can now require an independently attested
+post-qualification transition.  Source qualification alone leaves execution
+closed; the successor must be live with the exact installed identity, artifact,
+epoch, plan, transaction, controller and qualification bindings before the
+next step can open.  This is a general plan/qualification contract, with the
+installed-successor handoff as its current use.
+
+### 2026-10-07 bootstrap-closure intervention
+
+The stalled Step 1 runtime exposed a self-hosting deadlock rather than a reason
+to relax authority.  The operator froze that runtime and performed one bounded
+source-level closure that preserves its evidence but does not treat the stalled
+transaction as successful execution.  STYX-005 remains OPEN until a fresh
+installed artifact proves the successor handoff end to end.
+
 ---
 
 ## STYX-006 — Bootstrap Configuration Requires Separate Provenance
@@ -235,6 +260,13 @@ qualified provider delta
 ==
 finalized provider delta
 ```
+
+### Step 1 reconciliation
+
+The existing bootstrap configuration remains operator adoption material.  It
+has not been reattributed to provider implementation by the R3D.1 rebind work;
+separate disposition and controlled qualification remain required before this
+issue can close.
 
 ---
 
@@ -471,4 +503,3 @@ At every architectural block closure:
 7. commit the reconciled programme state.
 
 A finding must never disappear because a chat ended or context was compacted.
-

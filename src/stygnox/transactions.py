@@ -102,6 +102,28 @@ def _transaction(root: Path, *, required: bool = True) -> dict[str, Any] | None:
     return value
 
 
+def successor_transaction(predecessor: Mapping[str, Any], binding: Mapping[str, Any]) -> dict[str, Any]:
+    """Create, but do not persist, a successor authority record for a rebind."""
+    previous = dict(predecessor)
+    recorded = previous.pop("record_sha256", None)
+    if not isinstance(recorded, str) or recorded != _digest(previous):
+        raise TransactionError("predecessor transaction integrity check failed")
+    artifact = binding.get("candidate_artifact")
+    identity = binding.get("installed_identity")
+    if not isinstance(artifact, Mapping) or not isinstance(identity, Mapping):
+        raise TransactionError("successor transaction lacks installed artifact identity")
+    body = dict(previous)
+    body.update({
+        "transaction_id": "TX-RB-" + _digest({"predecessor": recorded, "epoch": binding.get("new_runtime_epoch"), "artifact": artifact.get("sha256")})[:16],
+        "state": "ACTIVE",
+        "installed_command": identity.get("executable"),
+        "successor_of_transaction_record_sha256": recorded,
+        "rebind_binding": dict(binding),
+    })
+    body["record_sha256"] = _digest(body)
+    return body
+
+
 def _recovery_source(root: Path, handoff: Mapping[str, Any]) -> dict[str, Any]:
     source = handoff.get("recovery_source")
     if not isinstance(source, dict):

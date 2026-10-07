@@ -118,6 +118,50 @@ class StygnoxPlanningTests(TestCase):
             with self.assertRaises(planning.PlanningError):
                 planning.proposal_step_bounds(*bounds)
 
+    def test_proposal_schema_is_strict_codex_compatible_and_transition_is_nullable(self) -> None:
+        schema = planning._proposal_schema(1, 3)
+
+        self.assertEqual(
+            set(schema["properties"]),
+            set(schema["required"]),
+        )
+
+        step = schema["properties"]["steps"]["items"]
+
+        self.assertEqual(
+            set(step["properties"]),
+            set(step["required"]),
+        )
+
+        transition = step["properties"][
+            planning.POST_QUALIFICATION_TRANSITION_FIELD
+        ]
+
+        self.assertEqual(
+            ["string", "null"],
+            transition["type"],
+        )
+
+        self.assertEqual(
+            [planning.INSTALLED_SUCCESSOR_HANDOFF, None],
+            transition["enum"],
+        )
+
+        prompt = planning._planning_prompt(
+            "strict schema",
+            1,
+            3,
+        )
+
+        self.assertIn(
+            planning.POST_QUALIFICATION_TRANSITION_FIELD,
+            prompt,
+        )
+        self.assertIn(
+            "use null unless",
+            prompt,
+        )
+
     def test_proposal_preview_is_read_only_and_binds_operator_authority(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

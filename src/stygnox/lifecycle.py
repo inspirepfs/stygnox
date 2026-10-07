@@ -8,16 +8,21 @@ safe/idempotent without changing tracked project content.
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import hashlib
+from importlib import metadata
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 from typing import Any, Mapping, Sequence
+import zipfile
 
-from . import adoption, migration, transactions
+from . import adoption, controller, migration, planning, transactions
 from .product import PRODUCT
 
 
@@ -27,10 +32,14 @@ UPGRADE_SCHEMA = "stygnox_upgrade_acceptance_v1"
 UNINSTALL_PREVIEW_SCHEMA = "stygnox_uninstall_preview_v1"
 UNINSTALL_SCHEMA = "stygnox_uninstall_preparation_v1"
 UPGRADE_RECORD = "upgrade.json"
+REBIND_RECORD = "rebind.json"
+REBIND_PREVIEW_SCHEMA = "stygnox_upgrade_rebind_preview_v1"
+REBIND_SCHEMA = "stygnox_upgrade_rebind_v1"
 UNINSTALL_RECORD = "uninstall.json"
 _VERSION_RE = re.compile(r"^0\.1\.0\.dev(?P<dev>[0-9]+)$")
 _STABLE_VERSION = "0.1.0"
 _STABLE_COMPAT_DEV_CEILING = 8
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class LifecycleError(RuntimeError):
@@ -51,6 +60,184 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _regular_file(path: Path, description: str) -> Path:
+    if path.is_symlink() or not path.is_file():
+        raise LifecycleError(f"{description} must be a regular file: {path}")
+    return path.resolve()
+
+
+def _record_rows(data: str, description: str) -> list[tuple[str, str, str]]:
+    rows = list(csv.reader(data.splitlines()))
+    if not rows or any(len(row) != 3 or not row[0] for row in rows):
+        raise LifecycleError(f"invalid {description} RECORD")
+    return [(row[0], row[1], row[2]) for row in rows]
+
+
+def _record_hash(value: str, path: Path, description: str) -> None:
+    if not value:
+        return
+    try:
+        algorithm, encoded = value.split("=", 1)
+        expected = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    except (ValueError, TypeError) as exc:
+        raise LifecycleError(f"invalid hash in {description} RECORD: {path}") from exc
+    try:
+        actual = hashlib.new(algorithm, path.read_bytes()).digest()
+    except ValueError as exc:
+        raise LifecycleError(f"unsupported hash in {description} RECORD: {algorithm}") from exc
+    if actual != expected:
+        raise LifecycleError(f"{description} RECORD digest mismatch: {path}")
+
+
+def _installed_identity(worktree: Path) -> dict[str, Any]:
+    """Return a verified identity for this *installed* interpreter package.
+
+    Metadata lookup is deliberately tied to the imported package and its RECORD,
+    rather than to PATH alone.  That prevents a copied launcher or a source-tree
+    import from being treated as an upgrade target.
+    """
+    command = adoption.resolve_installed_command(worktree)
+    executable = _regular_file(command.executable, "installed Stygnox executable")
+    package_file = _regular_file(command.package_file, "installed Stygnox package")
+    try:
+        distribution = metadata.distribution("stygnox")
+    except metadata.PackageNotFoundError as exc:
+        raise LifecycleError("installed Stygnox distribution metadata is unavailable") from exc
+    package_root = package_file.parent.parent.resolve()
+    distribution_root = Path(distribution.locate_file("")).resolve()
+    if distribution_root != package_root:
+        raise LifecycleError("installed Stygnox distribution does not own the imported package")
+    candidates = sorted(package_root.glob("stygnox-*.dist-info/RECORD"))
+    if len(candidates) != 1:
+        raise LifecycleError("installed Stygnox requires exactly one adjacent dist-info RECORD")
+    record = _regular_file(candidates[0], "installed Stygnox RECORD")
+    dist_info = record.parent
+    metadata_file = _regular_file(dist_info / "METADATA", "installed Stygnox METADATA")
+    installed_name = str(distribution.metadata.get("Name") or "").lower()
+    installed_version = str(distribution.version)
+    if installed_name != "stygnox" or installed_version != command.version:
+        raise LifecycleError("installed Stygnox metadata does not match the imported package identity")
+    rows = _record_rows(record.read_text(encoding="utf-8"), "installed")
+    package_relative = package_file.relative_to(package_root).as_posix()
+    names = {name for name, _, _ in rows}
+    if package_relative not in names:
+        raise LifecycleError("installed Stygnox package is absent from its RECORD")
+    for name, digest, _size in rows:
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            # pip records a console launcher relative to site-packages (normally
+            # ../../../bin/stygnox).  The launcher is the only RECORD member
+            # allowed outside the installed package root, and must be the exact
+            # executable selected for the handoff.
+            target = (package_root / relative).resolve()
+            if target != executable:
+                raise LifecycleError("installed RECORD contains an unsafe path")
+        else:
+            target = package_root / relative
+        if not digest:
+            continue
+        _regular_file(target, "installed RECORD member")
+        _record_hash(digest, target, "installed")
+    installed_manifest = [
+        {"path": name, "hash": digest, "size": size}
+        for name, digest, size in sorted(rows)
+    ]
+    return {
+        "executable": str(executable),
+        "package_file": str(package_file),
+        "package_sha256": _sha256_file(package_file),
+        "package_version": command.version,
+        "distribution_name": installed_name,
+        "record": str(record),
+        "record_sha256": _sha256_file(record),
+        "record_manifest": installed_manifest,
+        "record_manifest_sha256": _digest(installed_manifest),
+        "metadata_sha256": _sha256_file(metadata_file),
+        "site_packages": str(package_root),
+    }
+
+
+def _wheel_identity(wheel: Path, installed: Mapping[str, Any]) -> dict[str, Any]:
+    wheel = _regular_file(wheel, "candidate Stygnox wheel")
+    if wheel.suffix != ".whl":
+        raise LifecycleError("candidate artifact must be a wheel (.whl)")
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            names = archive.namelist()
+            if len(names) != len(set(names)):
+                raise LifecycleError("candidate wheel contains duplicate members")
+            if any(Path(name).is_absolute() or ".." in Path(name).parts for name in names):
+                raise LifecycleError("candidate wheel contains an unsafe member path")
+            metadata_names = [name for name in names if name.endswith(".dist-info/METADATA")]
+            record_names = [name for name in names if name.endswith(".dist-info/RECORD")]
+            if len(metadata_names) != 1 or len(record_names) != 1:
+                raise LifecycleError("candidate wheel must contain one METADATA and one RECORD")
+            wheel_metadata = archive.read(metadata_names[0]).decode("utf-8")
+            wheel_record = _record_rows(archive.read(record_names[0]).decode("utf-8"), "candidate wheel")
+            fields = dict(line.split(": ", 1) for line in wheel_metadata.splitlines() if ": " in line)
+            if fields.get("Name", "").lower() != "stygnox" or fields.get("Version") != installed["package_version"]:
+                raise LifecycleError("candidate wheel package identity does not match the installed Stygnox package")
+            listed = {name for name, _, _ in wheel_record}
+            package_members = {
+                name for name in names
+                if name.startswith("stygnox/") and not name.endswith("/")
+            }
+            if not package_members or not package_members.issubset(listed):
+                raise LifecycleError("candidate wheel has package members absent from its RECORD")
+            installed_package = Path(str(installed["site_packages"])) / "stygnox"
+            if installed_package.is_symlink() or not installed_package.is_dir():
+                raise LifecycleError("installed Stygnox package directory is invalid")
+            installed_members = {
+                path.relative_to(Path(str(installed["site_packages"]))).as_posix()
+                for path in installed_package.rglob("*")
+                if path.is_file() and not path.is_symlink() and "__pycache__" not in path.parts
+            }
+            if package_members != installed_members:
+                raise LifecycleError("candidate wheel package members do not match the installed Stygnox package")
+            for name, digest, _size in wheel_record:
+                if not digest:
+                    continue
+                if name not in names:
+                    raise LifecycleError(f"candidate wheel RECORD member is missing: {name}")
+                payload = archive.read(name)
+                try:
+                    algorithm, encoded = digest.split("=", 1)
+                    expected = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+                    actual = hashlib.new(algorithm, payload).digest()
+                except (ValueError, TypeError) as exc:
+                    raise LifecycleError(f"invalid hash in candidate wheel RECORD: {name}") from exc
+                if actual != expected:
+                    raise LifecycleError(f"candidate wheel RECORD digest mismatch: {name}")
+                if name in package_members:
+                    installed_member = Path(str(installed["site_packages"])) / name
+                    _regular_file(installed_member, "installed candidate package member")
+                    if installed_member.read_bytes() != payload:
+                        raise LifecycleError(f"candidate wheel does not match installed package member: {name}")
+            if "stygnox/adoption.py" not in package_members:
+                raise LifecycleError("candidate wheel lacks the Stygnox package identity module")
+            package_manifest = [
+                {"path": name, "sha256": hashlib.sha256(archive.read(name)).hexdigest(), "size": len(archive.read(name))}
+                for name in sorted(package_members)
+            ]
+            wheel_record_manifest = [
+                {"path": name, "hash": digest, "size": size}
+                for name, digest, size in sorted(wheel_record)
+            ]
+    except (OSError, zipfile.BadZipFile, UnicodeDecodeError, ValueError) as exc:
+        if isinstance(exc, LifecycleError):
+            raise
+        raise LifecycleError(f"invalid candidate Stygnox wheel: {exc}") from exc
+    return {
+        "path": str(wheel),
+        "sha256": _sha256_file(wheel),
+        "package_version": installed["package_version"],
+        "package_manifest": package_manifest,
+        "package_manifest_sha256": _digest(package_manifest),
+        "wheel_record_manifest": wheel_record_manifest,
+        "wheel_record_manifest_sha256": _digest(wheel_record_manifest),
+    }
 
 
 def _render(value: Mapping[str, Any]) -> str:
@@ -202,11 +389,362 @@ def _authority_records(root: Path) -> dict[str, dict[str, Any] | None]:
     return {
         "adoption": _load_json(runtime / "adoption.json", schema=adoption.HANDOFF_SCHEMA),
         "transaction": _load_json(runtime / transactions.TRANSACTION_RECORD, schema=transactions.TRANSACTION_SCHEMA),
+        "controller": _load_json(runtime / controller.CONTROLLER_RECORD, schema=controller.CONTROLLER_SCHEMA),
         "recovery": _load_json(runtime / transactions.RECOVERY_RESULT_RECORD, schema=transactions.RECOVERY_RESULT_SCHEMA),
+        "plan": _load_json(runtime / planning.PLAN_RECORD, schema=planning.PLAN_SCHEMA),
         "migration": _load_json(runtime / migration.MIGRATION_RECORD, schema=migration.MIGRATION_SCHEMA),
         "upgrade": _load_json(runtime / UPGRADE_RECORD, schema=UPGRADE_SCHEMA),
         "uninstall": _load_json(runtime / UNINSTALL_RECORD, schema=UNINSTALL_SCHEMA),
+        "rebind": _load_json(runtime / REBIND_RECORD, schema=REBIND_SCHEMA),
     }
+
+
+def _verified_record(record: Mapping[str, Any], name: str) -> None:
+    body = dict(record)
+    recorded = body.pop("record_sha256", None)
+    if not isinstance(recorded, str) or not _HEX64.fullmatch(recorded) or recorded != _digest(body):
+        raise LifecycleError(f"{name} authority record integrity check failed")
+
+
+def _qualified_successor_binding(root: Path, records: Mapping[str, dict[str, Any] | None], artifact: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind the installed wheel to the exact qualified source state, not its name."""
+    plan = records.get("plan")
+    transaction = records.get("transaction")
+    predecessor = records.get("controller")
+    if plan is None or transaction is None or predecessor is None:
+        raise LifecycleError("rebind requires qualified plan, predecessor transaction, and predecessor controller records")
+    _verified_record(plan, "plan")
+    _verified_record(transaction, "transaction")
+    _verified_record(predecessor, "controller")
+    scope = plan.get("repository_mutation_scope")
+    scope_sha256 = plan.get("repository_mutation_scope_sha256")
+    if not isinstance(scope, list) or scope_sha256 != _digest(scope):
+        raise LifecycleError("rebind plan scope is stale or malformed")
+
+    # Validate the already-authoritative qualification/source evidence before
+    # interpreting the newer pending-transition contract.  This preserves the
+    # historical fail-closed reasons for stale qualification and substituted
+    # artifacts while still requiring the installed-successor transition for
+    # any handoff that reaches the authority-transfer boundary.
+    final = plan.get("final_qualification") if isinstance(plan.get("final_qualification"), Mapping) else None
+    if final is None or final.get("state") != "PASS":
+        raise LifecycleError("rebind requires a passing final qualification")
+    final_body = dict(final)
+    final_sha = str(final_body.pop("provenance_sha256", "") or "")
+    if not _HEX64.fullmatch(final_sha) or final_sha != _digest(final_body):
+        raise LifecycleError("rebind final qualification integrity check failed")
+    if final.get("repository_mutation_scope_sha256") not in {None, scope_sha256}:
+        raise LifecycleError("rebind qualification scope is stale or malformed")
+
+    current = adoption.capture_baseline(root).public()
+    if final.get("repository_baseline_sha256") != current.get("sha256"):
+        raise LifecycleError("rebind qualification is stale against the current source baseline")
+    source_manifest: list[dict[str, Any]] = []
+    package_manifest = artifact.get("package_manifest")
+    if not isinstance(package_manifest, list) or artifact.get("package_manifest_sha256") != _digest(package_manifest):
+        raise LifecycleError("candidate artifact package manifest is malformed")
+    for member in package_manifest:
+        if not isinstance(member, Mapping) or not isinstance(member.get("path"), str):
+            raise LifecycleError("candidate artifact package manifest is malformed")
+        source = _regular_file(root / "src" / member["path"], "qualified successor source member")
+        row = {"path": f"src/{member['path']}", "sha256": _sha256_file(source), "size": source.stat().st_size}
+        if row["sha256"] != member.get("sha256") or row["size"] != member.get("size"):
+            raise LifecycleError(f"candidate wheel does not match qualified source member: {member['path']}")
+        source_manifest.append(row)
+    source_manifest_sha256 = _digest(source_manifest)
+
+    try:
+        transition = planning.pending_required_transition(plan)
+    except planning.PlanningError as exc:
+        raise LifecycleError(str(exc)) from exc
+    if transition is None or transition.get("kind") != planning.INSTALLED_SUCCESSOR_HANDOFF:
+        raise LifecycleError("rebind requires a pending installed-successor post-qualification transition")
+    if transition.get("qualified_baseline_sha256") != current.get("sha256"):
+        raise LifecycleError("rebind qualification is stale against the current source baseline")
+
+    return {
+        "plan_hash": plan.get("plan_hash"),
+        "plan_record_sha256": plan.get("record_sha256"),
+        "plan_step": plan.get("current_step"),
+        "repository_mutation_scope": list(scope),
+        "repository_mutation_scope_sha256": scope_sha256,
+        "required_post_qualification_transition": transition,
+        "qualification_binding_sha256": transition["qualification_binding_sha256"],
+        "qualified_source_manifest": source_manifest,
+        "qualified_source_manifest_sha256": source_manifest_sha256,
+        "qualified_source_baseline_sha256": current["sha256"],
+        "predecessor_transaction_record_sha256": transaction["record_sha256"],
+        "predecessor_controller_record_sha256": predecessor["record_sha256"],
+    }
+
+
+def _bootstrap_disposition(root: Path) -> dict[str, Any]:
+    """Bind bootstrap material as operator-owned input, never provider evidence."""
+    material: list[dict[str, str]] = []
+    for name in (adoption.CONFIG_NAME, adoption.POLICY_NAME):
+        path = _regular_file(root / name, "bootstrap adoption material")
+        material.append({"path": name, "sha256": _sha256_file(path)})
+    return {
+        "disposition": "OPERATOR_ADOPTION_MATERIAL",
+        "material": material,
+        "material_sha256": _digest(material),
+        "provider_attribution": "EXCLUDED",
+        "accepted_provider_delta": False,
+        "qualified_provider_delta": False,
+        "finalized_provider_delta": False,
+    }
+
+
+def _lineage(records: Mapping[str, dict[str, Any] | None], inventory_sha256: str) -> dict[str, Any]:
+    adoption_record = records.get("adoption") or {}
+    transaction = records.get("transaction") or {}
+    recovery = records.get("recovery") or {}
+    plan = records.get("plan") or {}
+    if plan:
+        recorded = str(plan.get("record_sha256") or "")
+        plan_body = dict(plan)
+        plan_body.pop("record_sha256", None)
+        if not _HEX64.fullmatch(recorded) or recorded != _digest(plan_body):
+            raise LifecycleError("plan lineage record integrity check failed")
+        scope = plan.get("repository_mutation_scope")
+        scope_digest = plan.get("repository_mutation_scope_sha256")
+        if not isinstance(scope, list) or not isinstance(scope_digest, str) or scope_digest != _digest(scope):
+            raise LifecycleError("plan lineage scope evidence is stale or malformed")
+    else:
+        scope = []
+        scope_digest = None
+    recovery_source = transaction.get("recovery_source") or adoption_record.get("recovery_source")
+    final_qualification = plan.get("final_qualification") if isinstance(plan.get("final_qualification"), Mapping) else {}
+    return {
+        "adoption_preview_sha256": adoption_record.get("preview_sha256"),
+        "transaction_id": transaction.get("transaction_id"),
+        "transaction_record_sha256": transaction.get("record_sha256"),
+        "authority_scope": (transaction.get("authority") or adoption_record.get("authority") or {}).get("scope"),
+        "recovery_source": recovery_source,
+        "recovery_record_sha256": recovery.get("record_sha256"),
+        "recovery_checkpoint_sha256": recovery_source.get("checkpoint_sha256") if isinstance(recovery_source, Mapping) else None,
+        "plan_hash": plan.get("plan_hash"),
+        "plan_record_sha256": plan.get("record_sha256"),
+        "plan_current_step": plan.get("current_step"),
+        "repository_mutation_scope": scope,
+        "repository_mutation_scope_sha256": scope_digest,
+        "qualification_provenance_sha256": final_qualification.get("provenance_sha256"),
+        "accepted_attribution": final_qualification.get("accepted_controller_attribution"),
+        "runtime_inventory_sha256": inventory_sha256,
+    }
+
+
+def _runtime_epoch(record: Mapping[str, dict[str, Any] | None]) -> int:
+    previous = record.get("rebind") or {}
+    value = previous.get("new_runtime_epoch", 0)
+    if not isinstance(value, int) or value < 0:
+        raise LifecycleError("existing rebind runtime epoch is invalid")
+    return value
+
+
+def build_rebind_preview(project: Path, operator: str, wheel: Path) -> dict[str, Any]:
+    """Preview a strictly installed, quiescent authority transfer.
+
+    This is intentionally separate from compatibility ``upgrade accept``.  It
+    never attributes bootstrap configuration to a provider and makes no write.
+    """
+    root = adoption.resolve_worktree(project)
+    name = adoption._validated_operator(operator)
+    blockers = _environment_blockers()
+    try:
+        bootstrap = _bootstrap_disposition(root)
+        installed = _installed_identity(root)
+        artifact = _wheel_identity(wheel, installed)
+        records = _authority_records(root)
+        record_blockers, versions = _runtime_version_blockers(records)
+        blockers.extend(record_blockers)
+        inventory = _runtime_inventory(root, exclude={f"{adoption.RUNTIME_NAME}/{REBIND_RECORD}"})
+        adoption_record = records.get("adoption")
+        if adoption_record is None:
+            blockers.append("rebind requires a confirmed installed adoption handoff")
+        elif adoption_record.get("operator") != name:
+            blockers.append("rebind operator does not match confirmed adoption handoff")
+        epoch = _runtime_epoch(records)
+        qualified = _qualified_successor_binding(root, records, artifact)
+    except (LifecycleError, adoption.AdoptionError) as exc:
+        bootstrap = {}
+        installed = {}
+        artifact = {}
+        records = {}
+        versions = []
+        inventory = []
+        epoch = 0
+        qualified = {}
+        blockers.append(str(exc))
+    baseline = adoption.capture_baseline(root).public()
+    inventory_sha256 = _digest(inventory)
+    lineage = _lineage(records, inventory_sha256)
+    successor_binding = {
+        **qualified,
+        "installed_identity": installed,
+        "candidate_artifact": artifact,
+        "new_runtime_epoch": epoch + 1,
+        "authority_lineage": lineage,
+    }
+    body: dict[str, Any] = {
+        "schema": REBIND_PREVIEW_SCHEMA,
+        "product_version": PRODUCT.version,
+        "operator": name,
+        "worktree": str(root),
+        "project_baseline": baseline,
+        "bootstrap_disposition": bootstrap,
+        "installed_identity": installed,
+        "candidate_artifact": artifact,
+        "detected_runtime_versions": versions,
+        "immutable_runtime_inventory": inventory,
+        "immutable_runtime_inventory_sha256": inventory_sha256,
+        "authority_lineage": lineage,
+        "successor_binding": successor_binding,
+        "current_runtime_epoch": epoch,
+        "new_runtime_epoch": epoch + 1,
+        "quiescent": not any("ACTIVE transaction" in blocker for blocker in blockers),
+        "no_source_or_ralph_fallback": True,
+        "blockers": blockers,
+        "admissible": not blockers,
+        "requires_explicit_confirmation": True,
+        "confirmation": "REBIND",
+    }
+    body["preview_sha256"] = _digest(body)
+    return body
+
+
+def _commit_rebind(project: Path, operator: str, wheel: Path, preview_sha256: str, parent_pid: int) -> dict[str, Any]:
+    """Write the transfer receipt only in the separately-started executable."""
+    if parent_pid <= 0 or parent_pid == os.getpid() or parent_pid != os.getppid():
+        raise LifecycleError("rebind commit requires a separately started installed executable")
+    expected = transactions._require_digest(preview_sha256, "--preview")
+    preview = build_rebind_preview(project, operator, wheel)
+    if preview["preview_sha256"] != expected:
+        raise LifecycleError("rebind preview is stale; identity, artifact, project, or authority lineage changed")
+    if not preview["admissible"]:
+        raise LifecycleError("rebind refused: " + "; ".join(preview["blockers"]))
+    identity = preview["installed_identity"]
+    if Path(identity["executable"]).resolve() != Path(sys.argv[0]).resolve():
+        # Console wrappers frequently use an absolute argv[0]; a copied wrapper
+        # cannot silently claim the previewed installed executable.
+        raise LifecycleError("rebind commit executable differs from the previewed installed executable")
+    records = _authority_records(Path(preview["worktree"]))
+    predecessor_transaction = records.get("transaction")
+    predecessor_controller = records.get("controller")
+    if predecessor_transaction is None or predecessor_controller is None:
+        raise LifecycleError("rebind predecessor transaction/controller authority is unavailable")
+    binding = preview["successor_binding"]
+    try:
+        successor_transaction = transactions.successor_transaction(predecessor_transaction, binding)
+        successor_controller = controller.successor_controller(predecessor_controller, successor_transaction, binding)
+    except (transactions.TransactionError, controller.ControllerError) as exc:
+        raise LifecycleError(str(exc)) from exc
+    record = {
+        "schema": REBIND_SCHEMA,
+        "product_version": PRODUCT.version,
+        "operator": preview["operator"],
+        "preview_sha256": expected,
+        "parent_process": parent_pid,
+        "fresh_process": {"pid": os.getpid(), "executable": identity["executable"]},
+        "new_runtime_epoch": preview["new_runtime_epoch"],
+        "installed_identity": identity,
+        "candidate_artifact": preview["candidate_artifact"],
+        "bootstrap_disposition": preview["bootstrap_disposition"],
+        "authority_lineage": preview["authority_lineage"],
+        "successor_binding": binding,
+        "successor_transaction": successor_transaction,
+        "successor_controller": successor_controller,
+        "immutable_runtime_inventory_sha256": preview["immutable_runtime_inventory_sha256"],
+        "quiescent_handoff": True,
+        "source_tree_fallback": False,
+        "ralph_fallback": False,
+        "result": "REBIND_COMPLETED_BY_FRESH_INSTALLED_PROCESS",
+    }
+    record["record_sha256"] = _digest(record)
+    root = Path(preview["worktree"])
+    try:
+        adoption.write_runtime_record(root, transactions.TRANSACTION_RECORD, successor_transaction, actor="controller")
+        adoption.write_runtime_record(root, controller.CONTROLLER_RECORD, successor_controller, actor="controller")
+    except OSError as exc:
+        # A successor is never allowed to strand a partially replaced authority.
+        adoption.write_runtime_record(root, transactions.TRANSACTION_RECORD, predecessor_transaction, actor="controller")
+        adoption.write_runtime_record(root, controller.CONTROLLER_RECORD, predecessor_controller, actor="controller")
+        raise LifecycleError("fresh installed rebind handoff failed before authority transfer") from exc
+    try:
+        live_identity = _installed_identity(root)
+        live_records = _authority_records(root)
+        if (
+            live_identity != identity
+            or live_records.get("transaction", {}).get("record_sha256") != successor_transaction["record_sha256"]
+            or live_records.get("controller", {}).get("record_sha256") != successor_controller["record_sha256"]
+        ):
+            raise LifecycleError("fresh installed rebind successor authority or identity is not live")
+    except (LifecycleError, adoption.AdoptionError) as exc:
+        raise LifecycleError("fresh installed rebind successor authority or identity is not live") from exc
+    adoption.write_runtime_record(root, REBIND_RECORD, record, actor="controller")
+    try:
+        planning.complete_required_transition(root, preview["operator"], attestation=record)
+    except planning.PlanningError as exc:
+        raise LifecycleError(f"fresh installed rebind did not complete its required transition: {exc}") from exc
+    return record
+
+
+def accept_rebind(project: Path, operator: str, wheel: Path, preview_sha256: str, confirmation: str) -> dict[str, Any]:
+    if confirmation != "REBIND":
+        raise LifecycleError("explicit confirmation required: --confirm REBIND")
+    expected = transactions._require_digest(preview_sha256, "--preview")
+    preview = build_rebind_preview(project, operator, wheel)
+    if preview["preview_sha256"] != expected:
+        raise LifecycleError("rebind preview is stale; identity, artifact, project, or authority lineage changed")
+    if not preview["admissible"]:
+        raise LifecycleError("rebind refused: " + "; ".join(preview["blockers"]))
+    command = preview["installed_identity"]["executable"]
+    if Path(command).resolve() != Path(sys.argv[0]).resolve():
+        raise LifecycleError("rebind must be initiated by the previewed installed Stygnox executable")
+    # The transfer must not inherit a source checkout through the working
+    # directory or Python's import environment.  The child receives only an
+    # absolute installed launcher, absolute inputs, and a neutral cwd.
+    # The child must be able to rediscover this exact launcher through its
+    # normal installed-identity guard, including venv/user installations that
+    # are intentionally outside the platform-default PATH.
+    child_environment = {"PATH": str(Path(command).parent)}
+    child = subprocess.run(
+        [command, "upgrade", "rebind-commit", "--project", preview["worktree"], "--operator", preview["operator"],
+         "--wheel", str(wheel.resolve()), "--preview", expected, "--confirm", "REBIND", "--parent-pid", str(os.getpid())],
+        cwd=preview["installed_identity"]["site_packages"], env=child_environment, text=True, capture_output=True, check=False,
+    )
+    if child.returncode != 0:
+        detail = (child.stderr or child.stdout).strip()
+        raise LifecycleError(f"fresh installed rebind handoff failed before transfer: {detail or child.returncode}")
+    try:
+        receipt = json.loads(child.stdout)
+    except json.JSONDecodeError as exc:
+        raise LifecycleError("fresh installed rebind handoff returned invalid receipt") from exc
+    if not isinstance(receipt, dict) or receipt.get("preview_sha256") != expected or receipt.get("fresh_process", {}).get("pid") == os.getpid():
+        raise LifecycleError("fresh installed rebind handoff did not prove a new process")
+    root = Path(preview["worktree"])
+    committed = _load_json(root / adoption.RUNTIME_NAME / REBIND_RECORD, schema=REBIND_SCHEMA)
+    if committed is None or committed.get("record_sha256") != _digest({key: value for key, value in committed.items() if key != "record_sha256"}):
+        raise LifecycleError("fresh installed rebind handoff did not leave a valid transfer receipt")
+    if receipt != committed:
+        raise LifecycleError("fresh installed rebind handoff receipt differs from its committed authority record")
+    if (
+        committed.get("preview_sha256") != expected
+        or committed.get("parent_process") != os.getpid()
+        or committed.get("fresh_process", {}).get("executable") != preview["installed_identity"]["executable"]
+        or committed.get("new_runtime_epoch") != preview["new_runtime_epoch"]
+        or committed.get("installed_identity") != preview["installed_identity"]
+        or committed.get("candidate_artifact") != preview["candidate_artifact"]
+        or committed.get("bootstrap_disposition") != preview["bootstrap_disposition"]
+        or committed.get("authority_lineage") != preview["authority_lineage"]
+        or committed.get("successor_binding") != preview["successor_binding"]
+        or committed.get("immutable_runtime_inventory_sha256") != preview["immutable_runtime_inventory_sha256"]
+        or committed.get("quiescent_handoff") is not True
+        or committed.get("source_tree_fallback") is not False
+        or committed.get("ralph_fallback") is not False
+    ):
+        raise LifecycleError("fresh installed rebind handoff changed the bound authority lineage")
+    return receipt
 
 
 def _runtime_version_blockers(records: Mapping[str, dict[str, Any] | None]) -> tuple[list[str], list[str]]:
@@ -442,6 +980,9 @@ def build_upgrade_parser() -> argparse.ArgumentParser:
     for action, help_text in (
         ("preview", "inspect runtime compatibility without changing project state"),
         ("accept", "record explicit compatibility acceptance without rewriting retained evidence"),
+        ("rebind-preview", "bind an installed wheel and quiescent authority lineage without changing state"),
+        ("rebind", "confirm a fresh-process installed authority rebind"),
+        ("rebind-commit", argparse.SUPPRESS),
     ):
         command = sub.add_parser(action, help=help_text)
         command.add_argument("--project", type=Path, default=Path.cwd())
@@ -449,6 +990,13 @@ def build_upgrade_parser() -> argparse.ArgumentParser:
         if action == "accept":
             command.add_argument("--preview", required=True)
             command.add_argument("--confirm", required=True, help="must be UPGRADE")
+        if action.startswith("rebind"):
+            command.add_argument("--wheel", type=Path, required=True)
+        if action in {"rebind", "rebind-commit"}:
+            command.add_argument("--preview", required=True)
+            command.add_argument("--confirm", required=True, help="must be REBIND")
+        if action == "rebind-commit":
+            command.add_argument("--parent-pid", type=int, required=True)
     return parser
 
 
@@ -458,8 +1006,16 @@ def upgrade_cli_main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.action == "preview":
             result = build_upgrade_preview(args.project, args.operator)
-        else:
+        elif args.action == "accept":
             result = accept_upgrade(args.project, args.operator, args.preview, args.confirm)
+        elif args.action == "rebind-preview":
+            result = build_rebind_preview(args.project, args.operator, args.wheel)
+        elif args.action == "rebind":
+            result = accept_rebind(args.project, args.operator, args.wheel, args.preview, args.confirm)
+        else:
+            if args.confirm != "REBIND":
+                raise LifecycleError("explicit confirmation required: --confirm REBIND")
+            result = _commit_rebind(args.project, args.operator, args.wheel, args.preview, args.parent_pid)
     except (LifecycleError, adoption.AdoptionError, transactions.TransactionError) as exc:
         print(f"stygnox: upgrade refused: {exc}", file=sys.stderr)
         return 2

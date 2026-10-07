@@ -27,6 +27,7 @@ from .product import PRODUCT
 RETIREMENT_SCHEMA = "stygnox_plan_retirement_v1"
 RETIREMENT_PREVIEW_SCHEMA = "stygnox_plan_retirement_preview_v1"
 APPROVAL_SNAPSHOT_SCHEMA = "stygnox_plan_approval_snapshot_v1"
+HISTORICAL_LINEAGE_SCHEMA = "stygnox_retired_plan_lineage_v1"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _RT_RE = re.compile(r"^RT-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 _ALLOWED_STATUSES = {"APPROVED", "BLOCKED_HUMAN", "STEPS_COMPLETE", "READY_TO_COMMIT"}
@@ -288,6 +289,139 @@ def _records(root: Path, state: Mapping[str, Any], disposition: str) -> list[dic
     return rows
 
 
+def _historical_lineage(root: Path, state: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Preserve evidence from retired authority without transferring authority."""
+    from . import planning, self_development
+    plan = planning._validate_plan(state.get("plan"))
+    plan_hash = planning._plan_hash(plan)
+    qualification_history = state.get("qualification_history")
+    reconciliation_actions = state.get("reconciliation_actions")
+    grant_history = state.get("self_development_grant_history")
+    expiration_history = state.get("self_development_expirations")
+    step_results = state.get("step_results")
+    if not all(isinstance(value, list) for value in (
+        qualification_history, reconciliation_actions, grant_history, expiration_history, step_results,
+    )):
+        raise RetirementError("retirement historical evidence is missing or malformed")
+    grant_paths = {
+        str(path) for grant in [state.get("self_development_grant"), *(state.get("self_development_grant_history") or [])]
+        if isinstance(grant, Mapping) for path in grant.get("paths") or [] if isinstance(path, str)
+    }
+    fingerprints = []
+    for row in rows:
+        if row.get("action") != "preserve":
+            continue
+        path = _normalize_path(str(row.get("path") or ""))
+        current = row.get("current") if isinstance(row.get("current"), Mapping) else {}
+        fingerprint = current.get("fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise RetirementError(f"retirement path lacks preserved fingerprint: {path}")
+        fingerprints.append({
+            "path": path, "fingerprint": fingerprint, "approval_presence": row.get("approval_presence"),
+            "prior_ownership": row.get("source"),
+            "historical_authority_classification": "CAP-011-self-development" if path in grant_paths or self_development.is_self_development_path(root, path) else "ordinary-plan-carry-forward",
+        })
+    lineage = {
+        "schema": HISTORICAL_LINEAGE_SCHEMA, "source_plan": plan, "source_plan_hash": plan_hash,
+        "source_plan_record_sha256": state.get("record_sha256"),
+        "qualification": {"history": qualification_history, "step_results": step_results, "last_failure": state.get("last_qualification_failure"), "final": state.get("final_qualification")},
+        "reconciliation": {"actions": reconciliation_actions, "adopted_paths": list(state.get("carry_forward_adopted_paths") or []), "outside_paths": list(state.get("carry_forward_outside_paths") or []), "rejected_paths": list(state.get("carry_forward_rejected_paths") or [])},
+        "cap_011": {"active_grant": state.get("self_development_grant"), "grant_history": grant_history, "expiration_history": expiration_history},
+        "preserved_path_fingerprints": fingerprints,
+    }
+    lineage["lineage_sha256"] = _digest(lineage)
+    return lineage
+
+
+def _validate_historical_lineage(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Fail closed before historical retirement evidence reaches a replacement."""
+    from . import planning, self_development
+    raw = manifest.get("historical_lineage")
+    if not isinstance(raw, Mapping) or raw.get("schema") != HISTORICAL_LINEAGE_SCHEMA:
+        raise RetirementError("replacement retirement historical lineage is missing or unsupported")
+    lineage = dict(raw); recorded = str(lineage.pop("lineage_sha256", "") or "")
+    if not _HEX64.fullmatch(recorded) or recorded != _digest(lineage):
+        raise RetirementError("replacement retirement historical lineage integrity check failed")
+    plan = planning._validate_plan(lineage.get("source_plan")); plan_hash = planning._plan_hash(plan)
+    if plan_hash != manifest.get("plan_hash") or lineage.get("source_plan_hash") != plan_hash or not _HEX64.fullmatch(str(lineage.get("source_plan_record_sha256") or "")):
+        raise RetirementError("replacement retirement source-plan lineage is stale, missing, or mismatched")
+    qualification = lineage.get("qualification")
+    reconciliation = lineage.get("reconciliation")
+    cap = lineage.get("cap_011")
+    paths = lineage.get("preserved_path_fingerprints")
+    if not isinstance(qualification, Mapping) or not isinstance(qualification.get("history"), list) or not isinstance(qualification.get("step_results"), list):
+        raise RetirementError("replacement retirement qualification history is missing or malformed")
+    step_receipts = set()
+    for row in qualification["step_results"]:
+        if not isinstance(row, Mapping):
+            raise RetirementError("replacement retirement step qualification evidence is missing or malformed")
+        body = dict(row); recorded = str(body.pop("record_sha256", "") or "")
+        if not _HEX64.fullmatch(recorded) or recorded != _digest(body) or row.get("result") not in {"PASS", "HUMAN_CONFIRMED"}:
+            raise RetirementError("replacement retirement step qualification evidence is missing or malformed")
+        step_receipts.add(recorded)
+    for row in qualification["history"]:
+        if not isinstance(row, Mapping) or not isinstance(row.get("kind"), str) or row.get("state") not in {"PASS", "FAIL"}:
+            raise RetirementError("replacement retirement qualification history is missing or malformed")
+        receipt = row.get("record_sha256") or row.get("provenance_sha256")
+        if not _HEX64.fullmatch(str(receipt or "")):
+            raise RetirementError("replacement retirement qualification evidence lacks an immutable receipt")
+        if row.get("kind") == "step" and row.get("state") == "PASS" and str(receipt) not in step_receipts:
+            raise RetirementError("replacement retirement step qualification evidence is stale or incomplete")
+    for key in ("last_failure", "final"):
+        value = qualification.get(key)
+        if value is not None and (not isinstance(value, Mapping) or value.get("state") not in {"PASS", "FAIL"}):
+            raise RetirementError("replacement retirement final qualification evidence is malformed")
+    if not isinstance(reconciliation, Mapping) or not isinstance(reconciliation.get("actions"), list):
+        raise RetirementError("replacement retirement reconciliation history is missing or malformed")
+    for row in reconciliation["actions"]:
+        if not isinstance(row, Mapping) or row.get("plan_hash") != plan_hash:
+            raise RetirementError("replacement retirement reconciliation history is missing or malformed")
+        body = dict(row); action_hash = str(body.pop("action_hash", "") or "")
+        if not _HEX64.fullmatch(action_hash) or action_hash != _digest(body):
+            raise RetirementError("replacement retirement reconciliation history is missing or malformed")
+    if not isinstance(cap, Mapping) or not isinstance(cap.get("grant_history"), list) or not isinstance(cap.get("expiration_history"), list):
+        raise RetirementError("replacement retirement CAP-011 history is missing or malformed")
+    grants: set[str] = set()
+    for row in cap["grant_history"]:
+        if not isinstance(row, Mapping) or row.get("plan_hash") != plan_hash:
+            raise RetirementError("replacement retirement CAP-011 evidence is missing, malformed, or stale")
+        try:
+            grant = self_development._validate_grant(row)
+        except self_development.SelfDevelopmentError as exc:
+            raise RetirementError("replacement retirement CAP-011 evidence is missing, malformed, or stale") from exc
+        paths_in_grant = grant.get("paths")
+        if not isinstance(paths_in_grant, list) or not paths_in_grant:
+            raise RetirementError("replacement retirement CAP-011 evidence is missing, malformed, or stale")
+        scope = grant.get("repository_mutation_scope")
+        if not isinstance(scope, list) or any(not isinstance(path, str) or not path for path in paths_in_grant) or set(paths_in_grant) - set(scope):
+            raise RetirementError("replacement retirement CAP-011 evidence is missing, malformed, or stale")
+        grants.add(str(grant["grant_sha256"]))
+    active_grant = cap.get("active_grant")
+    if active_grant is not None:
+        try:
+            active = self_development._validate_grant(active_grant)
+        except self_development.SelfDevelopmentError as exc:
+            raise RetirementError("replacement retirement CAP-011 evidence is missing, malformed, or stale") from exc
+        if active.get("plan_hash") != plan_hash or str(active.get("grant_sha256")) not in grants:
+            raise RetirementError("replacement retirement CAP-011 evidence is missing, malformed, or stale")
+    expired_grants: set[str] = set()
+    for row in cap["expiration_history"]:
+        if not isinstance(row, Mapping) or row.get("plan_hash") != plan_hash:
+            raise RetirementError("replacement retirement CAP-011 evidence is missing, malformed, or stale")
+        body = dict(row); recorded = str(body.pop("record_sha256", "") or "")
+        grant_sha = str(row.get("grant_sha256") or "")
+        if not _HEX64.fullmatch(recorded) or recorded != _digest(body) or grant_sha not in grants or grant_sha in expired_grants:
+            raise RetirementError("replacement retirement CAP-011 evidence is missing, malformed, or stale")
+        expired_grants.add(grant_sha)
+    if not isinstance(paths, list) or len({str(row.get("path") or "") for row in paths if isinstance(row, Mapping)}) != len(paths):
+        raise RetirementError("replacement retirement preserved-path fingerprints are missing or malformed")
+    for row in paths:
+        if not isinstance(row, Mapping) or not isinstance(row.get("fingerprint"), str) or not row.get("fingerprint") or row.get("approval_presence") not in {"present", "absent"} or row.get("prior_ownership") not in {"controller-native", "adopted-carry-forward"} or row.get("historical_authority_classification") not in {"ordinary-plan-carry-forward", "CAP-011-self-development"}:
+            raise RetirementError("replacement retirement preserved path lacks immutable ownership/authority evidence")
+        _normalize_path(str(row.get("path") or ""))
+    return {**lineage, "lineage_sha256": recorded, "source_plan": plan}
+
+
 def build_retirement_preview(project: Path, operator: str, plan_hash: str, reason: str, disposition: str) -> dict[str, Any]:
     mode = str(disposition or "").strip().lower()
     if mode not in _DISPOSITIONS:
@@ -415,6 +549,7 @@ def latest_carry_forward_retirement(root: Path, state: Mapping[str, Any], record
     manifest = load_retirement(root, record_id, str(latest.get("manifest_sha256") or ""))
     if manifest.get("disposition") != "RETIRED_WITH_CARRY_FORWARD":
         raise RetirementError("replacement retirement record is not carry-forward")
+    _validate_historical_lineage(manifest)
     return manifest
 
 
@@ -490,6 +625,7 @@ def retire_plan(project: Path, operator: str, plan_hash: str, reason: str, dispo
         "human_gate_history": list(state.get("human_gate_history") or []),
         "qualification_history": list(state.get("qualification_history") or []),
     }
+    historical_lineage = _historical_lineage(root, state, rows)
     manifest: dict[str, Any] = {
         "schema": RETIREMENT_SCHEMA,
         "product_version": PRODUCT.version,
@@ -511,6 +647,7 @@ def retire_plan(project: Path, operator: str, plan_hash: str, reason: str, dispo
             "preserved": list(preview["preserve_paths"]),
         },
         "planning_context": planning_context,
+        "historical_lineage": historical_lineage,
     }
     _name, manifest_sha = _write_manifest(root, manifest)
     tx_record_sha, controller_record_sha = _rebase_active_authority(root, preview["operator"], record_id, after["sha256"])

@@ -131,6 +131,44 @@ Disposition:
 - [ ] Stage 1 qualification
 - [ ] reconcile roadmap/progress/issues
 
+### 2026-10-05 — Step 1 implementation evidence
+
+R3D.1 implementation now has an installed-only rebind surface.  Its preview
+binds a canonical wheel path and digest, wheel package metadata and complete
+RECORD, installed distribution RECORD, installed executable, canonical project,
+active transaction/controller, approved plan scope, checkpoint and attribution
+lineage.  Confirmation starts the bound executable as a child process; it
+revalidates every binding before making controller replacement its final write.
+Any refusal therefore retains the preceding controller authority.
+
+The stage is not closed by this note.  Controlled installed-artifact
+qualification and the remaining hostile handoff coverage are still required.
+
+### 2026-10-06 — Step 3 transition-gate evidence
+
+Step qualification now records a pending post-qualification transition when
+the accepted plan requires one.  Planning and qualification keep the next step
+closed until a fresh installed rebind attests the exact successor artifact,
+identity, epoch and live controller/transaction authority.  The contract is
+plan-level rather than an R3D-specific execution bypass.
+
+### 2026-10-07 — Explicit R3D.1 bootstrap-closure intervention
+
+The live R3D.1 Step 1 controller entered a self-hosting bootstrap loop: the
+installed runtime needed the new authority/reconciliation semantics in order to
+finish implementing those same semantics.  The operator therefore froze the
+live scheduler and closed the bootstrap boundary directly in source rather than
+weakening CAP-011, add-only test policy, reconciliation, or recovery gates.
+
+This intervention preserves the stalled transaction/runtime records as
+historical evidence only.  It merges the live Step 1 implementation with the
+qualified legacy-replacement bridge, test-policy restore, interrupted-recovery
+steering preservation, add-only worker hardening, current-step rebase,
+carry-forward evolution and installed-successor binding guards.  It is not a
+claim that the stalled plan autonomously completed.  After commit/push, R3D.1
+must resume from a fresh installed authority epoch and re-prove the remaining
+installed-successor handoff/qualification work.
+
 ## R3D.2 — Canonical Runtime Seam
 
 - [ ] native runtime abstraction

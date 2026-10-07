@@ -218,6 +218,8 @@ def _self_development_path(root: Path, path: str) -> bool:
 
 def _validate_adoption(root: Path, state: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
     path = str(candidate["path"])
+    if path in set(map(str, state.get("retirement_excluded_historical_authority_paths") or [])):
+        raise ReconciliationError(f"CAP-011 historical evidence cannot enter carry-forward ownership: {path}")
     if candidate.get("classification") == "retired-carry-forward" and candidate.get("inherited_fingerprint_matches") is not True:
         raise ReconciliationError(f"carry-forward candidate changed since retirement: {path}")
     if _runtime_or_protected(path):
@@ -238,6 +240,49 @@ def _validate_adoption(root: Path, state: Mapping[str, Any], candidate: Mapping[
             raise ReconciliationError(f"carry-forward reconciliation violates test policy {policy}: {path}")
 
 
+def _authorised_adopted_delta(root: Path, state: Mapping[str, Any], action: Mapping[str, Any], candidate: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Recognise one provider delta while retaining, rather than replacing, adoption.
+
+    The original action remains the non-provider ownership proof.  A later
+    controller receipt may account for exactly one current-step provider delta;
+    anything else stays stale and blocks qualification.
+    """
+    if action.get("disposition") != ADOPTED or action.get("classification") != "retired-carry-forward":
+        return None
+    path = str(action.get("path") or "")
+    inherited = action.get("inherited_fingerprint")
+    if not isinstance(inherited, str) or not inherited or candidate is None:
+        return None
+    from . import controller
+    matches: list[dict[str, Any]] = []
+    for receipt_path in sorted((root / adoption.RUNTIME_NAME).glob("controller-run-*.json")):
+        try:
+            receipt = controller._runtime_json(root, receipt_path.name)
+        except controller.ControllerError:
+            continue
+        assert receipt is not None
+        body = dict(receipt)
+        recorded = body.pop("record_sha256", None)
+        binding = receipt.get("plan_binding") if isinstance(receipt.get("plan_binding"), Mapping) else None
+        delta = receipt.get("actual_delta") if isinstance(receipt.get("actual_delta"), Mapping) else None
+        if not (
+            receipt.get("schema") == controller.RUN_RESULT_SCHEMA and isinstance(recorded, str) and _HEX64.fullmatch(recorded)
+            and _digest(body) == recorded and isinstance(binding, Mapping) and isinstance(delta, Mapping)
+            and binding.get("plan_hash") == state.get("plan_hash") and int(binding.get("current_step") or 0) == int(state.get("current_step") or 0)
+            and receipt.get("transaction_id") == state.get("transaction_id") and receipt.get("next_action") == "qualification-required"
+            and isinstance(receipt.get("provider_result"), Mapping) and receipt["provider_result"].get("status") == "PASS"
+        ):
+            continue
+        rows = [row for row in delta.get("paths") or [] if isinstance(row, Mapping) and row.get("path") == path]
+        if len(rows) != 1:
+            continue
+        row = rows[0]
+        if row.get("before_fingerprint") != inherited or row.get("after_fingerprint") != candidate.get("content_fingerprint"):
+            continue
+        matches.append({"controller_receipt_sha256": recorded, "before_fingerprint": inherited, "after_fingerprint": row.get("after_fingerprint"), "kind": row.get("kind")})
+    return matches[0] if len(matches) == 1 else None
+
+
 def reconciliation_snapshot(project: Path, operator_name: str, plan_hash: str) -> dict[str, Any]:
     root, state, _active, tx, policy_status, name = _active_authority(project, operator_name, plan_hash)
     raw = _raw_attribution(root)
@@ -254,13 +299,16 @@ def reconciliation_snapshot(project: Path, operator_name: str, plan_hash: str) -
         if action is None:
             row.update({"disposition": PENDING, "owned": False, "action_hash": None, "fingerprint_matches": True})
         else:
+            delta = _authorised_adopted_delta(root, state, action, candidate)
+            matches = action.get("candidate_sha256") == candidate.get("candidate_sha256") or delta is not None
             row.update({
                 "disposition": action["disposition"],
                 "owned": action["disposition"] == ADOPTED,
                 "action_hash": action["action_hash"],
                 "claiming_step": action["claiming_step"],
                 "reason": action.get("reason"),
-                "fingerprint_matches": action.get("candidate_sha256") == candidate.get("candidate_sha256"),
+                "fingerprint_matches": matches,
+                "authorised_provider_delta": delta,
             })
         rows.append(row)
         seen.add(path)
@@ -358,6 +406,9 @@ def build_action_preview(project: Path, operator_name: str, plan_hash: str, path
         "candidate_sha256": candidate["candidate_sha256"],
         "classification": candidate["classification"],
         "approval_presence": candidate["approval_presence"],
+        "inherited_fingerprint": candidate.get("content_fingerprint") if candidate.get("classification") == "retired-carry-forward" else None,
+        "retirement_record_id": candidate.get("retirement_record_id"),
+        "retirement_manifest_sha256": candidate.get("retirement_manifest_sha256"),
         "disposition": _DISPOSITIONS[action_name],
         "action": action_name,
         "reason": reason_value,
@@ -397,6 +448,9 @@ def apply_action(project: Path, operator_name: str, plan_hash: str, path: str, d
         "repository_mutation_scope_sha256": preview["repository_mutation_scope_sha256"],
         "classification": preview["classification"],
         "candidate_sha256": preview["candidate_sha256"],
+        "inherited_fingerprint": preview.get("inherited_fingerprint"),
+        "retirement_record_id": preview.get("retirement_record_id"),
+        "retirement_manifest_sha256": preview.get("retirement_manifest_sha256"),
         "approval_presence": preview["approval_presence"],
         "test_change_policy": preview["test_change_policy"],
         "transaction_id": preview["transaction_id"],
@@ -465,7 +519,7 @@ def overlay_attribution(project: Path, raw: Mapping[str, Any]) -> dict[str, Any]
             categories[target]["paths"].sort()
             categories[target]["count"] = len(categories[target]["paths"])
         current = current_candidates.get(path)
-        stale = bool(action["disposition"] == ADOPTED and (current is None or current.get("candidate_sha256") != action.get("candidate_sha256")))
+        stale = bool(action["disposition"] == ADOPTED and (current is None or (current.get("candidate_sha256") != action.get("candidate_sha256") and _authorised_adopted_delta(root, state, action, current) is None)))
         if stale and path not in categories["reconciliation_stale"]["paths"]:
             categories["reconciliation_stale"]["paths"].append(path)
             categories["reconciliation_stale"]["paths"].sort()

@@ -468,6 +468,10 @@ class StygnoxHumanControlTests(TestCase):
             self.assertEqual("test-policy", gate["kind"])
             self.assertFalse(gate["human_resolvable"])
             self.assertEqual(["tests/test_new.py"], gate["allowed_new_test_candidates"])
+            self.assertEqual(["tests/test_new.py"], gate["test_policy_violations"])
+            self.assertTrue(gate["test_policy_violations_restored"])
+            self.assertFalse((repo / "tests" / "test_new.py").exists())
+            self.assertEqual(gate["blocked_baseline_sha256"], adoption.capture_baseline(repo).public()["sha256"])
             with self.assertRaisesRegex(human_control.HumanControlError, "not operator-resolvable"):
                 human_control.build_resolve_preview(repo, "Operator One", approved["plan_hash"], gate["gate_id"], "accept it")
             with self.assertRaisesRegex(human_control.HumanControlError, "not part of the current policy gate"):
@@ -494,6 +498,98 @@ class StygnoxHumanControlTests(TestCase):
             )
             retry = controller.build_run_preview(repo, "Operator One", objective, "write")
             self.assertEqual(["tests/test_new.py"], retry["plan_binding"]["allowed_new_tests"])
+
+
+    def test_add_only_existing_test_violation_is_restored_before_gate_without_losing_source_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            init_repo(repo, existing_test=True)
+            active_reviewed(repo, root / "external")
+            approved = approve(repo, [step(1, policy="add-only")])
+            objective = approved["plan"]["steps"][0]["objective"]
+            preview = controller.build_run_preview(repo, "Operator One", objective, "write")
+
+            def mutate(**_kwargs: object) -> dict:
+                (repo / "README.md").write_text("authorised source delta\n", encoding="utf-8")
+                (repo / "tests" / "test_existing.py").write_text("value = 2\n", encoding="utf-8")
+                return implementation_result("PASS", "source plus forbidden existing-test edit")
+
+            with mock.patch.object(provider_codex, "execute", side_effect=mutate):
+                result = controller.run_controller(repo, "Operator One", objective, "write", preview["preview_sha256"], "RUN")
+
+            gate = result["human_gate"]
+            self.assertEqual("test-policy", gate["kind"])
+            self.assertEqual(["tests/test_existing.py"], gate["test_policy_violations"])
+            self.assertTrue(gate["test_policy_violations_restored"])
+            self.assertEqual("value = 1\n", (repo / "tests" / "test_existing.py").read_text(encoding="utf-8"))
+            self.assertEqual("authorised source delta\n", (repo / "README.md").read_text(encoding="utf-8"))
+            self.assertEqual(gate["blocked_baseline_sha256"], adoption.capture_baseline(repo).public()["sha256"])
+            steer_preview = human_control.build_steer_preview(
+                repo, "Operator One", approved["plan_hash"], gate["gate_id"],
+                "Keep the source delta; do not modify pre-existing tests. Add regressions only in new test files.",
+            )
+            self.assertIsNone(steer_preview["legacy_test_policy_restore"])
+
+    def test_legacy_step1_add_only_gate_restores_exact_approval_tests_before_steer(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            init_repo(repo, existing_test=True)
+            active_reviewed(repo, root / "external")
+            approved = approve(repo, [step(1, policy="add-only")])
+            objective = approved["plan"]["steps"][0]["objective"]
+            run_preview = controller.build_run_preview(repo, "Operator One", objective, "write")
+
+            # Emulate the pre-fix controller shape: legitimate source work and a
+            # forbidden approval-present test edit were both left in place, and
+            # the gate was bound to that unsafe post-provider baseline.
+            (repo / "README.md").write_text("legitimate source work\n", encoding="utf-8")
+            (repo / "tests" / "test_existing.py").write_text("value = 99\n", encoding="utf-8")
+            blocked = adoption.capture_baseline(repo).public()
+            gate = human_control.open_gate(
+                repo,
+                "Operator One",
+                plan_binding=run_preview["plan_binding"],
+                origin_preview_sha256=run_preview["preview_sha256"],
+                blocked_baseline=blocked,
+                kind="test-policy",
+                reason="policy violation: test paths ['tests/test_existing.py']",
+                human_resolvable=False,
+            )
+            state = planning._record(repo)
+            assert state is not None
+            legacy_gate = dict(state["active_gate"])
+            legacy_gate.pop("test_policy_violations", None)
+            legacy_gate.pop("test_policy_violations_restored", None)
+            legacy_gate["gate_sha256"] = human_control._gate_digest(legacy_gate)
+            state["active_gate"] = legacy_gate
+            state = planning._write(repo, state)
+
+            steer_preview = human_control.build_steer_preview(
+                repo,
+                "Operator One",
+                approved["plan_hash"],
+                gate["gate_id"],
+                "Preserve the source work but restore pre-existing tests and do not modify them on retry.",
+            )
+            restore = steer_preview["legacy_test_policy_restore"]
+            self.assertEqual(["tests/test_existing.py"], restore["paths"])
+            decision = human_control.steer(
+                repo,
+                "Operator One",
+                approved["plan_hash"],
+                gate["gate_id"],
+                "Preserve the source work but restore pre-existing tests and do not modify them on retry.",
+                steer_preview["preview_sha256"],
+                "STEER",
+            )
+            self.assertEqual("HUMAN_STEERED", decision["result"])
+            self.assertEqual(["tests/test_existing.py"], decision["legacy_test_policy_restore_result"]["paths"])
+            self.assertEqual("value = 1\n", (repo / "tests" / "test_existing.py").read_text(encoding="utf-8"))
+            self.assertEqual("legitimate source work\n", (repo / "README.md").read_text(encoding="utf-8"))
+            current = adoption.capture_baseline(repo).public()["sha256"]
+            self.assertEqual(current, planning.plan_status(repo)["plan"]["step_authority_baseline_sha256"])
 
     def test_policy_gate_refuses_approval_time_test_path_after_permitted_removal(self) -> None:
         with tempfile.TemporaryDirectory() as td:

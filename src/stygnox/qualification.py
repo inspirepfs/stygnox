@@ -172,6 +172,9 @@ def _step_receipt(root: Path, state: Mapping[str, Any], current_baseline_sha256:
     step = int(state.get("current_step") or 0)
     plan_hash = str(state.get("plan_hash") or "")
     authority_before = str(state.get("step_authority_baseline_sha256") or state.get("approval_baseline_sha256") or "")
+    rebase = state.get("current_step_rebase") if isinstance(state.get("current_step_rebase"), Mapping) else None
+    expected_receipt = None if rebase is None else rebase.get("predecessor", {}).get("predecessor_receipt_sha256") if isinstance(rebase.get("predecessor"), Mapping) else None
+    expected_plan_record = state.get("record_sha256") if rebase is None else rebase.get("plan_record_sha256_before")
     matches: list[dict[str, Any]] = []
     for receipt in _controller_receipts(root):
         binding = receipt.get("plan_binding") if isinstance(receipt.get("plan_binding"), Mapping) else None
@@ -179,12 +182,15 @@ def _step_receipt(root: Path, state: Mapping[str, Any], current_baseline_sha256:
             continue
         if (
             binding.get("plan_hash") == plan_hash
+            and binding.get("plan_record_sha256") == expected_plan_record
             and int(binding.get("current_step") or 0) == step
             and receipt.get("before_baseline_sha256") == authority_before
             and receipt.get("after_baseline_sha256") == current_baseline_sha256
             and receipt.get("next_action") in {"qualification-required", "turn-complete"}
             and receipt.get("human_gate") is None
         ):
+            if expected_receipt is not None and receipt.get("record_sha256") != expected_receipt:
+                continue
             matches.append(receipt)
     if not matches:
         raise QualificationError("current approved step has no exact completed controller turn awaiting qualification")
@@ -451,6 +457,11 @@ def _build_preview(project: Path, operator: str, plan_hash: str, *, requalify: b
     elif status == "APPROVED":
         if step < 1 or step > len(plan["steps"]):
             raise QualificationError("current approved plan step is invalid")
+        try:
+            if planning.pending_required_transition(state) is not None:
+                raise QualificationError("current approved step requires a completed post-qualification transition before later qualification")
+        except planning.PlanningError as exc:
+            raise QualificationError(str(exc)) from exc
         receipt = _step_receipt(root, state, current["sha256"])
         phase = "final" if step == len(plan["steps"]) else "step"
         if phase == "final":
@@ -500,8 +511,10 @@ def _build_preview(project: Path, operator: str, plan_hash: str, *, requalify: b
         "phase": phase,
         "current_step": step,
         "total_steps": len(plan["steps"]),
+        "step": dict(plan["steps"][step - 1]) if 1 <= step <= len(plan["steps"]) else None,
         "repository_authority": repository_authority,
         "transaction_id": tx["transaction_id"],
+        "transaction_record_sha256": tx["record_sha256"],
         "controller_record_sha256": active["record_sha256"],
         "tracked_config_sha256": policy_status["tracked_config_sha256"],
         "review_sha256": (policy_status.get("review") or {}).get("review_sha256"),
@@ -580,6 +593,22 @@ def _step_result_from_receipt(preview: Mapping[str, Any], receipt: Mapping[str, 
         "gates": [dict(row) for row in gates],
         "qualified_at": _utc_now(),
     }
+    body["qualification_binding_sha256"] = _digest(body)
+    transition_kind = (preview.get("step") or {}).get(planning.POST_QUALIFICATION_TRANSITION_FIELD)
+    if transition_kind is not None:
+        body["post_qualification_transition"] = {
+            "schema": "stygnox_post_qualification_transition_v1",
+            "kind": transition_kind,
+            "state": "PENDING",
+            "plan_hash": preview["plan_hash"],
+            "plan_record_sha256": preview["plan_record_sha256"],
+            "plan_step": int(preview["current_step"]),
+            "qualification_binding_sha256": body["qualification_binding_sha256"],
+            "qualified_baseline_sha256": baseline_sha256,
+            "controller_record_sha256": preview["controller_record_sha256"],
+            "transaction_id": preview["transaction_id"],
+            "transaction_record_sha256": preview["transaction_record_sha256"],
+        }
     body["record_sha256"] = _digest(body)
     return body
 
@@ -750,15 +779,21 @@ def run_qualification(project: Path, operator: str, plan_hash: str, preview_sha2
         if any(int(row.get("step") or 0) == int(preview["current_step"]) for row in results):
             raise QualificationError("current step already has a durable qualification result")
         updated["step_results"] = [*results, step_result]
-        updated["current_step"] = int(preview["current_step"]) + 1
+        transition = step_result.get("post_qualification_transition")
+        if transition is None:
+            updated["current_step"] = int(preview["current_step"]) + 1
+            updated["execution_authority_granted"] = True
+        else:
+            updated["execution_authority_granted"] = False
         updated["step_authority_baseline_sha256"] = after["sha256"]
+        updated["current_step_rebase"] = None
         updated["step_resume"] = None
         updated["last_qualification_failure"] = None
         history = [dict(row) for row in updated.get("qualification_history") or [] if isinstance(row, Mapping)]
         updated["qualification_history"] = [*history[-99:], {"kind": "step", "state": "PASS", "step": preview["current_step"], "record_sha256": step_result["record_sha256"], "completed_at": record["completed_at"]}]
         written = planning._write(root, updated)
         persisted = _record_result(root, {**record, "state": "PASS", "step_result_sha256": step_result["record_sha256"], "plan_record_sha256": written["record_sha256"]})
-        return {**persisted, "result": "STEP_QUALIFIED", "plan_status": written["status"], "next_step": written["current_step"]}
+        return {**persisted, "result": "STEP_QUALIFIED_TRANSITION_REQUIRED" if transition is not None else "STEP_QUALIFIED", "plan_status": written["status"], "next_step": written["current_step"]}
 
     # final or requalification
     if phase == "final" and state.get("status") == "APPROVED":

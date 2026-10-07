@@ -344,6 +344,63 @@ class StygnoxSchedulerTests(TestCase):
             turn = controller.build_run_preview(repo, "Operator One", objective, "write")
             self.assertEqual(plan_state["step_authority_baseline_sha256"], turn["project_baseline"]["sha256"])
 
+    def test_interrupted_recovery_preserves_same_step_human_steering(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            init_repo(repo)
+            active_reviewed(repo, root / "external", max_loops=3)
+            approve(repo)
+
+            state = planning.plan_status(repo)["plan"]
+            steered = dict(state)
+            steered["step_resume"] = {
+                "step": 1,
+                "gate_id": "HG-0002-01",
+                "direction": "Do not modify existing tests; use only new regression-test files.",
+                "allowed_new_tests": [],
+                "legacy_test_policy_restore_result": {
+                    "paths": ["tests/test_stygnox_existing.py"],
+                    "repository_baseline_sha256": state["step_authority_baseline_sha256"],
+                },
+                "recorded_at": "2026-10-07T13:36:46+00:00",
+                "decision_sha256": "6" * 64,
+            }
+            planning._write(repo, steered)
+
+            preview = scheduler.build_schedule_preview(repo, "Operator One")
+            with mock.patch.object(controller, "run_controller", side_effect=controller.ControllerError("simulated fail-closed rollback")):
+                with self.assertRaisesRegex(scheduler.SchedulerError, "interrupted during controller turn"):
+                    scheduler.run_schedule(repo, "Operator One", preview["preview_sha256"], "SCHEDULE")
+
+            recovery_preview = scheduler.build_recovery_preview(repo, "Operator One", [])
+            recovered = scheduler.recover_interrupted(
+                repo,
+                "Operator One",
+                [],
+                recovery_preview["preview_sha256"],
+                "RECOVER",
+            )
+            self.assertEqual("RECOVERED_PARTIAL_TURN", recovered["status"])
+
+            plan_state = planning.plan_status(repo)["plan"]
+            resume = plan_state["step_resume"]
+            self.assertEqual("HG-0002-01", resume["gate_id"])
+            self.assertEqual(
+                "Do not modify existing tests; use only new regression-test files.",
+                resume["direction"],
+            )
+            self.assertEqual("6" * 64, resume["decision_sha256"])
+            self.assertEqual(["tests/test_stygnox_existing.py"], resume["legacy_test_policy_restore_result"]["paths"])
+            self.assertEqual(plan_state["interrupted_recoveries"][-1]["record_sha256"], resume["interrupted_recovery_record_sha256"])
+
+            context = planning.approved_step_context(repo, "Operator One")
+            self.assertEqual("HG-0002-01", context["resumed_from_gate"])
+            self.assertEqual(
+                "Do not modify existing tests; use only new regression-test files.",
+                context["human_direction"],
+            )
+
     def test_controller_pending_provenance_recovery_requires_its_own_exact_receipt_witness(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

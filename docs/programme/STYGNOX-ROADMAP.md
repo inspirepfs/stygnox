@@ -274,6 +274,20 @@ Requirements include:
 
 Also resolve the pre-plan provenance of:
 
+Review note (2026-10-05): R3D.1 intent is unchanged; the installed-only
+rebind implementation is being qualified against these requirements.
+
+Review note (2026-10-06): where an accepted step requires the installed
+successor handoff, its source qualification does not advance execution.  The
+next step opens only after the separately attested, identity-valid successor
+transition is complete.
+
+Review note (2026-10-07): the Step 1 self-hosting bootstrap loop is closed by an
+explicit operator source intervention, not by widening controller authority.
+The stalled runtime remains historical evidence; after the closure commit a
+fresh installed authority epoch must re-prove the native rebase, provenance and
+installed-successor semantics before R3D.1 can close.
+
 - `stygnox.toml`
 - `stygnox.policy.md`
 

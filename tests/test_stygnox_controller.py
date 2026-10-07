@@ -121,6 +121,39 @@ class StygnoxControllerTests(TestCase):
                     "RUN",
                 )
 
+    def test_worker_prompt_makes_add_only_existing_tests_explicitly_read_only(self) -> None:
+        preview = {
+            "repository_authority": "write",
+            "execution_controls": {},
+            "plan_binding": {
+                "plan_hash": "a" * 64,
+                "current_step": 1,
+                "total_steps": 3,
+                "step_title": "Bounded repair",
+                "test_change_policy": "add-only",
+                "repository_mutation_scope": [
+                    "src/stygnox/qualification.py",
+                    "tests/test_existing.py",
+                    "tests/test_new_regression.py",
+                ],
+                "repository_mutation_scope_sha256": "b" * 64,
+                "human_direction": "Do not modify tests/test_existing.py.",
+                "resume_reason": None,
+                "allowed_new_tests": [],
+                "self_development_grant": None,
+                "acceptance": ["Preserve prior qualified tests."],
+            },
+            "objective": "Complete the bounded implementation without changing existing tests.",
+        }
+
+        prompt = controller._prompt(preview)
+
+        self.assertIn("add-only makes every test path already present at the start of this controller turn read-only", prompt)
+        self.assertIn("including a test created by an earlier turn of this same step", prompt)
+        self.assertIn("Being listed in the repository mutation scope does not override this restriction", prompt)
+        self.assertIn("change the implementation instead", prompt)
+        self.assertIn("Bounded human direction for this retry: Do not modify tests/test_existing.py.", prompt)
+
     def test_controller_deactivation_revokes_execution(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

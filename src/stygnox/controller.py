@@ -27,6 +27,7 @@ RUN_PREVIEW_SCHEMA = "stygnox_controller_run_preview_v1"
 RUN_RESULT_SCHEMA = "stygnox_controller_run_result_v1"
 PENDING_PROVENANCE_PREVIEW_SCHEMA = "stygnox_pending_provenance_preview_v1"
 PENDING_PROVENANCE_WITNESS_SCHEMA = "stygnox_pending_provenance_witness_v1"
+CURRENT_STEP_REBASE_PREDECESSOR_SCHEMA = "stygnox_current_step_rebase_predecessor_v1"
 CONTROLLER_RECORD = "controller.json"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -94,6 +95,154 @@ def _controller(root: Path, *, required: bool = True) -> dict[str, Any] | None:
     if value.get("schema") != CONTROLLER_SCHEMA:
         raise ControllerError("unsupported installed controller state schema")
     return value
+
+
+
+
+def _rebase_plan_record_matches_current_state(
+    receipt: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    state: Mapping[str, Any],
+    step: int,
+) -> bool:
+    """Accept only the exact plan-record successor produced by the same turn.
+
+    A supervised self-development retry expires its one-shot grant after the
+    provider turn.  That controller-owned expiry rewrites ``plan.json`` after
+    the turn was bound, so the receipt's original plan-record hash is no longer
+    the live hash.  The expiry result carried by that same receipt is the sole
+    admissible successor; arbitrary later plan rewrites remain rejected.
+    """
+    current = state.get("record_sha256")
+    if binding.get("plan_record_sha256") == current:
+        return True
+    expiration = receipt.get("self_development_expiration")
+    if not isinstance(expiration, Mapping):
+        return False
+    expiration_body = dict(expiration)
+    plan_record_sha256 = expiration_body.pop("plan_record_sha256", None)
+    recorded = str(expiration_body.pop("record_sha256", "") or "")
+    if not _HEX64.fullmatch(recorded) or recorded != _digest(expiration_body):
+        return False
+    return (
+        plan_record_sha256 == current
+        and expiration.get("plan_hash") == state.get("plan_hash")
+        and int(expiration.get("step") or 0) == step
+    )
+
+def current_step_rebase_predecessor(root: Path, state: Mapping[str, Any], active: Mapping[str, Any], tx: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive the sole admissible predecessor for a current-step rebase.
+
+    This deliberately accepts controller-created evidence only.  In particular,
+    a matching worktree baseline, an arbitrary run receipt, or a retirement
+    record by itself is never a rebase authority.
+    """
+    from . import planning
+
+    plan = planning._validate_plan(state.get("plan"))
+    step = int(state.get("current_step") or 0)
+    if state.get("status") != "APPROVED" or step < 1 or step > len(plan["steps"]):
+        raise ControllerError("current-step rebase requires one current APPROVED plan step")
+    if state.get("operator") != active.get("operator") or state.get("transaction_id") != tx.get("transaction_id"):
+        raise ControllerError("current-step rebase predecessor authority does not match the live controller/transaction")
+    if state.get("controller_record_sha256") != active.get("record_sha256") or state.get("transaction_record_sha256") != tx.get("record_sha256"):
+        raise ControllerError("current-step rebase predecessor record evidence is stale")
+    baseline = adoption.capture_baseline(root).public()
+    authority_before = state.get("step_authority_baseline_sha256") or state.get("approval_baseline_sha256")
+    if not isinstance(authority_before, str) or not _HEX64.fullmatch(authority_before):
+        raise ControllerError("current-step rebase lacks an exact current-step checkpoint")
+
+    pending = planning.pending_required_transition(state)
+    if pending is not None:
+        qualified = str(pending.get("qualified_baseline_sha256") or "")
+        if baseline.get("sha256") != qualified or qualified != authority_before:
+            raise ControllerError("held qualified step no longer has its exact reconciled baseline")
+        predecessor = {
+            "kind": "QUALIFIED_HELD_PENDING_TRANSITION",
+            "predecessor_receipt_sha256": pending.get("qualification_binding_sha256"),
+            "pending_transition": pending,
+            "before_baseline_sha256": authority_before,
+            "after_baseline_sha256": qualified,
+        }
+    else:
+        if state.get("execution_authority_granted") is not True:
+            raise ControllerError("current-step rebase requires executable authority or a held qualified transition")
+        matches: list[dict[str, Any]] = []
+        for receipt_path in sorted((root / adoption.RUNTIME_NAME).glob("controller-run-*.json")):
+            try:
+                receipt = _runtime_json(root, receipt_path.name)
+            except ControllerError:
+                continue
+            assert receipt is not None
+            body = dict(receipt)
+            recorded = body.pop("record_sha256", None)
+            binding = receipt.get("plan_binding") if isinstance(receipt.get("plan_binding"), Mapping) else None
+            if (
+                receipt.get("schema") == RUN_RESULT_SCHEMA
+                and isinstance(recorded, str) and _HEX64.fullmatch(recorded) and _digest(body) == recorded
+                and isinstance(binding, Mapping)
+                and binding.get("plan_hash") == state.get("plan_hash")
+                and _rebase_plan_record_matches_current_state(receipt, binding, state, step)
+                and int(binding.get("current_step") or 0) == step
+                and binding.get("step_authority_baseline_sha256") == authority_before
+                and receipt.get("transaction_id") == tx.get("transaction_id")
+                and receipt.get("before_baseline_sha256") == authority_before
+                and receipt.get("after_baseline_sha256") == baseline.get("sha256")
+                and receipt.get("next_action") == "qualification-required"
+                and receipt.get("human_gate") is None
+                and isinstance(receipt.get("provider_result"), Mapping)
+                and receipt["provider_result"].get("status") == "PASS"
+            ):
+                matches.append(receipt)
+        if len(matches) != 1:
+            raise ControllerError("current-step rebase requires exactly one completed controller turn awaiting qualification")
+        receipt = matches[0]
+        predecessor = {
+            "kind": "COMPLETED_CONTROLLER_TURN_AWAITING_QUALIFICATION",
+            "predecessor_receipt_sha256": receipt["record_sha256"],
+            "predecessor_plan_record_sha256": state["record_sha256"],
+            "before_baseline_sha256": authority_before,
+            "after_baseline_sha256": baseline["sha256"],
+        }
+    body = {
+        "schema": CURRENT_STEP_REBASE_PREDECESSOR_SCHEMA,
+        "plan_hash": state["plan_hash"], "current_step": step,
+        "plan_record_sha256": state["record_sha256"],
+        "controller_record_sha256": active["record_sha256"],
+        "transaction_id": tx["transaction_id"], "transaction_record_sha256": tx["record_sha256"],
+        "reconciled_baseline_sha256": baseline["sha256"],
+        "predecessor": predecessor,
+        "retirement_lineage_sha256": _digest(state.get("retirement_historical_lineage")),
+        "retirement_record_id": state.get("retirement_record_id"),
+        "retirement_manifest_sha256": state.get("retirement_manifest_sha256"),
+        "cap_011_historical_paths": list(state.get("retirement_excluded_historical_authority_paths") or []),
+    }
+    body["predecessor_sha256"] = _digest(body)
+    return body
+
+
+def successor_controller(predecessor: Mapping[str, Any], successor_transaction: Mapping[str, Any], binding: Mapping[str, Any]) -> dict[str, Any]:
+    """Create a rebind successor without changing predecessor authority."""
+    previous = dict(predecessor)
+    recorded = previous.pop("record_sha256", None)
+    if not isinstance(recorded, str) or recorded != _digest(previous):
+        raise ControllerError("predecessor controller integrity check failed")
+    identity = binding.get("installed_identity")
+    artifact = binding.get("candidate_artifact")
+    if not isinstance(identity, Mapping) or not isinstance(artifact, Mapping):
+        raise ControllerError("successor controller lacks installed artifact identity")
+    body = dict(previous)
+    body.update({
+        "enabled": True,
+        "controller_execution_enabled": True,
+        "transaction_id": successor_transaction.get("transaction_id"),
+        "authority_baseline_sha256": binding.get("qualified_source_baseline_sha256"),
+        "installed_command": identity.get("executable"),
+        "successor_of_controller_record_sha256": recorded,
+        "rebind_binding": dict(binding),
+    })
+    body["record_sha256"] = _digest(body)
+    return body
 
 
 def _policy_status(root: Path) -> dict[str, Any]:
@@ -386,6 +535,21 @@ def _prompt(preview: Mapping[str, Any]) -> str:
         allowed_tests = list(binding.get("allowed_new_tests") or [])
         if allowed_tests:
             steering += "Exact human-authorised new test paths: " + ", ".join(allowed_tests) + "\n"
+        test_policy = str(binding.get("test_change_policy") or "none")
+        if test_policy == "add-only":
+            steering += (
+                "Test-policy enforcement for this turn: add-only makes every test path already present at the start "
+                "of this controller turn read-only. Do not edit, delete, rename, move, or rewrite an existing test "
+                "file, including a test created by an earlier turn of this same step. Being listed in the repository "
+                "mutation scope does not override this restriction. If an existing test conflicts with the implementation, "
+                "change the implementation instead. You may create only genuinely new test files that are inside the "
+                "immutable repository mutation scope or explicitly listed as human-authorised new test paths.\n"
+            )
+        elif test_policy == "none":
+            steering += (
+                "Test-policy enforcement for this turn: none makes all test paths read-only and forbids creating, editing, "
+                "deleting, renaming, or moving tests. Being listed in the repository mutation scope does not override this restriction.\n"
+            )
         self_grant = binding.get("self_development_grant") if isinstance(binding.get("self_development_grant"), Mapping) else None
         if self_grant is not None:
             steering += "Exact supervised Stygnox self-development paths for this retry only: " + ", ".join(self_grant.get("paths") or []) + "\n"
@@ -611,7 +775,18 @@ def run_controller(
                 self_development_candidates=self_development_candidates,
             )
         elif violations:
-            reason = f"policy violation: test paths {violations!r}"
+            # Test-policy violations are never allowed to become the baseline
+            # for human steering.  Restore only the violating test paths to
+            # their exact pre-turn bytes while preserving otherwise-authorised
+            # source changes from the same controller turn.
+            restored_tests = _restore_manifest_snapshot(root, before_snapshot, violations)
+            final_manifest = scheduler.repository_manifest(root)
+            for path in violations:
+                if final_manifest.get(path) != before_manifest.get(path):
+                    raise ControllerError(f"test-policy violation path could not be restored exactly: {path}")
+            after = adoption.capture_baseline(root).public()
+            attribution = status_attribution(before, after)
+            reason = f"policy violation: test paths {violations!r}; original contents restored"
             human_gate = human_control.open_gate(
                 root,
                 str(preview["operator"]),
@@ -622,6 +797,8 @@ def run_controller(
                 reason=reason,
                 human_resolvable=False,
                 allowed_new_test_candidates=candidates,
+                test_policy_violations=violations,
+                test_policy_violations_restored=True,
             )
         elif str(provider_result.get("status") or "") == "BLOCKED":
             step_view = {

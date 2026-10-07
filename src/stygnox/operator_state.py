@@ -201,6 +201,15 @@ def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None
     if not isinstance(controller_state, Mapping) or controller_state.get("enabled") is not True:
         return [{"action": "controller.activate", "reason": "transaction is active but controller authority is inactive"}]
     if phase in {"CONTROLLER_READY", "REJECTED", "IDLE"}:
+        if phase == "REJECTED" and isinstance(state, Mapping):
+            retirement_record_id = state.get("retirement_record_id")
+            if retirement_record_id:
+                return [{
+                    "action": "plan.propose-replacement-preview",
+                    "reason": "rejected replacement may be superseded only from the same retirement lineage",
+                    "retirement_record_id": retirement_record_id,
+                }]
+
         if phase == "IDLE" and isinstance(state, Mapping):
             history = state.get("retired_plans") if isinstance(state.get("retired_plans"), list) else []
             latest_retirement = history[-1] if history and isinstance(history[-1], Mapping) else {}
@@ -210,6 +219,7 @@ def _actions(*, phase: str, adopted: bool, transaction: Mapping[str, Any] | None
                     "reason": "latest retired plan preserved carry-forward work that must be bound to a replacement plan",
                     "retirement_record_id": latest_retirement.get("record_id"),
                 }]
+
         return [{"action": "plan.propose-preview", "reason": "no approved execution plan currently governs the repository"}]
     if phase == "AWAITING_APPROVAL":
         return [
