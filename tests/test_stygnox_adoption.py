@@ -143,6 +143,74 @@ class StygnoxAdoptionTests(TestCase):
                 adoption.write_runtime_record(root, "probe.json", {"x": 1}, actor="agent")
             self.assertFalse((root / adoption.RUNTIME_NAME).exists())
 
+    def test_exact_tracked_bootstrap_files_are_unchanged_and_admissible(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            init_repo(repo)
+            identity = external_command_identity(base / "external")
+            with mock.patch.object(adoption, "resolve_installed_command", return_value=identity):
+                initial = adoption.build_preview(repo, "Operator One")
+            plans = {item["path"]: item for item in initial["tracked_review"]}
+            (repo / ".gitignore").write_text(plans[".gitignore"]["content"], encoding="utf-8")
+            (repo / adoption.CONFIG_NAME).write_text(plans[adoption.CONFIG_NAME]["content"], encoding="utf-8")
+            (repo / adoption.POLICY_NAME).write_text(plans[adoption.POLICY_NAME]["content"], encoding="utf-8")
+            git(repo, "add", ".gitignore", adoption.CONFIG_NAME, adoption.POLICY_NAME)
+            git(repo, "commit", "-q", "-m", "tracked stygnox bootstrap material")
+
+            with mock.patch.object(adoption, "resolve_installed_command", return_value=identity):
+                preview = adoption.build_preview(repo, "Operator One")
+                before = {
+                    name: (repo / name).stat().st_ino
+                    for name in (adoption.CONFIG_NAME, adoption.POLICY_NAME)
+                }
+                result = adoption.handoff_adoption(
+                    repo, "Operator One", preview["preview_sha256"], "HANDOFF"
+                )
+
+            current = {item["path"]: item for item in preview["tracked_review"]}
+            self.assertTrue(preview["admissible"])
+            self.assertEqual([], preview["conflicts"])
+            self.assertEqual("unchanged", current[adoption.CONFIG_NAME]["action"])
+            self.assertEqual("unchanged", current[adoption.POLICY_NAME]["action"])
+            self.assertEqual(
+                before,
+                {name: (repo / name).stat().st_ino for name in before},
+            )
+            self.assertEqual("HANDOFF_RECORDED", result["result"])
+            self.assertEqual("", git(repo, "status", "--porcelain=v1").stdout)
+
+    def test_identical_untracked_reserved_file_remains_a_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            init_repo(repo)
+            identity = external_command_identity(base / "external")
+            with mock.patch.object(adoption, "resolve_installed_command", return_value=identity):
+                initial = adoption.build_preview(repo, "Operator One")
+            plans = {item["path"]: item for item in initial["tracked_review"]}
+            (repo / adoption.CONFIG_NAME).write_text(plans[adoption.CONFIG_NAME]["content"], encoding="utf-8")
+
+            with mock.patch.object(adoption, "resolve_installed_command", return_value=identity):
+                preview = adoption.build_preview(repo, "Operator One")
+
+            current = {item["path"]: item for item in preview["tracked_review"]}
+            self.assertFalse(preview["admissible"])
+            self.assertIn(adoption.CONFIG_NAME, preview["conflicts"])
+            self.assertEqual("create", current[adoption.CONFIG_NAME]["action"])
+
+    def test_symlink_reserved_file_remains_a_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            repo = base / "repo"
+            init_repo(repo)
+            target = repo / "operator-config"
+            target.write_text(adoption.render_config(), encoding="utf-8")
+            (repo / adoption.CONFIG_NAME).symlink_to(target.name)
+            preview = self.preview(repo, base / "external")
+            self.assertFalse(preview["admissible"])
+            self.assertIn(adoption.CONFIG_NAME, preview["conflicts"])
+
     def test_reserved_tracked_paths_make_preview_inadmissible(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

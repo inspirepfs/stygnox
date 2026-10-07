@@ -305,13 +305,19 @@ def _planned_tracked_files(
         (POLICY_NAME, render_policy(operator, review)),
     ):
         path = root / name
+        proposed_sha256 = _sha256_bytes(content.encode("utf-8"))
+        action = "create"
         if path.exists() or path.is_symlink():
-            conflicts.append(name)
+            tracked = _git(root, "ls-files", "--error-unmatch", "--", name, check=False).returncode == 0
+            if path.is_symlink() or not path.is_file() or not tracked or sha256_file(path) != proposed_sha256:
+                conflicts.append(name)
+            else:
+                action = "unchanged"
         plans.append(
             {
                 "path": name,
-                "action": "create",
-                "sha256": _sha256_bytes(content.encode("utf-8")),
+                "action": action,
+                "sha256": proposed_sha256,
                 "content": content,
             }
         )
@@ -562,13 +568,21 @@ def handoff_adoption(
         raise AdoptionError(f"handoff refused: {details}")
 
     root = Path(preview["baseline"]["worktree"])
-    # The confirmation authorizes exactly this rendered tracked material.  Refuse
-    # any pre-existing reserved policy/config rather than overwriting it.
-    for name in (CONFIG_NAME, POLICY_NAME):
-        if (root / name).exists() or (root / name).is_symlink():
-            raise AdoptionError(f"handoff refused because reserved tracked path appeared after preview: {name}")
-
+    # The confirmation authorizes exactly this rendered tracked material.  Newly
+    # created reserved paths must still be absent; exact tracked files admitted
+    # as unchanged must remain regular files with the previewed content.
     plans = {item["path"]: item for item in preview["tracked_review"]}
+    for name in (CONFIG_NAME, POLICY_NAME):
+        path = root / name
+        plan = plans[name]
+        if plan["action"] == "create":
+            if path.exists() or path.is_symlink():
+                raise AdoptionError(f"handoff refused because reserved tracked path appeared after preview: {name}")
+        elif plan["action"] == "unchanged":
+            if path.is_symlink() or not path.is_file() or sha256_file(path) != plan["sha256"]:
+                raise AdoptionError(f"handoff refused because unchanged tracked path no longer matches preview: {name}")
+        else:
+            raise AdoptionError(f"unsupported reserved tracked action for {name}: {plan['action']}")
 
     recovery_source: dict[str, Any]
     if preview["baseline"]["journey"] == "dirty":
@@ -593,8 +607,10 @@ def handoff_adoption(
 
     if plans[".gitignore"]["action"] != "unchanged":
         _atomic_write(root / ".gitignore", plans[".gitignore"]["content"])
-    _atomic_write(root / CONFIG_NAME, plans[CONFIG_NAME]["content"])
-    _atomic_write(root / POLICY_NAME, plans[POLICY_NAME]["content"])
+    if plans[CONFIG_NAME]["action"] != "unchanged":
+        _atomic_write(root / CONFIG_NAME, plans[CONFIG_NAME]["content"])
+    if plans[POLICY_NAME]["action"] != "unchanged":
+        _atomic_write(root / POLICY_NAME, plans[POLICY_NAME]["content"])
 
     # Verify the runtime ignore boundary before controller bookkeeping appears.
     ignored = _git(root, "check-ignore", "-q", "--no-index", f"{RUNTIME_NAME}/probe", check=False)
