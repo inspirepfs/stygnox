@@ -1,7 +1,7 @@
 # Stygnox Programme Issues and Findings
 
 **Status:** AUTHORITATIVE FINDINGS REGISTER  
-**Last reconciled:** 2026-10-05
+**Last reconciled:** 2026-10-08 (TOP-00 requirement registration)
 
 ---
 
@@ -502,6 +502,82 @@ describes the same rule.
 A behavioral regression creates an approval-time-new test on turn one, records
 a same-step continuation, refines it on turn two, and proves no test-policy
 gate opens.
+
+---
+
+## STYX-015 — TOP Must Be Truly Live and Preserve Native Authority
+
+**Status:** OPEN — requirements locked, implementation pending
+**Target:** R3D.2/R3D.3 dependencies; R3D.4 delivery; R3D.5 final qualification
+**Severity:** HIGH / ARCHITECTURAL
+
+### Finding
+
+The existing `stygnox tui` is a concise snapshot, not a dependable full-screen
+live operations console. A snapshot refreshed repeatedly, raw JSON dump, fake
+heartbeat, guessed progress, file-scraped status or second authority model
+would fail the locked R3D.4 `stygnox top` requirement.
+
+### Decision and required resolution
+
+TOP-01/02 shall use only the canonical native runtime/evidence and authoritative
+lifecycle/epoch seams built within independently approved R3D.2/R3D.3 scope.
+TOP-03/04 shall deliver a real alternate-screen, continuous, responsive,
+keyboard-interactive dashboard with plan/step, true observable execution,
+selected events/evidence, persistent CTRL/TX/EPOCH/GATE/REC/ART/SRC/RALPH,
+exact authoritative wordmark/theme and correct active/blocked/stopped states.
+The initial TOP is strictly **read-only** for authority-changing operations.
+If live provider detail is not emitted, TOP must show the most recent authentic
+record and its age and state the limitation, not simulate activity.
+
+TOP-05 and R3D.4 regressions must exercise two independent installed processes
+(real scheduler and TOP) while running and when gated, stopped, failed,
+recovering or rebound, including replay/gaps, malicious output, resize,
+Ctrl-C, bounded buffering and terminal restoration. Verify CLI/TUI/TOP state
+parity, controller non-interference, and immediate stale-epoch invalidation.
+
+### Source and disposition
+
+Locked 664-line amendment:
+`docs/programme/amendments/STYGNOX-R3D4-TOP-PROGRAMME-AMENDMENT.md`
+(commit `4b4bafa`). **OPEN**, not discharged by a documentation commit.
+Do not pull R3D.4 renderer or Web UI work into R3D.2.
+
+---
+
+## STYX-016 — Provider Quota and Usage Must Be Authoritative, Fresh and Deduplicated
+
+**Status:** OPEN — requirements locked, provider capability inventory pending
+**Target:** R3D.2 provider telemetry contract assessment; R3D.4 accounting/UI; R3D.5 qualification
+**Severity:** HIGH / TRUST
+
+### Finding
+
+A displayed five-hour or weekly capacity bar is misleading unless backed by
+provider-reported limit/window/scope, remaining percentage, reset time and
+observation freshness. Token receipts may be delayed, replayed, duplicated or
+provider-specific; cached input is usually a subset of input, not extra usage.
+No uploaded programme source proves all providers currently expose those quota
+windows, resets or real-time tool/token events.
+
+### Decision and required resolution
+
+TOP-01 inventories existing native provider receipts and authenticated quota
+observations, defines schema and explicit unavailable/stale distinctions.
+TOP-03 shows visible 5-hour and weekly % left/used, resets/countdowns **when
+reported**, otherwise UNKNOWN/UNAVAILABLE/STALE (never a fabricated 0 or
+estimated balance). Attribute account-shared quota to the correct scope.
+Show per-turn/round, step, run and historical input/output/cached/reasoning
+(where available), model/effort/timing/outcomes. Dedupe stable receipt IDs,
+keep provisional versus final reports distinct, and avoid cached/retry double
+counting; quota is never derived from token totals absent provider authority.
+TOP-04/05 tests include provider-missing data, quota freshness/reset transitions,
+replay/duplicate receipts, provider changes and idle/blocked final accounting.
+
+### Source and disposition
+
+Locked R3D.4 amendment §§9A, 9B, 9C and 10; commit `4b4bafa`.
+**OPEN** pending source capability evidence, implementation and qualification.
 
 ---
 

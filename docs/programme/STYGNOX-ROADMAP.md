@@ -2,7 +2,7 @@
 
 **Status:** AUTHORITATIVE  
 **Programme:** Stygnox Autonomous Development-Loop Platform  
-**Last major reconciliation:** 2026-10-05  
+**Last major reconciliation:** 2026-10-08 (TOP-00 requirements alignment)
 **Current programme stage:** R3D — Runtime Convergence
 
 ---
@@ -48,6 +48,10 @@ The desired end state is:
 The controller and `.stygnox` runtime are authoritative.
 
 Everything else is a client, provider, adapter or advisory capability.
+
+`stygnox tui` is a concise snapshot client; the committed R3D.4 requirement
+adds a separate `stygnox top` full-screen live client over the **same** native
+state/evidence authority. Neither terminal view owns execution authority.
 
 ---
 
@@ -276,6 +280,12 @@ Requirements include:
 
 Also resolve the pre-plan provenance of:
 
+- `stygnox.toml`
+- `stygnox.policy.md`
+
+These are adoption/bootstrap material and must not be attributed to a provider
+implementation step.
+
 Review note (2026-10-05): R3D.1 intent is unchanged; the installed-only
 rebind implementation is being qualified against these requirements.
 
@@ -308,15 +318,13 @@ identity/lineage, fresh-process rebind, runtime epoch transfer, failure-safe
 predecessor retention and zero source/Ralph fallback.  Bootstrap config/policy
 are operator adoption material with provider attribution explicitly excluded.
 
-Before R3D.2 begins, assess and integrate the locked R3D.4 `stygnox top`
-programme amendment into ROADMAP/PROGRESS/ISSUES; this is programme
-reconciliation only and does not authorise R3D.4 implementation ahead of its
-stage.
-
-- `stygnox.toml`
-- `stygnox.policy.md`
-
-These are adoption/bootstrap material and must not be attributed to a provider implementation step.
+Post-R3D.1 programme checkpoint (TOP-00, 2026-10-08): the locked,
+committed R3D.4 `stygnox top` amendment (source commit `4b4bafa`) is
+reconciled into the R3D.2–R3D.5 dependency and acceptance contracts below.
+This governance change establishes requirements **only**. R3D.2 remains the
+next implementation stage; neither TOP code nor R3D.3/R3D.4 capability is
+implemented by TOP-00. The programme-documents reconciliation must be
+committed/pushed before a fresh R3D.2 transaction begins.
 
 ## R3D.2 — Canonical `.stygnox` Runtime Seam
 
@@ -338,6 +346,26 @@ The runtime layer owns:
 - locks;
 - leases;
 - passive snapshots.
+
+**TOP dependency / R3D.2 scope assessment (not a TOP implementation):**
+
+- define a versioned canonical read-only state/snapshot contract and an
+  integrity-checked native event/evidence envelope where supported by this
+  stage's independently approved mutation scope;
+- carry source, event identity/ordering or cursor, timestamp, canonical project,
+  installed-product/controller identity, transaction and runtime epoch; include
+  plan/step correlation only where authority supplies it;
+- establish documented distinctions between evidence, authoritative state,
+  unavailable telemetry and derived presentation; never infer state via TOP
+  filesystem glob/mtime/PID guessing or `.ralph` fallback;
+- define an explicit capability/gap inventory for provider progress, token
+  receipts, quota windows, refresh/freshness, and replay/cursor semantics;
+- test schema/integrity, wrong-root/epoch and authority-substitution refusals;
+  do **not** claim R3D.2 supplies complete streaming/provider instrumentation.
+
+A missing contract is a recorded upstream gap for the appropriate later stage,
+not permission for a presentation-only workaround. STYX-007 and STYX-015/016
+track this boundary.
 
 ## R3D.3 — Concurrency, Interruption and Recovery
 
@@ -362,6 +390,15 @@ Duplicate or stale authority fails closed.
 Scheduler recovery and pending-provenance recovery remain distinct.
 
 `.ralph` becomes explicitly isolated from live runtime interpretation.
+
+**TOP lifecycle dependency / R3D.3 scope assessment:** canonical runtime
+consumers need unambiguous RUNNING, WAITING, BLOCKED, HUMAN GATE, QUALIFYING,
+RECOVERING, STOPPED, FAILED, COMPLETE, STALE and UNKNOWN semantics where
+observable. Lease/recovery/rebind transitions must provide enough epoch and
+identity evidence to **invalidate** a stale client and reconnect/replay safely
+where supported, without implying that absence of events proves process death.
+Record unresolved streaming/replay gaps for R3D.4 rather than widening R3D.3
+into a terminal UI project.
 
 ## R3D.4 — Native Operator Experience Parity
 
@@ -412,7 +449,68 @@ GATE
 QUALIFICATION
 ```
 
-CLI and TUI consume the same canonical event/state model.
+CLI, concise snapshot `stygnox tui`, and full-screen `stygnox top`
+consume the same canonical event/state authority. CLI defaults remain human
+readable with a separate explicit machine/JSON mode.
+
+### Locked TOP operator contract — TOP-00
+
+Source of truth: `docs/programme/amendments/STYGNOX-R3D4-TOP-PROGRAMME-AMENDMENT.md`
+(commit `4b4bafa`, 2026-10-07). The committed amendment is preserved **intact**;
+this roadmap is the stage-level acceptance summary, not a replacement for its
+exact wordmark/theme and detailed clauses 1–12.
+
+- `stygnox top` is a **true alternate-screen, continuously updating** terminal
+  client, separate from the snapshot `stygnox tui`, with clean terminal/scrollback
+  restoration, responsive wide/medium/narrow layout and full keyboard use.
+- On suitable terminals show three substantial working areas: **approved plan
+  and progress**, **actual recorded live actions/events**, and a **persistent
+  model/capacity/usage pane**. Offer selected-event evidence/detail, search,
+  filter, follow/pause, drill-down and a full-viewport `u` usage/history view.
+- Keep controller/transaction/gate/recovery/installed artifact/epoch/source/
+  Ralph-status authority visible across navigation; old epochs and rebinds
+  must display **STALE**, not counterfeit continued liveness.
+- Preserve the exact six-line Stygnox ASCII wordmark without clipping when it
+  fits; use a deliberate compact label otherwise. Reuse the existing TUI's
+  authoritative magenta/purple–blue/cyan semantic theme across CLI/TUI/TOP,
+  with truecolour/256/ANSI/NO_COLOR readable fallbacks. Colour denotes state,
+  not literal `NO`/`YES` strings.
+- Display real RUN/STEP/TURN timers, model/effort/provider, phase/loop/limit,
+  reserve and efficiency settings, real controller/provider actions, tool/test
+  receipts, human-gate reason and permitted next action. Do not fabricate
+  tool calls, model thoughts, progress percentages, or a heartbeat.
+- Provide distinct **provider quota windows** (especially five-hour and weekly
+  remaining percentages and reset times/countdowns **when reported**), with
+  source/scope/observation age and UNKNOWN/UNAVAILABLE/STALE when absent.
+  Provider/account quotas are **not** token-derived, and shared quota is not
+  mislabeled as model-local.
+- Provide per-turn/round, per-step, per-run and historical input/output/cached
+  usage, reasoning tokens only if supplied; cached input must not be added to
+  input again, and replay/retry must not double-count receipts. In-flight usage
+  is explicitly provisional or AWAITING RECEIPT.
+- Show live/snapshot distinction, event identity/cursor, gaps, timestamps,
+  provenance and source freshness; a quiet provider is **not** automatically
+  crashed. Render untrusted provider text safely and bound memory use.
+- Initial TOP release is **read-only for authority-changing operations**;
+  keyboard investigation cannot start/stop/recover/approve/retire/authorize.
+  Quitting TOP cannot affect the controller or scheduler. Future mutations,
+  if ever accepted, use the exact native preview/confirmation contracts.
+
+**Delivery traceability / no premature stage expansion**
+
+| Work package | Owner stage | Acceptance artifact |
+|---|---|---|
+| TOP-00 — governance lock | Post-R3D.1, before R3D.2 | committed amendment + ROADMAP/PROGRESS/ISSUES alignment; no runtime mutation |
+| TOP-01 — native state/evidence dependency | R3D.2 | versioned canonical contract and gap register, integrity/identity tests |
+| TOP-02 — lifecycle/epoch/rebind dependency | R3D.3 | authoritative transitions, invalidation, recovery/reconnect tests |
+| TOP-03 — interface and instrumentation | R3D.4 | live full-screen TOP, shared theme, semantic UI, usage/quota investigation |
+| TOP-04 — operational reliability | R3D.4 | real active/idle/blocked process testing, safety, gaps, bursts, resize and quotas |
+| TOP-05 — hostile release qualification | R3D.5 | exact installed artifact, no-production-repair qualification and CLI/TUI/TOP parity |
+
+Dependency contracts do not authorize bringing R3D.4 renderer, Web UI or
+Controller API implementation forward into R3D.2/R3D.3. Gaps must be proven,
+assigned to the correct stage, and protected with regressions. See STYX-002,
+STYX-007, STYX-008, STYX-015 and STYX-016.
 
 Presentation owns no authority.
 
@@ -446,7 +544,13 @@ It must hostile-test:
 - malformed/corrupted state;
 - symlink substitution;
 - legacy runtime reappearance;
-- operator/TUI parity;
+- CLI/TUI/TOP parity on canonical state and native installed product;
+- independent active scheduler + TOP process, with terminal state restored;
+- genuine running/stopped/blocked/gated/recovery/rebind observability;
+- quota observation accuracy, freshness and unavailable-data honesty;
+- token-receipt deduplication and cached-input accounting;
+- event replay/gaps/duplication/bursts, stale-epoch and hostile untrusted text;
+- TOP read-only non-interference and bounded resource use;
 - attribution invariants;
 - scope invariants;
 - human controls;

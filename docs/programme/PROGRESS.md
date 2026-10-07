@@ -1,45 +1,34 @@
 # Stygnox Programme Progress
 
 **Status:** AUTHORITATIVE CURRENT CHECKPOINT  
-**Last reconciled:** 2026-10-05
+**Last reconciled:** 2026-10-08 (TOP-00 programme reconciliation)
 
 ---
 
 # Current Baseline
 
-Repository HEAD:
+Last verified repository baseline *before TOP-00 document reconciliation*:
 
 ```text
-6427efa554d8350aae72b72b85512f5a7d9ba346
+4b4bafa — docs(r3d4): lock live TOP operations and capacity requirements
+2b81af4 — fix(r3d1): close installed successor authority
+branch: r3d-runtime-convergence; upstream divergence: 0/0; worktree: clean
 ```
 
-Current repaired installed artifact:
+R3D.1 qualified installed product (operator-verified 2026-10-08):
 
 ```text
 Stygnox 0.1.0
-/home/pfsykes/.local/share/stygnox/r3d-6427efa554d8/bin/stygnox
+/home/pfsykes/.local/share/stygnox/r3d1-83561511978582c75af43f31/bin/stygnox
+wheel SHA256: 83561511978582c75af43f311306013ee62b165e2b8381443d24beee253f5c93
 ```
 
-Wheel SHA256:
-
-```text
-8feb76227f4b644e2eb1ffa20eb828de80f0dae730219f1aa2c264f2fb90838c
-```
-
-Source archive SHA256:
-
-```text
-59f402f215a7742b1317116fc30df43742965e85b26f06d07366454d8b964f4d
-```
-
-Current intentional untracked bootstrap material:
-
-```text
-stygnox.toml
-stygnox.policy.md
-```
-
-These were created during native adoption and require their own provenance/disposition during R3D. They must not be absorbed into provider attribution.
+R3D.1 operator bootstrap `stygnox.toml` and `stygnox.policy.md` are
+separately attributed adoption material, **not** provider implementation.
+R3D.1 is closed. The next implementation stage is **R3D.2**, but its controller
+transaction must not begin until the TOP-00 programme documents are committed.
+This current-baseline section is a dated evidence checkpoint, not a claim that
+its recorded Git hash will always equal later HEAD.
 
 ---
 
@@ -200,6 +189,21 @@ STYX-006 are therefore closed.  Do not start R3D.2 until the locked post-R3D.1
 `stygnox top` programme amendment has been assessed and integrated into the
 authoritative programme documents.
 
+## TOP-00 — Locked TOP programme reconciliation (post-R3D.1)
+
+- [x] R3D.1 closure and installed artifact verified (`2b81af4`;
+  wheel `83561511978582c75af43f311306013ee62b165e2b8381443d24beee253f5c93`)
+- [x] authoritative 664-line amendment committed/pushed at `4b4bafa`
+- [x] TOP-00 requirements assigned to existing R3D.2–R3D.5 stage boundaries
+  in the programme documents (no implementation claimed)
+- [x] distinct snapshot TUI versus real full-screen TOP is specified
+- [x] truthful 5-hour/weekly quotas and per-round token accounting are specified
+- [x] STYX-015/016 durability guards are recorded in ISSUES
+**TOP-00 closure condition:** commit/push the three programme files and verify
+clean worktree with upstream divergence `0/0`. Git supplies that final evidence;
+this document deliberately does not assert a future commit hash. R3D.2 remains
+unstarted until the operator confirms that condition.
+
 ## R3D.2 — Canonical Runtime Seam
 
 - [ ] native runtime abstraction
@@ -209,6 +213,9 @@ authoritative programme documents.
 - [ ] atomic records
 - [ ] integrity/schema validation
 - [ ] append-only evidence
+- [ ] TOP-01: assess/version canonical read-only state snapshot and event/evidence envelope; timestamp, identity, source, epoch, transaction and sequence/cursor as supported
+- [ ] TOP-01: classify event replay/cursor, provider activity and quota/usage capabilities versus missing upstream contracts (do not invent telemetry)
+- [ ] TOP-01: test integrity, project/epoch mismatches, and absence of TOP-only authority
 - [ ] remove competing runtime readers/writers
 - [ ] hostile runtime substitution tests
 - [ ] artifact upgrade/rebind
@@ -225,6 +232,8 @@ authoritative programme documents.
 - [ ] stale/dead/reused PID refusal
 - [ ] exact interruption evidence
 - [ ] exact preview-confirmed recovery
+- [ ] TOP-02: prove blocked/stopped/recovering/rebound authority lifecycle visibility and stale epoch invalidation using native records
+- [ ] TOP-02: assess replay/gap/reconnect guarantees; preserve uncertain/UNKNOWN instead of false provider liveness
 - [ ] scheduler recovery remains distinct from pending provenance
 - [ ] `.ralph` forbidden as live fallback
 - [ ] legacy reappearance handling
@@ -245,6 +254,16 @@ authoritative programme documents.
 - [ ] plan/step progress
 - [ ] model/effort visibility
 - [ ] usage/quota visibility
+- [ ] TOP-03: true alternate-screen continuously updating `stygnox top`, distinct from point-in-time `stygnox tui`
+- [ ] TOP-03: exact six-line wordmark (unclipped) / compact narrow branding and central shared semantic CLI/TUI/TOP terminal theme, including NO_COLOR
+- [ ] TOP-03: responsive high-density plan/live-events/model-capacity columns; selected-event evidence and permanent CTRL/TX/EPOCH/GATE/REC/ART/SRC/RALPH authority strip
+- [ ] TOP-03: keyboard panes, follow/pause, search/filter, details, help, safe copy/export and full-viewport `u` usage investigation
+- [ ] TOP-03: real RUN/STEP/TURN elapsed timers, last activity/source freshness and no invented percent/heartbeat/provider thoughts
+- [ ] TOP-03: provider-specific five-hour and weekly allowance left %, used %, reset timestamp/countdown and freshness when authoritative; UNKNOWN/UNAVAILABLE/STALE otherwise
+- [ ] TOP-03: per-turn/step/run/history input, output, cached input, optional reported reasoning and outcome/effort; dedupe receipts and do not double-count cached/retries
+- [ ] TOP-03: inspect in-progress provider tool/command/file/test events only to the level canonically observable; label awaiting evidence
+- [ ] TOP-04: independent installed TOP + real active scheduler, idle, stopped, blocked, gated, recovering and rebound lifecycle tests
+- [ ] TOP-04: stale epoch, replay/gap/duplicate/bursty/malformed output, large-history bounds, resize/Ctrl-C/terminal restoration and read-only non-interference tests
 - [ ] RUN/CREATE/EDIT/DELETE/TEST/PASS/FAIL events
 - [ ] recovery/gate/qualification banners
 - [ ] concise high-level approval workflow
@@ -270,7 +289,9 @@ authoritative programme documents.
 - [ ] corruption refusal
 - [ ] interruption/recovery proof
 - [ ] legacy runtime reappearance proof
-- [ ] operator/TUI parity
+- [ ] CLI/TUI/TOP shared canonical-state parity, no TOP-owned authority
+- [ ] TOP-05: execute R3D.4-authored exact installed-process TOP hostile suite (running, blocked, stopped, quota fidelity and reset freshness)
+- [ ] TOP-05: execute established tests for deduplicated token totals, no invented quota, replay/epoch safety, event sanitization, terminal restoration and controller non-interference; no production repair in R3D.5
 - [ ] mutation-scope invariant
 - [ ] attribution invariant
 - [ ] human-control invariant
@@ -415,6 +436,23 @@ Every architectural block must complete this checklist.
 ---
 
 # Progress Log
+
+## 2026-10-08 — TOP-00 programme requirements integration
+
+R3D.1 remains closed at `2b81af4`; installed R3D.1 wheel
+`83561511978582c75af43f311306013ee62b165e2b8381443d24beee253f5c93`
+was independently verified before this programme change. The 664-line
+`stygnox top` amendment is committed as `4b4bafa`, unchanged by TOP-00.
+
+This bounded reconciliation maps the real full-screen console, canonical
+state/events and lifecycle dependencies, model quota windows, exact usage
+accounting, replay/freshness, terminal/authority safety and hostile installed
+qualification to TOP-00–05 across existing R3D.2–R3D.5. No code, active
+transaction, R3D.2 implementation or R3D.4 UI implementation is claimed.
+STYX-015/016 remain open until their assigned evidence/qualification.
+
+The operator must commit/push this reconciliation and verify clean divergence
+before starting a **fresh** R3D.2 authority epoch/plan.
 
 ## 2026-10-05 — R3D Bootstrap Repair
 
