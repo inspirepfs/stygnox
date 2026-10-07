@@ -49,6 +49,7 @@ ROOT_FILES = (
 SOURCE_DIRS = ("branding", "docs", "provenance", "scripts", "src", "tests")
 EXCLUDED_PARTS = {
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".codemapper",
     "build", "dist", ".stygnox",
 }
 VISIBLE_DOCS = {
