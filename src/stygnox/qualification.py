@@ -168,6 +168,100 @@ def _controller_receipts(root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _failed_qualification_retry_matches(
+    state: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    current_baseline_sha256: str,
+) -> bool:
+    """Prove that failed gates, and *only* failed gates, superseded a turn's plan record.
+
+    Reconstruct the original plan record by reversing the exact, documented
+    qualification-failure bookkeeping.  Comparing its canonical digest to the
+    sealed controller binding prevents an unrelated plan rewrite from reviving
+    stale execution evidence. Multiple successive failures against the same
+    completed turn may be retried; no provider execution is implied.
+
+    This legacy-compatible path is deliberately limited to an APPROVED step
+    with no current-step rebase and a fully reversible failure history. Other
+    lifecycle rewrites must take their existing, independently governed path.
+    """
+    if (
+        state.get("status") != "APPROVED"
+        or state.get("execution_authority_granted") is not True
+        or state.get("current_step_rebase") is not None
+        or state.get("step_authority_baseline_sha256") != current_baseline_sha256
+        or receipt.get("before_baseline_sha256") != binding.get("step_authority_baseline_sha256")
+        or receipt.get("transaction_id") != state.get("transaction_id")
+        or not isinstance(state.get("plan"), Mapping)
+        or receipt.get("repository_authority") != state["plan"].get("repository_authority")
+        or binding.get("approval_baseline_sha256") != state.get("approval_baseline_sha256")
+        or binding.get("repository_mutation_scope") != state.get("repository_mutation_scope")
+        or binding.get("repository_mutation_scope_sha256") != state.get("repository_mutation_scope_sha256")
+        or not isinstance(receipt.get("provider_result"), Mapping)
+        or receipt["provider_result"].get("status") != "PASS"
+    ):
+        return False
+
+    history = state.get("qualification_history")
+    last = state.get("last_qualification_failure")
+    step = int(state.get("current_step") or 0)
+    if not isinstance(history, list) or not history or not isinstance(last, Mapping) or history[-1] != last:
+        return False
+    last_gates = last.get("gates")
+    if not isinstance(last_gates, list) or not last_gates or not any(
+        isinstance(gate, Mapping) and gate.get("status") == "FAIL" for gate in last_gates
+    ):
+        return False
+    expected_resume = {
+        "step": step,
+        "reason": "authoritative qualification failed; repair the same approved step",
+        "gate_failures": [gate["name"] for gate in last_gates if isinstance(gate, Mapping) and gate.get("status") == "FAIL"],
+        "recorded_at": last.get("completed_at"),
+    }
+    if state.get("step_resume") != expected_resume:
+        return False
+    plan_steps = state["plan"].get("steps")
+    if not isinstance(plan_steps, list) or not 1 <= step <= len(plan_steps):
+        return False
+    phase = "final" if step == len(plan_steps) else "step"
+
+    # Nothing here is a blanket plan-hash-only bypass: the *entire* predecessor
+    # plan record must be reproducible byte-for-byte at the digest level.
+    predecessor = dict(state)
+    predecessor.pop("record_sha256", None)
+    predecessor["last_qualification_failure"] = None
+    predecessor["step_resume"] = None
+    predecessor["step_authority_baseline_sha256"] = binding.get("step_authority_baseline_sha256")
+    predecessor["execution_authority_granted"] = True
+    if phase == "final":
+        predecessor["final_qualification"] = None
+
+    for count, failure in enumerate(reversed(history), 1):
+        if not isinstance(failure, Mapping):
+            break
+        body = dict(failure)
+        recorded = body.pop("record_sha256", None)
+        gates = failure.get("gates")
+        if (
+            not isinstance(recorded, str) or not _HEX64.fullmatch(recorded)
+            or recorded != _digest(body)
+            or failure.get("state") != "FAIL"
+            or failure.get("passed") is not False
+            or failure.get("phase") != phase
+            or failure.get("plan_hash") != state.get("plan_hash")
+            or int(failure.get("current_step") or 0) != step
+            or failure.get("repository_baseline_sha256") != current_baseline_sha256
+            or not isinstance(gates, list)
+            or not any(isinstance(g, Mapping) and g.get("status") == "FAIL" for g in gates)
+        ):
+            break
+        predecessor["qualification_history"] = history[:-count]
+        if _digest(predecessor) == binding.get("plan_record_sha256"):
+            return True
+    return False
+
+
 def _step_receipt(root: Path, state: Mapping[str, Any], current_baseline_sha256: str) -> dict[str, Any]:
     step = int(state.get("current_step") or 0)
     plan_hash = str(state.get("plan_hash") or "")
@@ -180,11 +274,19 @@ def _step_receipt(root: Path, state: Mapping[str, Any], current_baseline_sha256:
         binding = receipt.get("plan_binding") if isinstance(receipt.get("plan_binding"), Mapping) else None
         if binding is None:
             continue
+        exact_current = (
+            binding.get("plan_record_sha256") == expected_plan_record
+            and receipt.get("before_baseline_sha256") == authority_before
+        )
+        failed_gate_retry = (
+            not exact_current
+            and rebase is None
+            and _failed_qualification_retry_matches(state, receipt, binding, current_baseline_sha256)
+        )
         if (
             binding.get("plan_hash") == plan_hash
-            and binding.get("plan_record_sha256") == expected_plan_record
+            and (exact_current or failed_gate_retry)
             and int(binding.get("current_step") or 0) == step
-            and receipt.get("before_baseline_sha256") == authority_before
             and receipt.get("after_baseline_sha256") == current_baseline_sha256
             and receipt.get("next_action") in {"qualification-required", "turn-complete"}
             and receipt.get("human_gate") is None
