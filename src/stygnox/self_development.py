@@ -258,9 +258,20 @@ def _test_policy_allows_candidates(state: Mapping[str, Any], candidates: Sequenc
     if policy == "none":
         raise SelfDevelopmentError("current step test_change_policy=none cannot authorize self-development test changes")
     if policy == "add-only":
-        existing = [str(row.get("path")) for row in test_rows if row.get("approval_presence") != "absent"]
+        approval_manifest = state.get("approval_repository_manifest")
+        if not isinstance(approval_manifest, Mapping):
+            raise SelfDevelopmentError(
+                "add-only self-development requires immutable plan-approval repository manifest"
+            )
+        existing = sorted({
+            str(row.get("path"))
+            for row in test_rows
+            if str(row.get("path")) in approval_manifest
+        })
         if existing:
-            raise SelfDevelopmentError(f"current step add-only policy cannot authorize existing self-development tests: {existing}")
+            raise SelfDevelopmentError(
+                f"current step add-only policy cannot authorize existing self-development tests: {existing}"
+            )
         return
     raise SelfDevelopmentError(f"unsupported test change policy for self-development authority: {policy}")
 
