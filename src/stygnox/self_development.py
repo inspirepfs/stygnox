@@ -382,7 +382,11 @@ def authorize(project: Path, operator: str, plan_hash: str, gate_id: str, paths:
         "step": preview["step"],
         "gate_id": preview["gate_id"],
         "reason": f"supervised self-development authority granted for: {', '.join(preview['paths'])}",
-        "direction": f"Modify only these exact Stygnox authority paths: {', '.join(preview['paths'])}",
+        "direction": (
+            f"Modify only these exact Stygnox authority paths: {', '.join(preview['paths'])}. "
+            "Reviewed implementation priority inside the already approved step and scope: "
+            f"{preview['reason']}"
+        ),
         "allowed_new_tests": [],
         "self_development_grant_sha256": grant_body["grant_sha256"],
         "recorded_at": now,
