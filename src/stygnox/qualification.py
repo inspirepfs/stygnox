@@ -382,6 +382,22 @@ def _checkpoint_delta(before: Mapping[str, str], after: Mapping[str, str]) -> di
     return body
 
 
+# Distinct reviewed-source attribution is NOT a controller PASS or receipt.
+_DIRECT_INTERRUPTION_REPLAY_V1 = True
+
+
+def replay_human_reviewed_interruption(root: Path, state: Mapping[str, Any],
+                                       plan: Mapping[str, Any], current_manifest: Mapping[str, str],
+                                       *, pending_receipt: Mapping[str, Any] | None) -> dict[str, Any]:
+    from . import direct_interruption_attribution
+    try:
+        return direct_interruption_attribution.replay_attribution(
+            root, state, plan, current_manifest, pending_receipt=pending_receipt,
+        )
+    except direct_interruption_attribution.AttributionRefused as exc:
+        raise QualificationError(f"human-reviewed interruption attribution refused: {exc}") from exc
+
+
 def _accepted_controller_attribution(
     state: Mapping[str, Any],
     root: Path,
@@ -418,6 +434,28 @@ def _accepted_controller_attribution(
             "accepted_controller_paths": [],
             "qualified_delta": qualified,
             "attribution_sha256": _digest({"scope_digest": scope_digest, "receipts": [], "paths": [], "qualified_delta_sha256": qualified["delta_sha256"]}),
+        }
+
+    if state.get("direct_interruption_recoveries") or state.get("direct_interruption_pending"):
+        replayed = replay_human_reviewed_interruption(
+            root, state, plan, current_manifest, pending_receipt=pending_receipt)
+        qualified = _checkpoint_delta(before, current_manifest)
+        return {
+            "repository_mutation_scope": scope,
+            "repository_mutation_scope_sha256": scope_digest,
+            "accepted_controller_receipts": replayed["accepted_controller_receipts"],
+            "accepted_controller_paths": replayed["accepted_controller_paths"],
+            "reviewed_recovery_paths": replayed["reviewed_recovery_paths"],
+            "reviewed_recovery_evidence": replayed["reviewed_recovery_evidence"],
+            "attributed_paths": replayed["attributed_paths"],
+            "qualified_delta": qualified,
+            "attribution_sha256": _digest({
+                "scope_digest": scope_digest,
+                "receipts": replayed["accepted_controller_receipts"],
+                "reviewed": replayed["reviewed_recovery_evidence"],
+                "paths": replayed["attributed_paths"],
+                "qualified_delta_sha256": qualified["delta_sha256"],
+            }),
         }
 
     receipts_by_sha = {str(row.get("record_sha256")): row for row in _controller_receipts(root)}
@@ -598,7 +636,7 @@ def _build_preview(project: Path, operator: str, plan_hash: str, *, requalify: b
             final = state.get("final_qualification") if isinstance(state.get("final_qualification"), Mapping) else {}
             if controller_attribution != final.get("accepted_controller_attribution"):
                 raise QualificationError("requalification refuses controller-delta path or fingerprint drift")
-        plan_owned = list(controller_attribution["accepted_controller_paths"])
+        plan_owned = list(controller_attribution.get("attributed_paths", controller_attribution["accepted_controller_paths"]))
         current_manifest = manifest
     else:
         changed = []
@@ -765,7 +803,7 @@ def _final_pass_state(root: Path, state: Mapping[str, Any], preview: Mapping[str
     plan = planning._validate_plan(state.get("plan"))
     plan_owned = list(preview.get("plan_owned_paths") or [])
     attribution = preview.get("accepted_controller_attribution")
-    if not isinstance(attribution, Mapping) or attribution.get("accepted_controller_paths") != plan_owned:
+    if not isinstance(attribution, Mapping) or attribution.get("attributed_paths", attribution.get("accepted_controller_paths")) != plan_owned:
         raise QualificationError("final qualification lacks an exact accepted controller attribution")
     qualified = attribution.get("qualified_delta") if isinstance(attribution.get("qualified_delta"), Mapping) else None
     if not isinstance(qualified, Mapping) or qualified.get("current_manifest_sha256") != _digest(current_manifest):
@@ -917,7 +955,7 @@ def run_qualification(project: Path, operator: str, plan_hash: str, preview_sha2
     _attribution_guard(root)
     _changed, current_manifest = _manifest_delta(state, root)
     accepted = preview.get("accepted_controller_attribution")
-    if not isinstance(accepted, Mapping) or sorted(accepted.get("accepted_controller_paths") or []) != sorted(preview.get("plan_owned_paths") or []):
+    if not isinstance(accepted, Mapping) or sorted(accepted.get("attributed_paths", accepted.get("accepted_controller_paths")) or []) != sorted(preview.get("plan_owned_paths") or []):
         raise QualificationError("final qualification lacks an exact controller-owned delta")
     refreshed_attribution = refreshed.get("accepted_controller_attribution")
     if refreshed_attribution != preview.get("accepted_controller_attribution"):

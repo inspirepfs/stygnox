@@ -149,7 +149,7 @@ def _final_qualification(state: Mapping[str, Any]) -> dict[str, Any]:
         or not isinstance(attribution, Mapping)
         or attribution.get("repository_mutation_scope") != scope
         or attribution.get("repository_mutation_scope_sha256") != plan["repository_mutation_scope_sha256"]
-        or attribution.get("accepted_controller_paths") != paths
+        or attribution.get("attributed_paths", attribution.get("accepted_controller_paths")) != paths
     ):
         raise FinalizationError("final qualification lacks exact approval-scope controller attribution")
     delta = attribution.get("qualified_delta") if isinstance(attribution.get("qualified_delta"), Mapping) else None

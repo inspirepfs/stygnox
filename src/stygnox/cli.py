@@ -105,6 +105,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif namespace.command == "reconcile-push":
             args = ["reconcile-push", *args]
         return cli_main(args)
+    if namespace.command == "direct-interruption":
+        from .direct_interruption import cli_main
+        return cli_main(namespace.args)
     if namespace.command == "operator":
         from .operator import cli_main
         return cli_main(namespace.args)
