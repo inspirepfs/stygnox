@@ -516,12 +516,12 @@ def build_parser() -> argparse.ArgumentParser:
     def base(x: argparse.ArgumentParser) -> None:
         x.add_argument("--project", type=Path, required=True)
         x.add_argument("--origin-preview-sha256", required=True)
-    for cmd in ("review-preview", "adopt", "handoff-preview", "fence-design-preview", "successor-admission-preview", "transfer-fence-preview"):
+    for cmd in ("review-preview", "adopt", "handoff-preview", "fence-design-preview", "successor-admission-preview", "transfer-fence-preview", "transfer-journal-preview"):
         c = sub.add_parser(cmd)
         base(c)
         c.add_argument("--origin-file", type=Path, required=True)
         c.add_argument("--review-path", action="append", default=[], required=True)
-        if cmd in {"handoff-preview", "fence-design-preview", "successor-admission-preview", "transfer-fence-preview"}:
+        if cmd in {"handoff-preview", "fence-design-preview", "successor-admission-preview", "transfer-fence-preview", "transfer-journal-preview"}:
             c.add_argument("--candidate-wheel", type=Path, required=True)
         if cmd == "adopt":
             c.add_argument("--reason", required=True)
@@ -540,6 +540,7 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
     from .direct_interruption_fence import FenceRefused
     from .direct_interruption_admission import AdmissionRefused
     from .direct_interruption_transfer import TransferRefused
+    from .direct_interruption_publication import PublicationRefused
     try:
         if args.action == "review-preview":
             result = review_preview(args.project, args.origin_file, args.origin_preview_sha256, args.review_path)
@@ -558,6 +559,14 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
             preflight = build_admission_preflight(root, args.origin_file, args.origin_preview_sha256,
                                                   args.review_path, args.candidate_wheel)
             result = build_fence_publication_preview(preflight, planning._record(root))
+        elif args.action == "transfer-journal-preview":
+            from .direct_interruption_admission import build_admission_preflight
+            from .direct_interruption_transfer import build_fence_publication_preview
+            from .direct_interruption_publication import build_journal_preview
+            root = adoption.resolve_worktree(args.project)
+            preflight = build_admission_preflight(root, args.origin_file, args.origin_preview_sha256,
+                                                  args.review_path, args.candidate_wheel)
+            result = build_journal_preview(build_fence_publication_preview(preflight, planning._record(root)))
         elif args.action == "fence-design-preview":
             from .direct_interruption_handoff import build_handoff_preview
             from .direct_interruption_fence import build_fence_design
@@ -574,7 +583,7 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
             result = release_preview(args.project, args.origin_preview_sha256)
         else:
             result = release(args.project, args.origin_preview_sha256, args.preview, args.confirm)
-    except (TransferRefused, AdmissionRefused, FenceRefused, HandoffRefused, RecoveryRefused, OSError, ValueError, planning.PlanningError, controller.ControllerError,
+    except (PublicationRefused, TransferRefused, AdmissionRefused, FenceRefused, HandoffRefused, RecoveryRefused, OSError, ValueError, planning.PlanningError, controller.ControllerError,
             adoption.AdoptionError, scheduler.SchedulerError, transactions.TransactionError) as exc:
         print(f"stygnox: direct interruption refused: {exc}", file=sys.stderr)
         return 2
