@@ -527,6 +527,12 @@ def build_parser() -> argparse.ArgumentParser:
             c.add_argument("--reason", required=True)
             c.add_argument("--preview", required=True)
             c.add_argument("--confirm", required=True)
+    inspect = sub.add_parser("inspect-blocked-successor")
+    inspect.add_argument("--project", type=Path, required=True)
+    inspect.add_argument("--predecessor-uid", type=int, required=True)
+    inspect.add_argument("--admission-evidence", type=Path, required=True)
+    inspect.add_argument("--transfer-evidence", type=Path, required=True)
+    inspect.add_argument("--candidate-wheel", type=Path, required=True)
     q = sub.add_parser("qualify"); base(q); q.add_argument("--test-python", type=Path, required=True)
     v = sub.add_parser("release-preview"); base(v)
     r = sub.add_parser("release"); base(r); r.add_argument("--preview", required=True); r.add_argument("--confirm", required=True)
@@ -541,8 +547,16 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
     from .direct_interruption_admission import AdmissionRefused
     from .direct_interruption_transfer import TransferRefused
     from .direct_interruption_publication import PublicationRefused
+    from .direct_interruption_successor import SuccessorInspectionRefused
     try:
-        if args.action == "review-preview":
+        if args.action == "inspect-blocked-successor":
+            from .direct_interruption_successor import inspect_installed_blocked_successor
+            result = inspect_installed_blocked_successor(
+                project=args.project, predecessor_uid=args.predecessor_uid,
+                admission_file=args.admission_evidence, transfer_file=args.transfer_evidence,
+                candidate_wheel=args.candidate_wheel,
+            )
+        elif args.action == "review-preview":
             result = review_preview(args.project, args.origin_file, args.origin_preview_sha256, args.review_path)
         elif args.action == "handoff-preview":
             from .direct_interruption_handoff import build_handoff_preview
@@ -583,7 +597,7 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
             result = release_preview(args.project, args.origin_preview_sha256)
         else:
             result = release(args.project, args.origin_preview_sha256, args.preview, args.confirm)
-    except (PublicationRefused, TransferRefused, AdmissionRefused, FenceRefused, HandoffRefused, RecoveryRefused, OSError, ValueError, planning.PlanningError, controller.ControllerError,
+    except (SuccessorInspectionRefused, PublicationRefused, TransferRefused, AdmissionRefused, FenceRefused, HandoffRefused, RecoveryRefused, OSError, ValueError, planning.PlanningError, controller.ControllerError,
             adoption.AdoptionError, scheduler.SchedulerError, transactions.TransactionError) as exc:
         print(f"stygnox: direct interruption refused: {exc}", file=sys.stderr)
         return 2
