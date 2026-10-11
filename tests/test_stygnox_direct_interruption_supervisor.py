@@ -16,6 +16,7 @@ from stygnox import direct_interruption_publication as publication
 from stygnox import direct_interruption_transfer as transfer
 from stygnox.direct_interruption_fence import SUCCESSOR_STATUS
 from stygnox.direct_interruption_supervisor import SupervisorRefused, publish_blocked_namespace
+from stygnox import direct_interruption_quarantine as quarantine
 
 
 def _seal(body: dict, field: str) -> dict:
@@ -153,6 +154,20 @@ class KernelTransitionTests(unittest.TestCase):
         self.assertFalse(self.original.exists())
         self.assertFalse(self.staged.exists())
         self.assertTrue(self.retired.is_dir())
+        rt = self.published / '.stygnox'
+        bound_controller = json.loads((rt / 'controller.json').read_text())
+        bound_tx = json.loads((rt / 'transaction.json').read_text())
+        bound_quarantine = json.loads((rt / quarantine.FILENAME).read_text())
+        self.assertFalse(bound_controller['enabled'])
+        self.assertFalse(bound_controller['controller_execution_enabled'])
+        self.assertEqual(bound_tx['state'], 'RECOVERY_QUARANTINED')
+        self.assertEqual(bound_controller['installed_command'], '/new/bin/stygnox')
+        self.assertEqual(bound_tx['installed_command'], '/new/bin/stygnox')
+        self.assertEqual(result['quarantine_record_sha256'], bound_quarantine['record_sha256'])
+        # Exercise the REAL installed-controller transaction gate (not a mock).
+        from stygnox import controller as runtime_controller
+        with self.assertRaises(runtime_controller.ControllerError):
+            runtime_controller._transaction(self.published)
         plan = json.loads((self.published / '.stygnox' / 'plan.json').read_text())
         journal = json.loads((self.published / '.stygnox' /
                               'direct-interruption-transfer-journal.json').read_text())
@@ -286,6 +301,52 @@ class KernelTransitionTests(unittest.TestCase):
         self.assertFalse(self.published.exists())
         self.assertEqual(publication.reconcile_crash_boundary(
             self.preview, observed_journal, observed_plan)['phase'], publication.JOURNAL_ONLY)
+        with self.assertRaises(SupervisorRefused):
+            self.run_transition()
+
+    def test_crash_during_disabled_binding_never_exposes_partial_authority(self):
+        from stygnox import direct_interruption_supervisor as supervisor
+        original_write = supervisor._write_exact
+        def interrupt(fd, name, record, uid):
+            if name == 'transaction.json':
+                raise OSError('simulated C3j binding interruption')
+            return original_write(fd, name, record, uid)
+        with patch.object(supervisor, '_write_exact', side_effect=interrupt):
+            with self.assertRaisesRegex(SupervisorRefused, 'interrupted'):
+                self.run_transition()
+        self.assertFalse(self.original.exists())
+        self.assertTrue(self.retired.exists())
+        self.assertTrue(self.staged.exists())
+        self.assertFalse(self.published.exists())
+        runtime = self.staged / '.stygnox'
+        controller_record = json.loads((runtime / 'controller.json').read_text())
+        transaction_record = json.loads((runtime / 'transaction.json').read_text())
+        self.assertFalse(controller_record['enabled'])
+        self.assertEqual(transaction_record['state'], 'ACTIVE')
+        self.assertFalse((runtime / quarantine.FILENAME).exists())
+        with self.assertRaises(SupervisorRefused):
+            self.run_transition()
+
+    def test_crash_after_both_disabled_records_requires_manual_reconciliation(self):
+        from stygnox import direct_interruption_supervisor as supervisor
+        original_write = supervisor._write_exact
+        def interrupt(fd, name, record, uid):
+            if name == quarantine.FILENAME:
+                raise OSError('simulated C3j receipt interruption')
+            return original_write(fd, name, record, uid)
+        with patch.object(supervisor, '_write_exact', side_effect=interrupt):
+            with self.assertRaisesRegex(SupervisorRefused, 'interrupted'):
+                self.run_transition()
+        self.assertFalse(self.original.exists())
+        self.assertTrue(self.retired.exists())
+        self.assertTrue(self.staged.exists())
+        self.assertFalse(self.published.exists())
+        runtime = self.staged / '.stygnox'
+        controller_record = json.loads((runtime / 'controller.json').read_text())
+        transaction_record = json.loads((runtime / 'transaction.json').read_text())
+        self.assertFalse(controller_record['enabled'])
+        self.assertEqual(transaction_record['state'], 'RECOVERY_QUARANTINED')
+        self.assertFalse((runtime / quarantine.FILENAME).exists())
         with self.assertRaises(SupervisorRefused):
             self.run_transition()
 

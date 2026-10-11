@@ -18,6 +18,7 @@ from typing import Any
 
 from . import direct_interruption as recovery
 from . import direct_interruption_binding as binding
+from . import direct_interruption_quarantine as quarantine
 from . import direct_interruption_exclusion as exclusion
 from . import direct_interruption_publication as publication
 from . import direct_interruption_transfer as transfer
@@ -53,9 +54,20 @@ def validate_blocked_snapshot(*, original: Path, published: Path,
                               witness: Mapping[str, Any], controller_record: Mapping[str, Any],
                               transaction_record: Mapping[str, Any],
                               installed_identity: Mapping[str, Any], wheel_identity: Mapping[str, Any],
-                              invocation: Path) -> dict[str, Any]:
+                              invocation: Path,
+                              quarantine_record: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Pure, exact identity check; always returns BLOCKED, never authority."""
     try:
+        # When C3j has published the disabled binding, recover the original
+        # predecessor records ONLY from its verified exact projection.
+        if quarantine_record is not None:
+            candidate = quarantine.validate_quarantine_binding(
+                fenced_plan=current_plan, journal=journal, witness=witness,
+                controller_record=controller_record,
+                transaction_record=transaction_record,
+                quarantine_record=quarantine_record)
+            controller_record = candidate['receipt']['predecessor_controller_snapshot']
+            transaction_record = candidate['receipt']['predecessor_transaction_snapshot']
         preflight = transfer._sealed(admission, 'preview_sha256')
         projection = publication._transfer(proposal)
         plan = publication._sealed(current_plan, 'record_sha256')
@@ -72,7 +84,7 @@ def validate_blocked_snapshot(*, original: Path, published: Path,
             original=original, published=published,
         )
     except (transfer.TransferRefused, publication.PublicationRefused,
-            binding.BindingRefused, KeyError, TypeError, ValueError) as exc:
+            binding.BindingRefused, quarantine.QuarantineRefused, KeyError, TypeError, ValueError) as exc:
         raise SuccessorInspectionRefused(f'invalid installed binding lineage: {exc}') from exc
 
     if (preflight.get('schema') != 'stygnox_direct_interruption_successor_admission_preflight_v1'
@@ -115,6 +127,7 @@ def validate_blocked_snapshot(*, original: Path, published: Path,
         'successor_installed_record_sha256': installed_identity['record_sha256'],
         'successor_wheel_sha256': wheel_identity['sha256'],
         'exact_blocked_lineage': True,
+        'quarantined_controller_transaction_records': quarantine_record is not None,
         'installed_successor_identity_verified': True,
         'predecessor_executable_rechecked': False,
         'original_binding_retired': False,
@@ -173,6 +186,10 @@ def inspect_installed_blocked_successor(*, project: Path, predecessor_uid: int,
             witness = _regular_json(fd, BINDING, uid)
             old_controller = _regular_json(fd, 'controller.json', uid)
             old_tx = _regular_json(fd, 'transaction.json', uid)
+            try:
+                quarantine_record = _regular_json(fd, quarantine.FILENAME, uid)
+            except FileNotFoundError:
+                quarantine_record = None
         finally:
             os.close(fd)
         original = Path(str(witness['original_worktree']))
@@ -191,6 +208,7 @@ def inspect_installed_blocked_successor(*, project: Path, predecessor_uid: int,
             journal=journal, witness=witness, controller_record=old_controller,
             transaction_record=old_tx, installed_identity=installed,
             wheel_identity=wheel, invocation=invocation,
+            quarantine_record=quarantine_record,
         )
         result['original_path_absence_visible_to_successor'] = original_absence_visible
         old_executable = Path(str(admission['predecessor_installed_executable']['path']))

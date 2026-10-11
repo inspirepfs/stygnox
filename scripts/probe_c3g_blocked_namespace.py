@@ -19,6 +19,7 @@ from stygnox import direct_interruption as recovery
 from stygnox import direct_interruption_publication as publication
 from stygnox import direct_interruption_transfer as transfer
 from stygnox.direct_interruption_fence import SUCCESSOR_STATUS
+from stygnox import direct_interruption_quarantine as quarantine
 from stygnox.direct_interruption_supervisor import publish_blocked_namespace
 
 
@@ -132,6 +133,13 @@ def run(legacy: int) -> dict:
         actual = json.loads((published/'.stygnox'/'plan.json').read_text())
         observed_journal = json.loads((published/'.stygnox'/'direct-interruption-transfer-journal.json').read_text())
         observed_binding = json.loads((published/'.stygnox'/'direct-interruption-blocked-binding.json').read_text())
+        actual_controller = json.loads((published/'.stygnox'/'controller.json').read_text())
+        actual_tx = json.loads((published/'.stygnox'/'transaction.json').read_text())
+        actual_quarantine = json.loads((published/'.stygnox'/quarantine.FILENAME).read_text())
+        checked_quarantine = quarantine.validate_quarantine_binding(
+            fenced_plan=actual, journal=observed_journal, witness=observed_binding,
+            controller_record=actual_controller, transaction_record=actual_tx,
+            quarantine_record=actual_quarantine)
         check = subprocess.run(
             [sys.executable, '-c',
              'from pathlib import Path;import sys;Path(sys.argv[1]).write_text("UNAUTHORISED")',
@@ -149,6 +157,10 @@ def run(legacy: int) -> dict:
             'predecessor_denied_published_write': check.returncode != 0,
             'exact_fenced_plan': actual == proposal['fenced_plan'],
             'exact_journal': observed_journal == journal,
+            'disabled_successor_controller': (actual_controller['enabled'] is False and
+                actual_controller['controller_execution_enabled'] is False),
+            'quarantined_successor_transaction': actual_tx['state'] == 'RECOVERY_QUARANTINED',
+            'exact_quarantine_binding': checked_quarantine['receipt'] == actual_quarantine,
             'exact_blocked_binding': (observed_binding['record_sha256'] == record['blocked_binding_record_sha256']
                                      and observed_binding['successor_execution_authorised'] is False),
             'legacy_execution_authority_granted': actual['execution_authority_granted'],
@@ -161,7 +173,8 @@ def run(legacy: int) -> dict:
         required = ('predecessor_path_missing', 'predecessor_retired_root_privately',
                     'private_stage_withdrawn', 'fenced_successor_visible',
                     'predecessor_denied_published_write', 'exact_fenced_plan', 'exact_journal',
-                    'exact_blocked_binding')
+                    'exact_blocked_binding', 'disabled_successor_controller',
+                    'quarantined_successor_transaction', 'exact_quarantine_binding')
         if not all(result[key] is True for key in required):
             raise RuntimeError(f'kernel blocked-publish probe failure: {result}')
         if any(result[key] is not False for key in ('legacy_execution_authority_granted',

@@ -22,6 +22,7 @@ from . import direct_interruption as recovery
 from . import direct_interruption_publication as publication
 from . import direct_interruption_transfer as transfer
 from . import direct_interruption_binding as binding
+from . import direct_interruption_quarantine as quarantine
 from .direct_interruption_retirement import (
     RetirementRefused, _open_trusted_parent, retire_predecessor_path,
 )
@@ -238,6 +239,18 @@ def publish_blocked_namespace(*, original: Path, retired: Path,
                     pass
                 else:
                     raise SupervisorRefused('blocked binding record already exists; manual reconciliation required')
+                # Build disabled controller/transaction records while the replica
+                # is still private. No partial state is ever exposed as authority.
+                disabled = quarantine.build_quarantine_binding(
+                    fenced_plan=fenced, journal=expected_journal, witness=blocked_binding,
+                    predecessor_controller=original_controller,
+                    predecessor_transaction=original_tx)
+                try:
+                    os.stat(quarantine.FILENAME, dir_fd=stagefd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise SupervisorRefused('quarantine receipt already exists; manual review required')
                 # The original rename is an irreversible fail-closed boundary.
                 retire_predecessor_path(original, retired,
                                         predecessor_uid=predecessor_uid,
@@ -246,6 +259,18 @@ def publish_blocked_namespace(*, original: Path, retired: Path,
                 _write_exact(stagefd, JOURNAL, expected_journal, successor_uid)
                 _write_exact(stagefd, BINDING, blocked_binding, successor_uid)
                 _write_exact(stagefd, 'plan.json', fenced, successor_uid)
+                # Disable the controller FIRST; a crash before the transaction
+                # update cannot create a new executable plan.
+                _write_exact(stagefd, 'controller.json', disabled['controller'], successor_uid)
+                _write_exact(stagefd, 'transaction.json', disabled['transaction'], successor_uid)
+                _write_exact(stagefd, quarantine.FILENAME, disabled['receipt'], successor_uid)
+                quarantine.validate_quarantine_binding(
+                    fenced_plan=_regular_json(stagefd, 'plan.json', successor_uid),
+                    journal=_regular_json(stagefd, JOURNAL, successor_uid),
+                    witness=_regular_json(stagefd, BINDING, successor_uid),
+                    controller_record=_regular_json(stagefd, 'controller.json', successor_uid),
+                    transaction_record=_regular_json(stagefd, 'transaction.json', successor_uid),
+                    quarantine_record=_regular_json(stagefd, quarantine.FILENAME, successor_uid))
                 actual_binding = _regular_json(stagefd, BINDING, successor_uid)
                 if actual_binding != blocked_binding:
                     raise SupervisorRefused('blocked installed authority witness does not match')
@@ -271,6 +296,8 @@ def publish_blocked_namespace(*, original: Path, retired: Path,
                 'fenced_plan_record_sha256': fenced['record_sha256'],
                 'journal_preview_sha256': expected_journal['preview_sha256'],
                 'blocked_binding_record_sha256': blocked_binding['record_sha256'],
+                'quarantine_record_sha256': disabled['receipt']['record_sha256'],
+                'installed_successor_bound_non_executing': True,
                 'publication_phase': phase['phase'],
                 'legacy_original_path_reentry_blocked': True,
                 'old_controller_execution_authority_revoked': False,
@@ -283,7 +310,7 @@ def publish_blocked_namespace(*, original: Path, retired: Path,
         finally:
             os.close(lockfd)
     except (RetirementRefused, WorkspaceRefused, OSError, ValueError, transfer.TransferRefused,
-            publication.PublicationRefused) as exc:
+            publication.PublicationRefused, quarantine.QuarantineRefused) as exc:
         raise SupervisorRefused(f'blocked namespace publication refused or interrupted; manual review required: {exc}') from exc
     finally:
         for fd in fds:
