@@ -16,6 +16,7 @@ import stat
 from typing import Any, Mapping, Sequence
 
 from . import adoption, efficiency, execution_policy, transactions
+from .direct_interruption_execution_guard import QuarantinedRuntime, refuse_quarantined_runtime
 from . import provider_usage
 from .product import PRODUCT
 from .profile import DEFAULT_PROFILE, profile_record
@@ -38,6 +39,13 @@ class ControllerError(RuntimeError):
 
 class ControllerUsageBlocked(ControllerError):
     """Zero-model provider admission refused the turn without interrupting authority."""
+
+
+def _refuse_quarantined(root: Path) -> None:
+    try:
+        refuse_quarantined_runtime(root)
+    except QuarantinedRuntime as exc:
+        raise ControllerError(str(exc)) from exc
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -260,6 +268,7 @@ def activate_controller(project: Path, operator: str, confirmation: str) -> dict
     if confirmation != "ACTIVATE":
         raise ControllerError("explicit confirmation required: --confirm ACTIVATE")
     root = adoption.resolve_worktree(project)
+    _refuse_quarantined(root)
     handoff = _handoff(root)
     tx = _transaction(root)
     name = _operator(operator)
@@ -303,6 +312,7 @@ def deactivate_controller(project: Path, operator: str, confirmation: str) -> di
     if confirmation != "DEACTIVATE":
         raise ControllerError("explicit confirmation required: --confirm DEACTIVATE")
     root = adoption.resolve_worktree(project)
+    _refuse_quarantined(root)
     current = _controller(root)
     assert current is not None
     name = _operator(operator)
@@ -410,6 +420,7 @@ def build_run_preview(
     _scheduler_authority: str | None = None,
 ) -> dict[str, Any]:
     root = adoption.resolve_worktree(project)
+    _refuse_quarantined(root)
     controller = _controller(root)
     assert controller is not None
     if controller.get("enabled") is not True:
@@ -603,6 +614,7 @@ def run_controller(
     if preview["preview_sha256"] != expected:
         raise ControllerError("controller run preview is stale; authority, policy, objective, or project baseline changed")
     root = Path(preview["worktree"])
+    _refuse_quarantined(root)
     plan_binding = preview.get("plan_binding") if isinstance(preview.get("plan_binding"), Mapping) else None
     controls = preview.get("execution_controls") if isinstance(preview.get("execution_controls"), Mapping) else {}
     plan_state = None
@@ -645,6 +657,7 @@ def run_controller(
         from . import scheduler
         before_manifest = scheduler.repository_manifest(root)
         before_snapshot = _snapshot_manifest(root, before_manifest)
+    _refuse_quarantined(root)
     try:
         provider_result = provider_codex.execute(
             cwd=root,
@@ -655,6 +668,10 @@ def run_controller(
         )
     except provider_codex.ProviderError as exc:
         raise ControllerError(str(exc)) from exc
+    # A formerly admitted turn must not publish controller evidence after a
+    # quarantine barrier appears while the provider was running. This guard
+    # does NOT replace the supervisor's duty to drain in-flight processes.
+    _refuse_quarantined(root)
     attempted_after = adoption.capture_baseline(root).public()
     if preview["repository_authority"] == "read-only":
         from . import scheduler
@@ -1022,6 +1039,8 @@ def _pending_provenance_witness(project: Path, operator: str, turn_preview_sha25
 
 
 def build_pending_provenance_recovery_preview(project: Path, operator: str, turn_preview_sha256: str) -> dict[str, Any]:
+    root = adoption.resolve_worktree(project)
+    _refuse_quarantined(root)
     root, witness = _pending_provenance_witness(project, operator, turn_preview_sha256)
     body: dict[str, Any] = {
         "schema": PENDING_PROVENANCE_PREVIEW_SCHEMA, "product_version": PRODUCT.version,
@@ -1042,6 +1061,7 @@ def recover_pending_provenance(project: Path, operator: str, turn_preview_sha256
     if preview["preview_sha256"] != expected:
         raise ControllerError("pending provenance recovery preview is stale; authority or live evidence changed")
     root = Path(preview["worktree"])
+    _refuse_quarantined(root)
     witness = dict(preview["witness"])
     adoption.write_runtime_record(root, f"pending-provenance-{witness['controller_turn_preview_sha256'][:16]}.json", witness, actor="controller")
     from . import planning

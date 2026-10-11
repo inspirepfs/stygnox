@@ -20,6 +20,7 @@ import sys
 from typing import Any, Iterable, Mapping, Sequence
 
 from . import adoption, controller, planning
+from .direct_interruption_execution_guard import QuarantinedRuntime, refuse_quarantined_runtime
 from .product import PRODUCT
 
 
@@ -33,6 +34,13 @@ _ACTIVE = {"RUNNING", "TURN_RUNNING", "INTERRUPTED"}
 
 class SchedulerError(RuntimeError):
     """Fail-closed bounded scheduler error."""
+
+
+def _refuse_quarantined(root: Path) -> None:
+    try:
+        refuse_quarantined_runtime(root)
+    except QuarantinedRuntime as exc:
+        raise SchedulerError(str(exc)) from exc
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -168,6 +176,7 @@ def _policy_forbids_pending_tests(plan: Mapping[str, Any], step: int, before_man
 
 def build_schedule_preview(project: Path, operator: str) -> dict[str, Any]:
     root = adoption.resolve_worktree(project)
+    _refuse_quarantined(root)
     existing = _record(root, required=False)
     if existing and existing.get("status") in _ACTIVE:
         if _pid_active(existing.get("pid")):
@@ -230,6 +239,7 @@ def run_schedule(project: Path, operator: str, preview_sha256: str, confirmation
     if preview["preview_sha256"] != expected:
         raise SchedulerError("scheduler preview is stale; plan, authority, policy, or baseline changed")
     root = Path(preview["worktree"])
+    _refuse_quarantined(root)
     state: dict[str, Any] = {
         "schema": SCHEDULER_SCHEMA,
         "product_version": PRODUCT.version,
@@ -255,6 +265,7 @@ def run_schedule(project: Path, operator: str, preview_sha256: str, confirmation
         "last_turn": None,
         "turn_history": [],
     }
+    _refuse_quarantined(root)
     state = _write(root, state)
     try:
         for index in range(1, int(preview["max_loops"]) + 1):
@@ -402,6 +413,7 @@ def _recovery_authority(root: Path, operator: str, state: Mapping[str, Any]) -> 
 
 def build_recovery_preview(project: Path, operator: str, pending_paths: Iterable[str]) -> dict[str, Any]:
     root = adoption.resolve_worktree(project)
+    _refuse_quarantined(root)
     state = _record(root, required=True)
     assert state is not None
     if state.get("status") not in {"TURN_RUNNING", "INTERRUPTED"}:
@@ -504,6 +516,7 @@ def recover_interrupted(project: Path, operator: str, pending_paths: Iterable[st
     if preview["preview_sha256"] != expected:
         raise SchedulerError("interrupted recovery preview is stale; authority or repository evidence changed")
     root = Path(preview["worktree"])
+    _refuse_quarantined(root)
     state = _record(root, required=True)
     assert state is not None
     if preview["mode"] == "completed-turn":
