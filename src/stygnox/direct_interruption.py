@@ -302,6 +302,8 @@ def _require_qualification_replay() -> None:
 def adopt(project: Path, origin_file: Path, expected_preview: str, reviewed_paths: Sequence[str],
           reason: str, preview_sha256: str, confirm: str) -> dict[str, Any]:
     _require_qualification_replay()
+    from .direct_interruption_handoff import require_mutation_authority
+    require_mutation_authority(project)
     if confirm != "ADOPT_UNATTRIBUTED_WORK":
         raise RecoveryRefused("explicit --confirm ADOPT_UNATTRIBUTED_WORK required")
     if not reason or not reason.strip() or len(reason) > 1200:
@@ -412,6 +414,8 @@ def _pending(project: Path, expected_preview: str) -> tuple[Path, dict[str, Any]
 
 def qualify(project: Path, expected_preview: str, test_python: Path) -> dict[str, Any]:
     _require_qualification_replay()
+    from .direct_interruption_handoff import require_mutation_authority
+    require_mutation_authority(project)
     root, state, intent, saved, prefix = _pending(project, expected_preview)
     if _runtime(root, prefix + "-qualification.json").exists():
         raise RecoveryRefused("qualification receipt already exists")
@@ -492,6 +496,8 @@ def release_preview(project: Path, expected_preview: str) -> dict[str, Any]:
 
 def release(project: Path, expected_preview: str, preview_sha256: str, confirm: str) -> dict[str, Any]:
     _require_qualification_replay()
+    from .direct_interruption_handoff import require_mutation_authority
+    require_mutation_authority(project)
     if confirm != "RELEASE_REVIEWED_WORK":
         raise RecoveryRefused("explicit --confirm RELEASE_REVIEWED_WORK required")
     preview = release_preview(project, expected_preview)
@@ -538,11 +544,13 @@ def build_parser() -> argparse.ArgumentParser:
     def base(x: argparse.ArgumentParser) -> None:
         x.add_argument("--project", type=Path, required=True)
         x.add_argument("--origin-preview-sha256", required=True)
-    for cmd in ("review-preview", "adopt"):
+    for cmd in ("review-preview", "adopt", "handoff-preview", "fence-design-preview"):
         c = sub.add_parser(cmd)
         base(c)
         c.add_argument("--origin-file", type=Path, required=True)
         c.add_argument("--review-path", action="append", default=[], required=True)
+        if cmd in {"handoff-preview", "fence-design-preview"}:
+            c.add_argument("--candidate-wheel", type=Path, required=True)
         if cmd == "adopt":
             c.add_argument("--reason", required=True)
             c.add_argument("--preview", required=True)
@@ -556,9 +564,21 @@ def build_parser() -> argparse.ArgumentParser:
 def cli_main(argv: Sequence[str] | None = None) -> int:
     p = build_parser()
     args = p.parse_args(argv)
+    from .direct_interruption_handoff import HandoffRefused
+    from .direct_interruption_fence import FenceRefused
     try:
         if args.action == "review-preview":
             result = review_preview(args.project, args.origin_file, args.origin_preview_sha256, args.review_path)
+        elif args.action == "handoff-preview":
+            from .direct_interruption_handoff import build_handoff_preview
+            result = build_handoff_preview(args.project, args.origin_file, args.origin_preview_sha256, args.review_path, args.candidate_wheel)
+        elif args.action == "fence-design-preview":
+            from .direct_interruption_handoff import build_handoff_preview
+            from .direct_interruption_fence import build_fence_design
+            handoff = build_handoff_preview(args.project, args.origin_file,
+                                             args.origin_preview_sha256,
+                                             args.review_path, args.candidate_wheel)
+            result = build_fence_design(handoff)
         elif args.action == "adopt":
             result = adopt(args.project, args.origin_file, args.origin_preview_sha256, args.review_path,
                            args.reason, args.preview, args.confirm)
@@ -568,7 +588,7 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
             result = release_preview(args.project, args.origin_preview_sha256)
         else:
             result = release(args.project, args.origin_preview_sha256, args.preview, args.confirm)
-    except (RecoveryRefused, OSError, ValueError, planning.PlanningError, controller.ControllerError,
+    except (FenceRefused, HandoffRefused, RecoveryRefused, OSError, ValueError, planning.PlanningError, controller.ControllerError,
             adoption.AdoptionError, scheduler.SchedulerError, transactions.TransactionError) as exc:
         print(f"stygnox: direct interruption refused: {exc}", file=sys.stderr)
         return 2

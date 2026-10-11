@@ -109,7 +109,7 @@ class Harness(unittest.TestCase):
         self.origin_file = Path(self.temp.name) / "original.json"
         self.origin_file.write_text(json.dumps(self.origin))
         self.modules = {}
-        for sub in ("adoption", "controller", "planning", "scheduler", "self_development", "transactions", "qualification"):
+        for sub in ("adoption", "controller", "planning", "scheduler", "self_development", "transactions", "qualification", "direct_interruption_handoff"):
             self.modules[sub] = types.ModuleType("stygnox." + sub)
         pkg = types.ModuleType("stygnox")
         pkg.__path__ = [str(BASE / "src" / "stygnox")]
@@ -125,6 +125,10 @@ class Harness(unittest.TestCase):
         spec.loader.exec_module(self.module)
         self.addCleanup(self.restore_modules)
         m = self.modules
+        # Synthetic Stage A lifecycle tests explicitly mock the Stage C gate.
+        # Real installed mutation refuses until old-controller fencing is proved.
+        m["direct_interruption_handoff"].require_mutation_authority = lambda root: None
+        m["direct_interruption_handoff"].HandoffRefused = type("HandoffRefused", (RuntimeError,), {})
         m["qualification"].replay_human_reviewed_interruption = lambda *args, **kwargs: None
         m["qualification"]._DIRECT_INTERRUPTION_REPLAY_V1 = True
         m["adoption"].RUNTIME_NAME = ".stygnox"
