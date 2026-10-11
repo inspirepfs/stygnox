@@ -276,13 +276,16 @@ class Harness(unittest.TestCase):
         rp = self.module.release_preview(root, self.origin["preview_sha256"])
         with self.assertRaisesRegex(self.module.RecoveryRefused, "explicit"):
             self.module.release(root, self.origin["preview_sha256"], rp["preview_sha256"], "RELEASE")
-        released = self.module.release(root, self.origin["preview_sha256"], rp["preview_sha256"], "RELEASE_REVIEWED_WORK")
-        self.assertEqual(released["result"], "HUMAN_REVIEWED_INTERRUPTION_RECOVERED")
-        self.assertEqual(self.plan["step_authority_baseline_sha256"], "d"*64)
-        self.assertTrue(self.plan["execution_authority_granted"])
-        self.assertTrue(released["original_provider_turn_remains_failed"])
-        self.assertIsNone(self.plan["self_development_grant"])
-        self.assertEqual(len(self.plan["direct_interruption_recoveries"]),1)
+        # C3a closes the latent legacy-release path: even a mocked C1 gate
+        # cannot permit APPROVED/True to be republished by the old controller.
+        # The separately qualified successor protocol is not yet installed.
+        with self.assertRaisesRegex(RuntimeError, "not hostile-qualified"):
+            self.module.release(root, self.origin["preview_sha256"], rp["preview_sha256"], "RELEASE_REVIEWED_WORK")
+        self.assertEqual(self.plan["status"], self.module.PENDING)
+        self.assertFalse(self.plan["execution_authority_granted"])
+        self.assertEqual(self.plan["direct_interruption_pending"]["origin_preview_sha256"], self.origin["preview_sha256"])
+        self.assertFalse((root / '.stygnox' / (prefix + '-release.json')).exists())
+        self.assertFalse(self.plan.get('direct_interruption_recoveries'))
 
 if __name__ == "__main__":
     unittest.main()

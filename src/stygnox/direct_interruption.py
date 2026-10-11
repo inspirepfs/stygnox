@@ -498,44 +498,16 @@ def release(project: Path, expected_preview: str, preview_sha256: str, confirm: 
     _require_qualification_replay()
     from .direct_interruption_handoff import require_mutation_authority
     require_mutation_authority(project)
+    # Independent C3 safeguard: lifting the C1 gate must never restore the
+    # legacy APPROVED/True execution combination without a successor protocol.
     if confirm != "RELEASE_REVIEWED_WORK":
         raise RecoveryRefused("explicit --confirm RELEASE_REVIEWED_WORK required")
-    preview = release_preview(project, expected_preview)
-    if preview["preview_sha256"] != preview_sha256:
-        raise RecoveryRefused("release preview is stale")
-    root, state, intent, saved, prefix = _pending(project, expected_preview)
-    proof = intent.get("manifest_proof")
-    if not isinstance(proof, dict) or not isinstance(proof.get("proof_sha256"), str):
-        raise RecoveryRefused("missing full-chain Stage B1 reviewed attribution proof")
-    body = {"schema": RELEASE_SCHEMA, "reviewed_origin": expected_preview,
-            "intent_record_sha256": intent["record_sha256"],
-            "qualification_record_sha256": preview["qualification_record_sha256"],
-            "predecessor_plan_record_sha256": saved["plan_record_sha256"],
-            "quarantined_plan_record_sha256": state["record_sha256"],
-            "original_baseline_sha256": saved["predecessor_baseline_sha256"],
-            "reviewed_baseline_sha256": saved["candidate_baseline_sha256"],
-            "classification": "HUMAN_REVIEWED_UNATTRIBUTED_INTERRUPTED_WORK",
-            "manifest_proof_sha256": proof["proof_sha256"],
-            "provider_pass_fabricated": False, "retrospective_grant_fabricated": False,
-            "released_at": _now()}
-    receipt = _write(root, prefix + "-release.json", body)
-    updated = dict(state)
-    updated["status"] = "APPROVED"
-    updated["execution_authority_granted"] = True
-    updated["step_authority_baseline_sha256"] = saved["candidate_baseline_sha256"]
-    updated["direct_interruption_pending"] = None
-    history = list(updated.get("direct_interruption_recoveries") or [])
-    if history:
-        raise RecoveryRefused("additional reviewed-interruption epoch requires a separately qualified replay contract")
-    updated["direct_interruption_recoveries"] = [receipt]
-    updated["step_resume"] = {"step": updated["current_step"], "gate_id": None,
-                              "reason": "Explicit operator-reviewed interrupted source adopted; independent regressions passed; origin provider turn FAILED",
-                              "allowed_new_tests": [], "recorded_at": _now(), "decision_sha256": receipt["record_sha256"]}
-    written = planning._write(root, updated)
-    return {"result": "HUMAN_REVIEWED_INTERRUPTION_RECOVERED", "new_plan_record_sha256": written["record_sha256"],
-            "checkpoint_baseline_sha256": saved["candidate_baseline_sha256"],
-            "original_provider_turn_remains_failed": True,
-            "review_receipt_sha256": receipt["record_sha256"]}
+    from .direct_interruption_transfer import require_successor_release_authority
+    require_successor_release_authority()
+    # Intentionally no fallback to the old APPROVED / True release path.
+    # The future successor-only publisher must be separately implemented,
+    # serialized, crash-safe and hostile-qualified before recovery release.
+    raise RecoveryRefused("successor-only recovery release publisher unavailable")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -544,12 +516,12 @@ def build_parser() -> argparse.ArgumentParser:
     def base(x: argparse.ArgumentParser) -> None:
         x.add_argument("--project", type=Path, required=True)
         x.add_argument("--origin-preview-sha256", required=True)
-    for cmd in ("review-preview", "adopt", "handoff-preview", "fence-design-preview", "successor-admission-preview"):
+    for cmd in ("review-preview", "adopt", "handoff-preview", "fence-design-preview", "successor-admission-preview", "transfer-fence-preview"):
         c = sub.add_parser(cmd)
         base(c)
         c.add_argument("--origin-file", type=Path, required=True)
         c.add_argument("--review-path", action="append", default=[], required=True)
-        if cmd in {"handoff-preview", "fence-design-preview", "successor-admission-preview"}:
+        if cmd in {"handoff-preview", "fence-design-preview", "successor-admission-preview", "transfer-fence-preview"}:
             c.add_argument("--candidate-wheel", type=Path, required=True)
         if cmd == "adopt":
             c.add_argument("--reason", required=True)
@@ -567,6 +539,7 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
     from .direct_interruption_handoff import HandoffRefused
     from .direct_interruption_fence import FenceRefused
     from .direct_interruption_admission import AdmissionRefused
+    from .direct_interruption_transfer import TransferRefused
     try:
         if args.action == "review-preview":
             result = review_preview(args.project, args.origin_file, args.origin_preview_sha256, args.review_path)
@@ -578,6 +551,13 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
             result = build_admission_preflight(args.project, args.origin_file,
                                                args.origin_preview_sha256,
                                                args.review_path, args.candidate_wheel)
+        elif args.action == "transfer-fence-preview":
+            from .direct_interruption_admission import build_admission_preflight
+            from .direct_interruption_transfer import build_fence_publication_preview
+            root = adoption.resolve_worktree(args.project)
+            preflight = build_admission_preflight(root, args.origin_file, args.origin_preview_sha256,
+                                                  args.review_path, args.candidate_wheel)
+            result = build_fence_publication_preview(preflight, planning._record(root))
         elif args.action == "fence-design-preview":
             from .direct_interruption_handoff import build_handoff_preview
             from .direct_interruption_fence import build_fence_design
@@ -594,7 +574,7 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
             result = release_preview(args.project, args.origin_preview_sha256)
         else:
             result = release(args.project, args.origin_preview_sha256, args.preview, args.confirm)
-    except (AdmissionRefused, FenceRefused, HandoffRefused, RecoveryRefused, OSError, ValueError, planning.PlanningError, controller.ControllerError,
+    except (TransferRefused, AdmissionRefused, FenceRefused, HandoffRefused, RecoveryRefused, OSError, ValueError, planning.PlanningError, controller.ControllerError,
             adoption.AdoptionError, scheduler.SchedulerError, transactions.TransactionError) as exc:
         print(f"stygnox: direct interruption refused: {exc}", file=sys.stderr)
         return 2
