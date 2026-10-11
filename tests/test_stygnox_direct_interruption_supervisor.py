@@ -25,11 +25,19 @@ def _seal(body: dict, field: str) -> dict:
 
 
 def _evidence():
+    tx = _seal({
+        'schema': 'stygnox_transaction_v1', 'transaction_id': 'TX-test',
+        'state': 'ACTIVE', 'installed_command': '/old/bin/stygnox',
+    }, 'record_sha256')
+    active = _seal({
+        'schema': 'stygnox_controller_state_v1', 'transaction_id': 'TX-test',
+        'enabled': True, 'installed_command': '/old/bin/stygnox',
+    }, 'record_sha256')
     plan = _seal({
         'schema': 'stygnox_plan_state_v1', 'status': 'APPROVED',
         'execution_authority_granted': True, 'plan_hash': '1'*64,
         'transaction_id': 'TX-test', 'operator': 'operator', 'current_step': 2,
-        'controller_record_sha256': '2'*64, 'transaction_record_sha256': '3'*64,
+        'controller_record_sha256': active['record_sha256'], 'transaction_record_sha256': tx['record_sha256'],
         'active_gate': None, 'self_development_grant': None,
         'direct_interruption_pending': None, 'direct_interruption_recoveries': [],
         'repository_mutation_scope': ['src/stygnox/planning.py'],
@@ -43,8 +51,8 @@ def _evidence():
         'proposed_successor_only_plan_status': SUCCESSOR_STATUS,
         'proposed_legacy_execution_authority_granted': False,
         'predecessor_plan_record_sha256': plan['record_sha256'],
-        'predecessor_controller_record_sha256': '2'*64,
-        'predecessor_transaction_record_sha256': '3'*64,
+        'predecessor_controller_record_sha256': active['record_sha256'],
+        'predecessor_transaction_record_sha256': tx['record_sha256'],
         'plan_hash': '1'*64, 'transaction_id': 'TX-test',
         'operator': 'operator', 'current_step': 2,
         'handoff_preview_sha256': '5'*64, 'fence_design_sha256': '6'*64,
@@ -55,12 +63,12 @@ def _evidence():
     }, 'preview_sha256')
     projection = transfer.build_fence_publication_preview(admission, plan)
     journal = publication.build_journal_preview(projection)
-    return plan, projection, journal
+    return plan, projection, journal, active, tx
 
 
 class RefusalTests(unittest.TestCase):
     def test_nonroot_calls_never_become_authority(self):
-        plan, projection, journal = _evidence()
+        plan, projection, journal, active, tx = _evidence()
         with self.assertRaises(SupervisorRefused):
             publish_blocked_namespace(
                 original=Path('relative'), retired=Path('/run/vault/a'),
@@ -71,7 +79,7 @@ class RefusalTests(unittest.TestCase):
             )
 
     def test_mismatched_proposal_refused(self):
-        plan, projection, journal = _evidence()
+        plan, projection, journal, active, tx = _evidence()
         journal['journal_published'] = True
         with self.assertRaises(SupervisorRefused):
             publish_blocked_namespace(
@@ -104,7 +112,7 @@ class KernelTransitionTests(unittest.TestCase):
         self.retired = self.vault / 'retired'
         self.staged = self.staging / 'successor'
         self.published = self.published_dir / 'successor'
-        self.plan, self.preview, self.journal = _evidence()
+        self.plan, self.preview, self.journal, self.active, self.tx = _evidence()
         for path, uid in ((self.original, self.legacy_uid),
                           (self.staged, self.successor_uid)):
             path.mkdir(mode=0o700)
@@ -114,6 +122,11 @@ class KernelTransitionTests(unittest.TestCase):
             record.write_text(json.dumps(self.plan))
             os.chown(record, uid, uid)
             record.chmod(0o600)
+            for name, authority in (('controller.json', self.active), ('transaction.json', self.tx)):
+                child = rt / name
+                child.write_text(json.dumps(authority))
+                os.chown(child, uid, uid)
+                child.chmod(0o600)
             os.chown(rt, uid, uid)
             os.chown(path, uid, uid)
         s1, s2 = self.original.stat(), self.staged.stat()
@@ -145,6 +158,11 @@ class KernelTransitionTests(unittest.TestCase):
                               'direct-interruption-transfer-journal.json').read_text())
         self.assertEqual(plan, self.preview['fenced_plan'])
         self.assertEqual(journal, self.journal)
+        witness = json.loads((self.published / '.stygnox' / 'direct-interruption-blocked-binding.json').read_text())
+        self.assertFalse(witness['successor_execution_authorised'])
+        self.assertFalse(witness['original_binding_retired'])
+        self.assertEqual(witness['predecessor_controller_record_sha256'], self.active['record_sha256'])
+        self.assertEqual(witness['predecessor_transaction_record_sha256'], self.tx['record_sha256'])
         self.assertEqual(plan['status'], SUCCESSOR_STATUS)
         self.assertFalse(plan['execution_authority_granted'])
         self.assertEqual(plan['plan_hash'], self.plan['plan_hash'])
@@ -172,6 +190,51 @@ class KernelTransitionTests(unittest.TestCase):
                               capture_output=True, text=True, preexec_fn=drop(self.successor_uid))
         self.assertEqual(read.returncode, 0, read.stderr)
         self.assertIn(SUCCESSOR_STATUS, read.stdout)
+
+    def test_refuses_substituted_staged_controller_before_retirement(self):
+        controller_path = self.staged / '.stygnox' / 'controller.json'
+        changed = dict(self.active)
+        changed['installed_command'] = '/forged/bin/stygnox'
+        changed.pop('record_sha256')
+        changed['record_sha256'] = recovery._digest(changed)
+        controller_path.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(SupervisorRefused, 'staged installed authority records differ'):
+            self.run_transition()
+        self.assertTrue(self.original.exists())
+        self.assertFalse(self.retired.exists())
+
+    def test_refuses_substituted_staged_transaction_before_retirement(self):
+        transaction_path = self.staged / '.stygnox' / 'transaction.json'
+        changed = dict(self.tx)
+        changed['installed_command'] = '/forged/bin/stygnox'
+        changed.pop('record_sha256')
+        changed['record_sha256'] = recovery._digest(changed)
+        transaction_path.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(SupervisorRefused, 'staged installed authority records differ'):
+            self.run_transition()
+        self.assertTrue(self.original.exists())
+        self.assertFalse(self.retired.exists())
+
+    def test_refuses_invalid_original_controller_digest_before_retirement(self):
+        path = self.original / '.stygnox' / 'controller.json'
+        bad = dict(self.active)
+        bad['enabled'] = False
+        path.write_text(json.dumps(bad))
+        (self.staged / '.stygnox' / 'controller.json').write_text(json.dumps(bad))
+        with self.assertRaisesRegex(SupervisorRefused, 'installed predecessor binding refused'):
+            self.run_transition()
+        self.assertTrue(self.original.exists())
+        self.assertFalse(self.retired.exists())
+
+    def test_refuses_existing_blocked_witness_before_retirement(self):
+        existing = self.staged / '.stygnox' / 'direct-interruption-blocked-binding.json'
+        existing.write_text('{}')
+        existing.chmod(0o600)
+        os.chown(existing, self.successor_uid, self.successor_uid)
+        with self.assertRaisesRegex(SupervisorRefused, 'blocked binding record already exists'):
+            self.run_transition()
+        self.assertTrue(self.original.exists())
+        self.assertFalse(self.retired.exists())
 
     def test_refuses_mismatched_staged_plan_before_retirement(self):
         (self.staged / '.stygnox' / 'plan.json').write_text('{}')
@@ -217,6 +280,10 @@ class KernelTransitionTests(unittest.TestCase):
         observed_plan = json.loads((runtime / 'plan.json').read_text())
         self.assertEqual(observed_journal, self.journal)
         self.assertEqual(observed_plan, self.plan)
+        witness = json.loads((runtime / 'direct-interruption-blocked-binding.json').read_text())
+        self.assertFalse(witness['successor_execution_authorised'])
+        self.assertFalse(witness['handoff_admissible'])
+        self.assertFalse(self.published.exists())
         self.assertEqual(publication.reconcile_crash_boundary(
             self.preview, observed_journal, observed_plan)['phase'], publication.JOURNAL_ONLY)
         with self.assertRaises(SupervisorRefused):

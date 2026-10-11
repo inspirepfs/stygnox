@@ -28,13 +28,21 @@ def seal(body: dict, key: str) -> dict:
     return result
 
 
-def evidence() -> tuple[dict, dict, dict]:
+def evidence() -> tuple[dict, dict, dict, dict, dict]:
+    tx = seal({
+        'schema': 'stygnox_transaction_v1', 'transaction_id': 'TX-disposable-c3g',
+        'state': 'ACTIVE', 'installed_command': '/old/bin/stygnox',
+    }, 'record_sha256')
+    active = seal({
+        'schema': 'stygnox_controller_state_v1', 'transaction_id': 'TX-disposable-c3g',
+        'enabled': True, 'installed_command': '/old/bin/stygnox',
+    }, 'record_sha256')
     plan = seal({
         'schema': 'stygnox_plan_state_v1', 'status': 'APPROVED',
         'execution_authority_granted': True, 'plan_hash': '1'*64,
         'transaction_id': 'TX-disposable-c3g', 'operator': 'fixture-operator',
-        'current_step': 2, 'controller_record_sha256': '2'*64,
-        'transaction_record_sha256': '3'*64, 'active_gate': None,
+        'current_step': 2, 'controller_record_sha256': active['record_sha256'],
+        'transaction_record_sha256': tx['record_sha256'], 'active_gate': None,
         'self_development_grant': None, 'direct_interruption_pending': None,
         'direct_interruption_recoveries': [],
         'repository_mutation_scope': ['src/stygnox/planning.py'],
@@ -48,8 +56,8 @@ def evidence() -> tuple[dict, dict, dict]:
         'proposed_successor_only_plan_status': SUCCESSOR_STATUS,
         'proposed_legacy_execution_authority_granted': False,
         'predecessor_plan_record_sha256': plan['record_sha256'],
-        'predecessor_controller_record_sha256': '2'*64,
-        'predecessor_transaction_record_sha256': '3'*64,
+        'predecessor_controller_record_sha256': active['record_sha256'],
+        'predecessor_transaction_record_sha256': tx['record_sha256'],
         'plan_hash': '1'*64, 'transaction_id': 'TX-disposable-c3g',
         'operator': 'fixture-operator', 'current_step': 2,
         'handoff_preview_sha256': '5'*64,
@@ -61,7 +69,7 @@ def evidence() -> tuple[dict, dict, dict]:
     }, 'preview_sha256')
     proposal = transfer.build_fence_publication_preview(admission, plan)
     journal = publication.build_journal_preview(proposal)
-    return plan, proposal, journal
+    return plan, proposal, journal, active, tx
 
 
 def unused_uid(exclude: int) -> int:
@@ -88,7 +96,7 @@ def run(legacy: int) -> dict:
         raise RuntimeError('Linux root supervisor and non-root legacy UID required')
     pwd.getpwuid(legacy)
     successor = unused_uid(legacy)
-    plan, proposal, journal = evidence()
+    plan, proposal, journal, controller_record, tx_record = evidence()
     with tempfile.TemporaryDirectory(dir='/run', prefix='stygnox-c3g-probe-') as temp:
         base = Path(temp)
         base.chmod(0o755)
@@ -105,6 +113,11 @@ def run(legacy: int) -> dict:
             p.write_text(json.dumps(plan))
             p.chmod(0o600)
             os.chown(p, uid, uid)
+            for name, authority in (('controller.json', controller_record), ('transaction.json', tx_record)):
+                f = runtime / name
+                f.write_text(json.dumps(authority))
+                f.chmod(0o600)
+                os.chown(f, uid, uid)
             os.chown(runtime, uid, uid)
             os.chown(path, uid, uid)
         original_st = original.stat()
@@ -118,6 +131,7 @@ def run(legacy: int) -> dict:
         )
         actual = json.loads((published/'.stygnox'/'plan.json').read_text())
         observed_journal = json.loads((published/'.stygnox'/'direct-interruption-transfer-journal.json').read_text())
+        observed_binding = json.loads((published/'.stygnox'/'direct-interruption-blocked-binding.json').read_text())
         check = subprocess.run(
             [sys.executable, '-c',
              'from pathlib import Path;import sys;Path(sys.argv[1]).write_text("UNAUTHORISED")',
@@ -135,6 +149,8 @@ def run(legacy: int) -> dict:
             'predecessor_denied_published_write': check.returncode != 0,
             'exact_fenced_plan': actual == proposal['fenced_plan'],
             'exact_journal': observed_journal == journal,
+            'exact_blocked_binding': (observed_binding['record_sha256'] == record['blocked_binding_record_sha256']
+                                     and observed_binding['successor_execution_authorised'] is False),
             'legacy_execution_authority_granted': actual['execution_authority_granted'],
             'successor_execution_authorised': record['successor_execution_authorised'],
             'original_binding_retired': record['binding_transferred'],
@@ -144,7 +160,8 @@ def run(legacy: int) -> dict:
         }
         required = ('predecessor_path_missing', 'predecessor_retired_root_privately',
                     'private_stage_withdrawn', 'fenced_successor_visible',
-                    'predecessor_denied_published_write', 'exact_fenced_plan', 'exact_journal')
+                    'predecessor_denied_published_write', 'exact_fenced_plan', 'exact_journal',
+                    'exact_blocked_binding')
         if not all(result[key] is True for key in required):
             raise RuntimeError(f'kernel blocked-publish probe failure: {result}')
         if any(result[key] is not False for key in ('legacy_execution_authority_granted',

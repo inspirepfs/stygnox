@@ -21,6 +21,7 @@ from typing import Any, Mapping
 from . import direct_interruption as recovery
 from . import direct_interruption_publication as publication
 from . import direct_interruption_transfer as transfer
+from . import direct_interruption_binding as binding
 from .direct_interruption_retirement import (
     RetirementRefused, _open_trusted_parent, retire_predecessor_path,
 )
@@ -28,6 +29,7 @@ from .direct_interruption_workspace import inspect_protected_tree, WorkspaceRefu
 
 SCHEMA = 'stygnox_c3g_blocked_namespace_publication_v1'
 JOURNAL = 'direct-interruption-transfer-journal.json'
+BINDING = binding.FILENAME
 
 
 class SupervisorRefused(RuntimeError):
@@ -200,6 +202,27 @@ def publish_blocked_namespace(*, original: Path, retired: Path,
             stagefd = _open_runtime(staged, owner=successor_uid)
             try:
                 staged_plan = _regular_json(stagefd, 'plan.json', successor_uid)
+                # C3h: require byte-equivalent digest-bound installed authority
+                # records in both namespaces before the irreversible retirement.
+                oldfd = _open_runtime(original, owner=predecessor_uid)
+                try:
+                    original_controller = _regular_json(oldfd, 'controller.json', predecessor_uid)
+                    original_tx = _regular_json(oldfd, 'transaction.json', predecessor_uid)
+                finally:
+                    os.close(oldfd)
+                staged_controller = _regular_json(stagefd, 'controller.json', successor_uid)
+                staged_tx = _regular_json(stagefd, 'transaction.json', successor_uid)
+                if staged_controller != original_controller or staged_tx != original_tx:
+                    raise SupervisorRefused('staged installed authority records differ from predecessor')
+                try:
+                    blocked_binding = binding.build_blocked_binding_witness(
+                        transfer_preview=proposed, journal_preview=expected_journal,
+                        predecessor_controller=original_controller,
+                        predecessor_transaction=original_tx,
+                        original=original, published=published,
+                    )
+                except binding.BindingRefused as exc:
+                    raise SupervisorRefused(f'installed predecessor binding refused: {exc}') from exc
                 if old_plan != staged_plan or old_plan.get('record_sha256') != proposed['predecessor_plan_record_sha256']:
                     raise SupervisorRefused('predecessor and staged authority lineage mismatch')
                 transfer.classify_publication(proposed, staged_plan)
@@ -209,13 +232,23 @@ def publish_blocked_namespace(*, original: Path, retired: Path,
                     pass
                 else:
                     raise SupervisorRefused('journal already exists; manual reconciliation required')
+                try:
+                    os.stat(BINDING, dir_fd=stagefd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise SupervisorRefused('blocked binding record already exists; manual reconciliation required')
                 # The original rename is an irreversible fail-closed boundary.
                 retire_predecessor_path(original, retired,
                                         predecessor_uid=predecessor_uid,
                                         expected_dev=predecessor_identity[0],
                                         expected_inode=predecessor_identity[1])
                 _write_exact(stagefd, JOURNAL, expected_journal, successor_uid)
+                _write_exact(stagefd, BINDING, blocked_binding, successor_uid)
                 _write_exact(stagefd, 'plan.json', fenced, successor_uid)
+                actual_binding = _regular_json(stagefd, BINDING, successor_uid)
+                if actual_binding != blocked_binding:
+                    raise SupervisorRefused('blocked installed authority witness does not match')
                 actual_journal = _regular_json(stagefd, JOURNAL, successor_uid)
                 actual_plan = _regular_json(stagefd, 'plan.json', successor_uid)
                 phase = publication.reconcile_crash_boundary(proposed, actual_journal, actual_plan)
@@ -237,6 +270,7 @@ def publish_blocked_namespace(*, original: Path, retired: Path,
                 'blocked_replica_exposed': True,
                 'fenced_plan_record_sha256': fenced['record_sha256'],
                 'journal_preview_sha256': expected_journal['preview_sha256'],
+                'blocked_binding_record_sha256': blocked_binding['record_sha256'],
                 'publication_phase': phase['phase'],
                 'legacy_original_path_reentry_blocked': True,
                 'old_controller_execution_authority_revoked': False,
