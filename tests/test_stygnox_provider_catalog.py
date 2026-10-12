@@ -69,6 +69,9 @@ class StygnoxProviderCatalogTests(TestCase):
         fake.wait.return_value = 0
         with (
             mock.patch.object(provider_codex.shutil, "which", return_value="/fake/codex"),
+            # Protocol-shape test only: the separate 02N tests exercise the
+            # actual unconditional runtime dispatch refusal.
+            mock.patch.object(provider_codex, "_deny_recovery_provider_dispatch"),
             mock.patch.object(provider_codex.subprocess, "Popen", return_value=fake) as popen,
             mock.patch.object(provider_codex, "_app_server_read_response", side_effect=[{}, raw]),
         ):

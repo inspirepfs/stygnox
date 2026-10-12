@@ -43,6 +43,18 @@ class ProviderError(RuntimeError):
     """Fail-closed installed-provider error."""
 
 
+def _deny_recovery_provider_dispatch() -> None:
+    """02N repair-branch interlock: there is no provider release authority.
+
+    Guard the three real subprocess launch sites, not a standalone probe or
+    an environment-controlled optional flag. Normal provider functionality
+    stays disabled in this recovery candidate until a separately reviewed,
+    transaction-bound dispatch replaces this deliberate denial. This does
+    NOT constrain the independently installed R3D.1 predecessor.
+    """
+    raise ProviderError('02N recovery provider dispatch blocked: successor not authorised')
+
+
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
@@ -131,6 +143,7 @@ def _normalise_model_catalog(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 def model_catalog(cwd: Path, *, timeout: float = APP_SERVER_TIMEOUT_SECONDS) -> dict[str, Any]:
     """Read the supported Codex model/effort catalogue without executing a model turn."""
+    _deny_recovery_provider_dispatch()
     codex = shutil.which("codex")
     if not codex:
         raise ProviderError("reviewed provider 'codex' is not installed or not on PATH")
@@ -273,6 +286,7 @@ def _normalise_rate_limits(raw: Mapping[str, Any], model: str | None = None) -> 
 
 
 def _app_server_request(cwd: Path, method: str, *, params: Mapping[str, Any] | None = None, timeout: float = APP_SERVER_TIMEOUT_SECONDS) -> dict[str, Any]:
+    _deny_recovery_provider_dispatch()
     codex = shutil.which("codex")
     if not codex:
         raise ProviderError("reviewed provider 'codex' is not installed or not on PATH")
@@ -463,6 +477,7 @@ def _metrics_from_jsonl(output: str) -> dict[str, int | float]:
 
 
 def _run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    _deny_recovery_provider_dispatch()
     return subprocess.run(
         args,
         cwd=cwd,
