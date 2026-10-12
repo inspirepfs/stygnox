@@ -87,7 +87,8 @@ class PlanTests(unittest.TestCase):
 
 
 class CodexSelectionTests(unittest.TestCase):
-    def test_run_codex_applies_project_local_model_and_reasoning_effort(self):
+    @mock.patch.object(ralph.codex, "deny_recovery_codex_launch")
+    def test_run_codex_applies_project_local_model_and_reasoning_effort(self, _protocol_contract_only):
         captured = {}
 
         def fake_stream(command):

@@ -5733,6 +5733,7 @@ def update_codex_metrics(metrics: dict, event: dict) -> None:
 
 
 def stream_codex_process(args: list[str]) -> tuple[int, str, dict]:
+    codex.deny_recovery_codex_launch()
     return codex.stream_codex_process(
         args, cwd=ROOT, render_event=codex_event_messages, clip=_clip, live_write=live_write,
     )
@@ -5755,6 +5756,7 @@ def sandbox_prefix_from_preflights(default_returncode: int, default_output: str)
 
 def codex_command_prefix() -> list[str]:
     """Return the process-local Codex prefix after a zero-model sandbox preflight."""
+    codex.deny_recovery_codex_launch()
     global _CODEX_PREFIX
     if _CODEX_PREFIX is not None:
         return list(_CODEX_PREFIX)
@@ -5768,6 +5770,7 @@ def run_codex(
     prompt: str, schema: dict, sandbox: str, *, context: str = "Codex",
     result_contract: dict | None = None,
 ) -> dict:
+    codex.deny_recovery_codex_launch()
     return codex.run_codex(
         prompt, schema, sandbox, cwd=ROOT, prefix=codex_command_prefix(),
         stream_process=stream_codex_process, normalize_failure=normalize_failure,
@@ -6324,11 +6327,12 @@ def query_codex_rate_limits(*, timeout: float = USAGE_APP_SERVER_TIMEOUT_SECONDS
     This performs no model turn and deliberately discards account identifiers from the
     returned state. The app-server contract is account/rateLimits/read.
     """
-    codex = shutil.which("codex")
-    if not codex:
+    codex.deny_recovery_codex_launch()
+    codex_path = shutil.which("codex")
+    if not codex_path:
         raise RuntimeError("codex not found")
     proc = subprocess.Popen(
-        [codex, "app-server", "--stdio"],
+        [codex_path, "app-server", "--stdio"],
         cwd=ROOT,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -6366,11 +6370,12 @@ def query_codex_rate_limits(*, timeout: float = USAGE_APP_SERVER_TIMEOUT_SECONDS
 
 def query_codex_models(*, timeout: float = USAGE_APP_SERVER_TIMEOUT_SECONDS) -> dict:
     """Read the authenticated Codex model picker catalog through app-server model/list."""
-    codex = shutil.which("codex")
-    if not codex:
+    codex.deny_recovery_codex_launch()
+    codex_path = shutil.which("codex")
+    if not codex_path:
         raise RuntimeError("codex not found")
     proc = subprocess.Popen(
-        [codex, "app-server", "--stdio"], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        [codex_path, "app-server", "--stdio"], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, bufsize=1,
     )
     try:
@@ -6435,11 +6440,12 @@ def query_codex_models(*, timeout: float = USAGE_APP_SERVER_TIMEOUT_SECONDS) -> 
 
 def consume_codex_reset_credit(credit_id: str | None = None, *, timeout: float = USAGE_APP_SERVER_TIMEOUT_SECONDS) -> dict:
     """Redeem one explicitly confirmed banked reset through the supported app-server API."""
-    codex = shutil.which("codex")
-    if not codex:
+    codex.deny_recovery_codex_launch()
+    codex_path = shutil.which("codex")
+    if not codex_path:
         raise RuntimeError("codex not found")
     proc = subprocess.Popen(
-        [codex, "app-server", "--stdio"], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        [codex_path, "app-server", "--stdio"], cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, bufsize=1,
     )
     idempotency_key = str(uuid.uuid4())

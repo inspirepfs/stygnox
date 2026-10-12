@@ -70,6 +70,7 @@ def stream_codex_process(
     clip: Callable[[str, int], str], live_write: Callable[[str, str], None],
 ) -> tuple[int, str, dict]:
     """Run Codex while rendering its JSONL event stream for the operator."""
+    deny_recovery_codex_launch()
     proc = subprocess.Popen(
         args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1,
     )
@@ -169,6 +170,17 @@ class EnvironmentBlocked(RuntimeError):
         self.metrics = dict(metrics or {})
 
 
+def deny_recovery_codex_launch() -> None:
+    """02O deny-only fence for every historical script-provider launch path.
+
+    This is not an operator release mechanism. It deliberately accepts no
+    environment flags, stored evidence, plan hashes, or user-provided tokens.
+    """
+    raise EnvironmentBlocked(
+        "02O recovery script provider dispatch blocked: successor not authorised"
+    )
+
+
 class ProviderContractDefect(RuntimeError):
     """Codex rejected the declared provider-facing output-schema contract."""
 
@@ -189,6 +201,7 @@ def codex_command_prefix(
     live_write: Callable[[str, str], None], which: Callable[[str], str | None] = shutil.which,
 ) -> list[str]:
     """Run a zero-model sandbox preflight and return the Codex process prefix."""
+    deny_recovery_codex_launch()
     if which("codex") is None:
         raise EnvironmentBlocked("codex CLI is not installed or not on PATH")
     default = run_process(["codex", "sandbox", "--", "/bin/true"])
@@ -208,6 +221,7 @@ def run_codex(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict:
     output_schema = schema if result_contract is None else result_contract
+    deny_recovery_codex_launch()
     validate_output_schema(output_schema)
     with temporary_directory(prefix="ralph-lite-") as temp_dir:
         schema_path = Path(temp_dir) / "schema.json"

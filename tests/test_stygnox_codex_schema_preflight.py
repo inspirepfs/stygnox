@@ -5,6 +5,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -25,7 +26,7 @@ protocol = load_module("stygnox_protocol_schema_preflight", SCRIPTS / "stygnox_p
 
 class CodexOutputSchemaPreflightTests(unittest.TestCase):
     def run_codex(self, schema: dict, stream_process):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(codex, "deny_recovery_codex_launch"):
             return codex.run_codex(
                 "prompt",
                 schema,

@@ -103,7 +103,7 @@ class ProposalSchemaTests(unittest.TestCase):
         self.assert_no_unique_items(schema)
 
         turns: list[list[str]] = []
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(codex, "deny_recovery_codex_launch"):
             def stream_process(command: list[str]):
                 turns.append(command)
                 Path(command[command.index("-o") + 1]).write_text("{}", encoding="utf-8")

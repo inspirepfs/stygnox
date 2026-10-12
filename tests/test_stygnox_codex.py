@@ -24,7 +24,8 @@ class CodexMetricsAndStreamTests(unittest.TestCase):
         codex.update_codex_metrics(metrics, {"type": "turn.completed", "usage": {"input_tokens": 8, "cached_input_tokens": 3, "cache_write_input_tokens": 2, "output_tokens": 5, "reasoning_output_tokens": 4}})
         self.assertEqual(metrics, {"commands_executed": 1, "input_tokens": 8, "cached_input_tokens": 3, "cache_write_input_tokens": 2, "output_tokens": 5, "reasoning_output_tokens": 4})
 
-    def test_stream_renders_jsonl_with_injected_renderer_and_clip(self):
+    @mock.patch.object(codex, "deny_recovery_codex_launch")
+    def test_stream_renders_jsonl_with_injected_renderer_and_clip(self, _protocol_contract_only):
         process = mock.Mock(stdout=["not json\n", json.dumps({"type": "item.completed", "item": {"type": "command_execution"}}) + "\n"])
         process.wait.return_value = 0
         rendered, written, clipped = [], [], []
@@ -44,7 +45,8 @@ class CodexMetricsAndStreamTests(unittest.TestCase):
 
 
 class CodexExecutionTests(unittest.TestCase):
-    def test_run_codex_preserves_command_order_temp_prefix_and_structured_result(self):
+    @mock.patch.object(codex, "deny_recovery_codex_launch")
+    def test_run_codex_preserves_command_order_temp_prefix_and_structured_result(self, _protocol_contract_only):
         captured, writes = {}, []
         def stream(command):
             captured["command"] = command
@@ -63,7 +65,8 @@ class CodexExecutionTests(unittest.TestCase):
         self.assertEqual(result["_ralph_metrics"]["codex_seconds"], 2.5)
         self.assertIn(("clip:done:800", "SUMMARY"), writes)
 
-    def test_run_codex_reports_nonzero_and_invalid_structured_output(self):
+    @mock.patch.object(codex, "deny_recovery_codex_launch")
+    def test_run_codex_reports_nonzero_and_invalid_structured_output(self, _protocol_contract_only):
         with tempfile.TemporaryDirectory() as root:
             common = dict(cwd=Path(root), prefix=["codex"], normalize_failure=lambda text: text, clip=lambda text, limit: text, live_write=lambda message, category: None)
             with self.assertRaisesRegex(RuntimeError, r"codex exec failed \(3\):"):
@@ -71,7 +74,8 @@ class CodexExecutionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "invalid structured output"):
                 codex.run_codex("p", {}, "workspace-write", stream_process=lambda command: (0, "", {}), **common)
 
-    def test_environment_blocked_retains_metrics_and_normalizes_by_callback(self):
+    @mock.patch.object(codex, "deny_recovery_codex_launch")
+    def test_environment_blocked_retains_metrics_and_normalizes_by_callback(self, _protocol_contract_only):
         bwrap = "bwrap: setting up uid map: permission denied"
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(codex.EnvironmentBlocked) as raised:
@@ -79,7 +83,8 @@ class CodexExecutionTests(unittest.TestCase):
         self.assertIn("normalized:bwrap", str(raised.exception))
         self.assertEqual(raised.exception.metrics, {"commands_executed": 2, "codex_seconds": mock.ANY})
 
-    def test_preflight_blocks_and_never_caches_a_prefix(self):
+    @mock.patch.object(codex, "deny_recovery_codex_launch")
+    def test_preflight_blocks_and_never_caches_a_prefix(self, _protocol_contract_only):
         with self.assertRaises(codex.EnvironmentBlocked):
             codex.sandbox_prefix_from_preflights(1, "bwrap: failed RTM_NEWADDR")
         process = subprocess.CompletedProcess([], 0, "")
