@@ -397,6 +397,7 @@ def build_preview(
     wait_for_limits: bool | None = None,
     usage_poll_seconds: int | None = None,
     max_loops: int | None = None,
+    offline_existing_policy: bool = False,
 ) -> dict[str, Any]:
     baseline = capture_baseline(project)
     operator_name = _validated_operator(operator)
@@ -413,13 +414,29 @@ def build_preview(
             usage_poll_seconds=usage_poll_seconds,
             max_loops=max_loops,
         )
-        selected_policy, provider_evidence = execution_policy.bind_provider_catalog(baseline.worktree, selected_policy)
+        if offline_existing_policy:
+            # An operator-authorised bootstrap escape hatch, NOT a provider release.
+            # It only admits unchanged, tracked policy files in a clean project.
+            # No provider process is contacted and catalogue binding stays absent.
+            if baseline.journey != "clean":
+                raise AdoptionError("offline existing-policy adoption requires a clean Git baseline")
+            if not selected_policy.get("non_neutral") or selected_policy.get("provider") != "codex":
+                raise AdoptionError("offline existing-policy adoption requires an explicitly reviewed Codex policy")
+            if (baseline.worktree / RUNTIME_NAME).exists() or (baseline.worktree / RUNTIME_NAME).is_symlink():
+                raise AdoptionError("offline existing-policy adoption refuses an existing runtime")
+            provider_evidence = None
+        else:
+            selected_policy, provider_evidence = execution_policy.bind_provider_catalog(baseline.worktree, selected_policy)
         review = execution_policy.policy_review(
             selected_policy, selected_policy.get("reviewer"), provider_evidence=provider_evidence
         )
     except execution_policy.ExecutionPolicyError as exc:
         raise AdoptionError(str(exc)) from exc
     tracked, conflicts = _planned_tracked_files(baseline.worktree, operator_name, selected_policy, review)
+    if offline_existing_policy:
+        actions = {item["path"]: item["action"] for item in tracked}
+        if conflicts or any(actions.get(name) != "unchanged" for name in (CONFIG_NAME, POLICY_NAME)):
+            raise AdoptionError("offline adoption requires exact, unchanged tracked configuration and policy")
     dirty: dict[str, Any] = {"required": baseline.journey == "dirty", "evidence": None}
     evidence_error: str | None = None
     if baseline.journey == "dirty" and dirty_evidence is not None:
@@ -453,6 +470,7 @@ def build_preview(
         "defaults": {key: selected_policy.get(key) for key in ("provider", "model", "effort")},
         "execution_policy": {
             "review": review,
+            "provider_catalog_deferred": bool(offline_existing_policy),
             "controls": {
                 key: selected_policy[key]
                 for key in (
@@ -679,6 +697,11 @@ def build_parser() -> argparse.ArgumentParser:
         command.set_defaults(wait_for_limits=None)
         command.add_argument("--usage-poll-seconds", type=int)
         command.add_argument("--max-loops", type=int)
+        command.add_argument(
+            "--offline-existing-policy",
+            action="store_true",
+            help="operator-approved bootstrap using exact tracked policy only; no Codex catalogue or provider authority",
+        )
 
     preview = sub.add_parser("preview", help="produce a no-change adoption preview")
     common(preview)
@@ -707,6 +730,7 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
         "wait_for_limits": args.wait_for_limits,
         "usage_poll_seconds": args.usage_poll_seconds,
         "max_loops": args.max_loops,
+        "offline_existing_policy": args.offline_existing_policy,
     }
     try:
         if args.action == "preview":

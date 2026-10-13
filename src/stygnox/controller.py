@@ -300,7 +300,8 @@ def activate_controller(project: Path, operator: str, confirmation: str) -> dict
         "execution_policy_review": policy_status.get("review"),
         "tracked_config_sha256": policy_status["tracked_config_sha256"],
         "provider_execution_ready": bool(
-            policy_status["policy"].get("provider") and policy_status["policy"].get("model") and policy_status.get("approved")
+            policy_status["policy"].get("provider") and policy_status["policy"].get("model")
+            and policy_status.get("approved") and policy_status.get("provider_catalog_bound")
         ),
     }
     body["record_sha256"] = _digest(body)
@@ -448,6 +449,8 @@ def build_run_preview(
         raise ControllerError(f"unsupported installed provider adapter: {provider!r}")
     if not policy_status.get("approved"):
         raise ControllerError("provider execution refused: non-neutral policy is not reviewer-approved")
+    if not policy_status.get("provider_catalog_bound"):
+        raise ControllerError("provider execution refused: model catalogue binding is absent")
     current = adoption.capture_baseline(root).public()
     objective_value = _objective(objective)
     plan_binding = None
