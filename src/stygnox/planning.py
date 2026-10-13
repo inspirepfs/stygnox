@@ -206,6 +206,115 @@ def _record(root: Path, *, required: bool = True) -> dict[str, Any] | None:
     return value
 
 
+def _renewal_plan_obligations(
+    root: Path, operator: str, *, transaction_id: str,
+) -> dict[str, Any]:
+    """Read predecessor plan obligations without changing runtime evidence.
+
+    This is only a prerequisite: the caller must independently validate terminal
+    or retirement proof, transition receipts, scheduler/recovery/provenance
+    obligations and stopped/revoked transaction authority before renewal.
+    An IDLE label by itself does not prove retirement or permit publication.
+    """
+    path = root / adoption.RUNTIME_NAME / PLAN_RECORD
+    if path.is_symlink() or not path.is_file():
+        raise PlanningError("renewal requires a regular predecessor plan record")
+    try:
+        state = _record(root)
+    except (UnicodeError, TypeError, ValueError) as exc:
+        raise PlanningError("malformed renewal predecessor plan record") from exc
+    assert state is not None
+    if (
+        not isinstance(operator, str) or not operator.strip()
+        or not isinstance(transaction_id, str) or not transaction_id.strip()
+        or state.get("operator") != operator
+        or state.get("transaction_id") != transaction_id
+    ):
+        raise PlanningError("renewal predecessor plan operator/transaction lineage changed")
+    status = state.get("status")
+    if not isinstance(status, str) or status not in {"COMMITTED", "PUSHED", "READ_ONLY_COMPLETE", "IDLE"}:
+        raise PlanningError("renewal requires a terminal or retired predecessor plan")
+    if state.get("execution_authority_granted") is not False:
+        raise PlanningError("renewal predecessor plan execution authority is not explicitly closed")
+    for key in (
+        "active_gate", "self_development_grant", "step_resume",
+        "last_qualification_failure", "retirement_rollback_preview",
+    ):
+        if key not in state or state[key] is not None:
+            raise PlanningError(f"renewal predecessor plan has unresolved or missing {key}")
+    if "plan" not in state or "plan_hash" not in state:
+        raise PlanningError("renewal predecessor plan binding is missing")
+    if status == "IDLE":
+        if state["plan"] is not None or state["plan_hash"] is not None:
+            raise PlanningError("renewal retired predecessor still has an active plan binding")
+    elif state["plan"] is None:
+        raise PlanningError("renewal terminal predecessor lacks its plan")
+    results = state.get("step_results")
+    if not isinstance(results, list) or any(not isinstance(row, Mapping) for row in results):
+        raise PlanningError("renewal predecessor step results are missing or malformed")
+    if status != "IDLE":
+        plan = state["plan"]
+        expected_authority = "read-only" if status == "READ_ONLY_COMPLETE" else "write"
+        if plan["repository_authority"] != expected_authority:
+            raise PlanningError("renewal terminal status does not match predecessor repository authority")
+        steps = plan["steps"]
+        # Every approved step must have exactly one successful result, including
+        # steps without a required transition. A terminal label cannot discharge
+        # missing qualification obligations. Receipt validation remains separate.
+        if (
+            len(results) != len(steps)
+            or any(type(row.get("step")) is not int or row.get("result") != "PASS" for row in results)
+            or sorted(row["step"] for row in results) != [step["id"] for step in steps]
+        ):
+            raise PlanningError("renewal terminal predecessor lacks exact successful results for every step")
+        for step in steps:
+            if step.get(POST_QUALIFICATION_TRANSITION_FIELD) is None:
+                continue
+            matches = [row for row in results if type(row.get("step")) is int and row["step"] == step["id"]]
+            if (
+                len(matches) != 1 or matches[0].get("result") != "PASS"
+                or not isinstance(matches[0].get("post_qualification_transition"), Mapping)
+            ):
+                raise PlanningError("renewal predecessor is missing exact required transition evidence")
+    for row in results:
+        transition = row.get("post_qualification_transition")
+        if transition is None:
+            continue
+        if (
+            not isinstance(transition, Mapping)
+            or transition.get("state") != "COMPLETE"
+            or not isinstance(transition.get("transition_receipt_sha256"), str)
+            or not _HEX64.fullmatch(transition["transition_receipt_sha256"])
+        ):
+            raise PlanningError("renewal predecessor has an unresolved or malformed required transition")
+    return state
+
+
+def _renewal_epoch(preview: Mapping[str, Any]) -> dict[str, Any]:
+    """Construct an empty epoch; predecessor evidence lives in its archive only."""
+    successor = preview["successor"]
+    body = {
+        "schema": PLAN_SCHEMA, "product_version": PRODUCT.version,
+        "status": "IDLE", "operator": preview["operator"],
+        "transaction_id": successor["transaction_id"],
+        "plan_epoch": successor["plan_epoch"], "plan_epoch_id": successor["plan_epoch_id"],
+        "renewal_preview_sha256": preview["preview_sha256"],
+        "transaction_recovery_baseline_sha256": preview["baseline"]["sha256"],
+        "plan": None, "plan_hash": None, "approved_at": None,
+        "approval_baseline_sha256": None, "step_authority_baseline_sha256": None,
+        "execution_authority_granted": False, "active_gate": None,
+        "self_development_grant": None, "step_resume": None,
+        "last_qualification_failure": None, "final_qualification": None,
+        "retirement_rollback_preview": None,
+        "step_results": [], "retired_plans": [], "qualification_history": [],
+        "self_development_grant_history": [], "accepted_controller_paths": [],
+        REPOSITORY_MUTATION_SCOPE_FIELD: [],
+        REPOSITORY_MUTATION_SCOPE_DIGEST_FIELD: _digest([]),
+    }
+    body["record_sha256"] = _digest(body)
+    return body
+
+
 def _write(root: Path, body: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(body)
     payload.pop("record_sha256", None)

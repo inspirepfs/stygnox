@@ -115,6 +115,57 @@ def active_scheduler_authority(root: Path) -> dict[str, Any] | None:
     }
 
 
+def renewal_quiescence(
+    root: Path, operator: str, *, transaction_id: str, plan_hash: str,
+) -> dict[str, Any] | None:
+    """Validate released scheduler ownership without mutating runtime evidence.
+
+    A dead process does not release an interrupted turn. Terminal plan proof
+    and resolution of human/qualification obligations are separate renewal
+    checks; a stopped scheduler alone does not establish either.
+    """
+    path = root / adoption.RUNTIME_NAME / SCHEDULER_RECORD
+    # _record treats a dangling symlink as absent; renewal must fail closed.
+    if path.is_symlink():
+        raise SchedulerError("renewal scheduler record must be a regular file")
+    state = _record(root, required=False)
+    if state is None:
+        return None
+    if isinstance(state.get("status"), str) and state["status"] in _ACTIVE:
+        raise SchedulerError("renewal refuses active/interrupted scheduler ownership; recover it first")
+    released = {
+        "STOPPED_HUMAN_GATE", "STOPPED_PROVIDER_BLOCK", "STOPPED_EFFICIENCY",
+        "STOPPED_QUALIFICATION", "STOPPED_UNEXPECTED", "STOPPED_USAGE_LIMIT",
+        "PAUSED_MAX_LOOPS", "RECOVERED_COMPLETED_CONTINUATION", "RECOVERED_PARTIAL_TURN",
+    }
+    if not isinstance(state.get("status"), str) or state["status"] not in released:
+        raise SchedulerError("renewal scheduler status is missing or unsupported")
+    if (
+        state.get("operator") != operator
+        or state.get("worktree") != str(root.resolve())
+        or state.get("transaction_id") != transaction_id
+        or state.get("plan_hash") != plan_hash
+        or not _HEX64.fullmatch(str(plan_hash or ""))
+        or not operator
+        or not transaction_id
+    ):
+        raise SchedulerError("renewal scheduler operator/project/transaction/plan lineage changed")
+    if "pid" not in state or state["pid"] is not None:
+        raise SchedulerError("renewal scheduler ownership has not been explicitly released")
+    finished = state.get("finished_at")
+    try:
+        if not isinstance(finished, str) or dt.datetime.fromisoformat(finished).utcoffset() is None:
+            raise ValueError("missing timezone")
+    except ValueError as exc:
+        raise SchedulerError("renewal scheduler lacks valid completion evidence") from exc
+    reason = state.get("stop_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise SchedulerError("renewal scheduler lacks a stop reason")
+    if not _HEX64.fullmatch(str(state.get("schedule_preview_sha256") or "")):
+        raise SchedulerError("renewal scheduler lacks its exact schedule binding")
+    return state
+
+
 def _file_fingerprint(path: Path) -> str:
     try:
         st = path.lstat()

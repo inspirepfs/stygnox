@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 import hashlib
+import fcntl
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
 
 from . import adoption
+from .direct_interruption_execution_guard import QuarantinedRuntime, refuse_quarantined_runtime
 from .product import PRODUCT
 from .recovery import (
     RecoveryError,
@@ -25,6 +29,7 @@ from .recovery import (
 
 TRANSACTION_SCHEMA = "stygnox_transaction_v1"
 RECOVERY_PREVIEW_SCHEMA = "stygnox_recovery_preview_v1"
+RENEWAL_PREVIEW_SCHEMA = "stygnox_transaction_renewal_preview_v1"
 RECOVERY_RESULT_SCHEMA = "stygnox_recovery_result_v1"
 TRANSACTION_RECORD = "transaction.json"
 RECOVERY_RESULT_RECORD = "recovery-result.json"
@@ -100,6 +105,469 @@ def _transaction(root: Path, *, required: bool = True) -> dict[str, Any] | None:
     if value.get("schema") != TRANSACTION_SCHEMA:
         raise TransactionError("unsupported transaction runtime record")
     return value
+
+
+def _renewal_record(root: Path, name: str, schema: str) -> dict[str, Any]:
+    """Read a required, integrity-bound renewal input without repairing it."""
+    runtime = root / adoption.RUNTIME_NAME
+    path = runtime / name
+    if runtime.is_symlink() or path.is_symlink() or not path.is_file():
+        raise TransactionError(f"renewal requires a regular predecessor record: {name}")
+    try:
+        record = _runtime_json(root, name)
+    except UnicodeError as exc:
+        raise TransactionError(f"invalid renewal record encoding: {name}") from exc
+    assert record is not None
+    if record.get("schema") != schema:
+        raise TransactionError(f"unsupported renewal predecessor schema: {name}")
+    body = dict(record)
+    recorded = body.pop("record_sha256", None)
+    if not isinstance(recorded, str) or not _HEX64.fullmatch(recorded) or recorded != _digest(body):
+        raise TransactionError(f"renewal predecessor integrity check failed: {name}")
+    return record
+
+
+def _renewal_stopped_transaction(root: Path, operator: str) -> dict[str, Any]:
+    """Read and validate safe-stop evidence, without granting renewal authority.
+
+    Renewal must additionally validate adoption/recovery lineage, revoked
+    controller authority, terminal plan proof, scheduler ownership, outstanding
+    obligations and installed identity before publishing any successor.
+    """
+    transaction = _renewal_record(root, TRANSACTION_RECORD, TRANSACTION_SCHEMA)
+    if transaction.get("state") != "STOPPED":
+        raise TransactionError("renewal requires a STOPPED predecessor transaction")
+    if transaction.get("operator") != _operator(operator):
+        raise TransactionError("renewal operator does not match predecessor transaction")
+    identifier = transaction.get("transaction_id")
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise TransactionError("renewal predecessor transaction identifier is missing")
+    for key in ("handoff_preview_sha256", "pre_authority_baseline_sha256", "authority_baseline_sha256"):
+        value = transaction.get(key)
+        if not isinstance(value, str) or not _HEX64.fullmatch(value):
+            raise TransactionError(f"renewal predecessor lacks exact {key}")
+    command = transaction.get("installed_command")
+    if not isinstance(command, str) or not Path(command).is_absolute():
+        raise TransactionError("renewal predecessor installed command is invalid")
+    journey = transaction.get("journey")
+    if journey not in ("clean", "dirty", "new-unborn"):
+        raise TransactionError("renewal predecessor recovery journey is invalid")
+    source = transaction.get("recovery_source")
+    if not isinstance(source, dict) or source.get("baseline_sha256") != transaction["pre_authority_baseline_sha256"]:
+        raise TransactionError("renewal predecessor recovery lineage is missing or inconsistent")
+    source_kind = "operator-external" if journey == "dirty" else "controller-internal"
+    if source.get("kind") != source_kind:
+        raise TransactionError("renewal predecessor recovery source kind is inconsistent")
+    digests = ("attestation_sha256", "capture_sha256", "manifest_sha256") if journey == "dirty" else ("checkpoint_sha256",)
+    for key in digests:
+        if not isinstance(source.get(key), str) or not _HEX64.fullmatch(source[key]):
+            raise TransactionError(f"renewal predecessor recovery source lacks {key}")
+    if journey == "dirty":
+        for key in ("attestation_path", "capture_path", "manifest_path"):
+            if not isinstance(source.get(key), str) or not Path(source[key]).is_absolute():
+                raise TransactionError(f"renewal predecessor recovery source lacks {key}")
+    authority = transaction.get("authority")
+    if (
+        not isinstance(authority, dict)
+        or authority.get("scope") != "d8.3-transaction-and-recovery-only"
+        or authority.get("controller_execution") is not False
+        or authority.get("safe_stop_required_before_restore") is not True
+    ):
+        raise TransactionError("renewal predecessor transaction authority is invalid")
+    stop = transaction.get("safe_stop")
+    if not isinstance(stop, dict):
+        raise TransactionError("renewal requires valid safe-stop evidence")
+    reason = stop.get("reason")
+    if (
+        not isinstance(reason, str) or reason not in _ALLOWED_STOP_REASONS
+        or stop.get("authority_revoked") is not True
+        or stop.get("project_mutation") is not False
+    ):
+        raise TransactionError("renewal safe-stop revocation evidence is invalid")
+    stopped_at = stop.get("stopped_at")
+    opened_at = transaction.get("opened_at")
+    try:
+        if not isinstance(stopped_at, str) or datetime.fromisoformat(stopped_at).utcoffset() is None:
+            raise ValueError("missing timezone")
+        if not isinstance(opened_at, str) or datetime.fromisoformat(opened_at).utcoffset() is None:
+            raise ValueError("missing opening timestamp/timezone")
+        if datetime.fromisoformat(opened_at) > datetime.fromisoformat(stopped_at):
+            raise ValueError("safe stop predates transaction")
+    except ValueError as exc:
+        raise TransactionError("renewal safe-stop timestamp is invalid") from exc
+    baseline = stop.get("baseline")
+    required = {
+        "worktree", "journey", "head", "branch", "status", "index_sha256",
+        "staged_sha256", "unstaged_sha256", "untracked", "dirty_categories", "sha256",
+    }
+    if not isinstance(baseline, dict) or not required.issubset(baseline):
+        raise TransactionError("renewal safe-stop baseline is incomplete")
+    baseline_body = dict(baseline)
+    baseline_digest = baseline_body.pop("sha256")
+    if baseline.get("worktree") != str(root.resolve()) or baseline_digest != _digest(baseline_body):
+        raise TransactionError("renewal safe-stop project/baseline binding is invalid")
+    if (
+        baseline.get("journey") not in ("clean", "dirty", "new-unborn")
+        or not isinstance(baseline.get("branch"), str) or not baseline["branch"]
+        or not isinstance(baseline.get("status"), str)
+        or not isinstance(baseline.get("untracked"), list)
+        or not isinstance(baseline.get("dirty_categories"), list)
+        or any(not isinstance(baseline[key], str) or not _HEX64.fullmatch(baseline[key])
+               for key in ("index_sha256", "staged_sha256", "unstaged_sha256"))
+    ):
+        raise TransactionError("renewal safe-stop baseline fields are invalid")
+    head = baseline["head"]
+    if head is not None and (not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head)):
+        raise TransactionError("renewal safe-stop Git head is invalid")
+    expected_journey = "new-unborn" if head is None else "dirty" if baseline["status"] else "clean"
+    if baseline["journey"] != expected_journey or baseline["dirty_categories"] != list(adoption._status_categories(baseline["status"])):
+        raise TransactionError("renewal safe-stop Git baseline is inconsistent")
+    if bool(baseline["untracked"]) != ("untracked" in baseline["dirty_categories"]):
+        raise TransactionError("renewal safe-stop untracked evidence is inconsistent")
+    seen: set[str] = set()
+    for row in baseline["untracked"]:
+        if not isinstance(row, dict):
+            raise TransactionError("renewal safe-stop untracked evidence is malformed")
+        relative = row.get("path")
+        if (
+            not isinstance(relative, str) or not relative or "\x00" in relative
+            or Path(relative).is_absolute() or ".." in Path(relative).parts
+            or relative in seen or row.get("type") not in ("file", "symlink")
+            or not isinstance(row.get("mode"), str) or not re.fullmatch(r"[0-7]{4}", row["mode"])
+            or not isinstance(row.get("sha256"), str) or not _HEX64.fullmatch(row["sha256"])
+        ):
+            raise TransactionError("renewal safe-stop untracked evidence is malformed")
+        seen.add(relative)
+    return transaction
+
+
+def _renewal_predecessor_authority(root: Path, operator: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate stopped/revoked authority; this alone does not permit renewal.
+
+    Adoption and recovery artifacts, terminal plan proof, obligations, scheduler
+    quiescence, Git and installed identity still need independent validation.
+    """
+    from . import controller
+
+    transaction = _renewal_stopped_transaction(root, operator)
+    revoked = _renewal_record(root, controller.CONTROLLER_RECORD, controller.CONTROLLER_SCHEMA)
+    if (
+        revoked.get("enabled") is not False
+        or revoked.get("controller_execution_enabled") is not False
+        or revoked.get("deactivation_reason") != "operator-confirmed"
+    ):
+        raise TransactionError("renewal requires explicitly revoked controller execution")
+    for key in ("operator", "transaction_id", "authority_baseline_sha256", "installed_command"):
+        if revoked.get(key) != transaction[key]:
+            raise TransactionError(f"renewal predecessor controller/transaction lineage changed: {key}")
+    return transaction, revoked
+
+
+def _renewal_adoption_lineage(root: Path, transaction: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the original handoff and recovery material without publishing.
+
+    Handoffs predate record_sha256. Their embedded baselines and recovery
+    bindings must therefore be checked against the integrity-validated stopped
+    transaction, rather than treating a handoff schema label as evidence.
+    Terminal proof and current installed identity are separate prerequisites.
+    """
+    from . import recovery
+
+    runtime = root / adoption.RUNTIME_NAME
+    path = runtime / "adoption.json"
+    if runtime.is_symlink() or path.is_symlink() or not path.is_file():
+        raise TransactionError("renewal requires a regular adoption handoff")
+    try:
+        handoff = _load_adoption(root)
+        for key, transaction_key in (
+            ("operator", "operator"), ("preview_sha256", "handoff_preview_sha256"),
+            ("baseline_sha256", "pre_authority_baseline_sha256"), ("journey", "journey"),
+        ):
+            if handoff.get(key) != transaction.get(transaction_key):
+                raise TransactionError(f"renewal adoption/transaction lineage changed: {key}")
+        for key in ("baseline", "authority_baseline"):
+            baseline = dict(handoff[key])
+            recorded = baseline.pop("sha256", None)
+            if (
+                not isinstance(recorded, str) or not _HEX64.fullmatch(recorded)
+                or recorded != _digest(baseline)
+                or baseline.get("worktree") != str(root.resolve())
+            ):
+                raise TransactionError(f"renewal adoption {key} integrity/project binding is invalid")
+        if handoff["baseline"].get("journey") != transaction["journey"]:
+            raise TransactionError("renewal adoption recovery journey changed")
+        if handoff["authority_baseline"]["sha256"] != transaction.get("authority_baseline_sha256"):
+            raise TransactionError("renewal adoption authority baseline differs from predecessor transaction")
+        source = handoff.get("recovery_source")
+        original = transaction.get("recovery_source")
+        if not isinstance(source, dict) or not isinstance(original, dict):
+            raise TransactionError("renewal adoption recovery source is missing")
+        # The handoff stores fewer external-package fields than begin records.
+        keys = ("kind", "baseline_sha256", "attestation_path", "attestation_sha256",
+                "capture_path", "capture_sha256") if transaction["journey"] == "dirty" else (
+                    "kind", "baseline_sha256", "checkpoint_sha256",
+                )
+        if any(key not in source or source[key] != original.get(key) for key in keys):
+            raise TransactionError("renewal adoption recovery source changed")
+        if transaction["journey"] != "dirty":
+            directory = runtime / recovery.INTERNAL_RECOVERY_DIR
+            if directory.is_symlink() or not directory.is_dir():
+                raise TransactionError("renewal requires a regular recovery directory")
+            for filename in (recovery.INTERNAL_METADATA, recovery.INTERNAL_ARCHIVE, recovery.INTERNAL_INDEX):
+                if (directory / filename).is_symlink():
+                    raise TransactionError("renewal recovery artifacts must not be symlinks")
+            # Validate paths before the existing loader can follow metadata.
+            metadata_path = directory / recovery.INTERNAL_METADATA
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(metadata, dict)
+                or metadata.get("archive") != recovery.INTERNAL_ARCHIVE
+                or metadata.get("index") not in (None, recovery.INTERNAL_INDEX)
+                or metadata.get("baseline") != handoff["baseline"]
+            ):
+                raise TransactionError("renewal recovery checkpoint lineage/paths are invalid")
+        else:
+            for key in ("attestation_path", "capture_path", "manifest_path"):
+                artifact = Path(original[key])
+                if artifact.is_symlink() or not artifact.is_file():
+                    raise TransactionError("renewal external recovery artifact is not a regular file")
+        verified = _recovery_source(root, handoff)
+        if verified != original:
+            raise TransactionError("renewal verified recovery source differs from original transaction")
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise TransactionError("malformed renewal adoption/recovery evidence") from exc
+    return handoff
+
+
+def _renewal_installed_identity(root: Path, transaction: Mapping[str, Any]) -> dict[str, Any]:
+    """Capture verified distribution and launcher bytes for a renewal digest.
+
+    This read-only prerequisite grants no authority. The eventual renewal
+    preview must bind this entire value and recapture it before publication.
+    Reuse the installed rebind verifier without changing its identity contract;
+    renewal additionally hashes the launcher, which pip may omit from RECORD.
+    """
+    from . import lifecycle
+
+    try:
+        identity = lifecycle._installed_identity(root)
+        if identity["executable"] != transaction.get("installed_command"):
+            raise TransactionError("renewal installed command differs from predecessor transaction")
+        executable = Path(identity["executable"])
+        if executable.is_symlink() or not executable.is_file():
+            raise TransactionError("renewal installed command must be a regular file")
+        return {**identity, "executable_sha256": sha256_file(executable)}
+    except (lifecycle.LifecycleError, adoption.AdoptionError, OSError, UnicodeError, ValueError) as exc:
+        raise TransactionError(f"renewal installed identity verification failed: {exc}") from exc
+
+
+def build_renewal_preview(project: Path, operator: str) -> dict[str, Any]:
+    """Bind a proposed fresh epoch without writing or granting any authority.
+
+    Publication must rebuild this preview and require its exact digest. The
+    runtime inventory binds historical evidence as well as the live records;
+    capturing it twice refuses changes during the read-only validation pass.
+    """
+    from . import finalization, lifecycle, planning, qualification, scheduler
+
+    root = adoption.resolve_worktree(project)
+    try:
+        refuse_quarantined_runtime(root)
+    except QuarantinedRuntime as exc:
+        raise TransactionError(str(exc)) from exc
+    name = _operator(operator)
+    try:
+        inventory = lifecycle._runtime_inventory(root)
+        transaction, revoked = _renewal_predecessor_authority(root, name)
+        handoff = _renewal_adoption_lineage(root, transaction)
+        state = planning._renewal_plan_obligations(
+            root, name, transaction_id=transaction["transaction_id"],
+        )
+        baseline = adoption.capture_baseline(root).public()
+        if baseline != transaction["safe_stop"]["baseline"]:
+            raise TransactionError("renewal Git baseline changed after safe stop")
+        if state.get("transaction_recovery_baseline_sha256") != transaction["authority_baseline_sha256"]:
+            raise TransactionError("renewal plan recovery lineage differs from predecessor transaction")
+        released = scheduler.renewal_quiescence(
+            root, name, transaction_id=transaction["transaction_id"], plan_hash=state["plan_hash"],
+        )
+        # These cases remain closed until their receipt/rebase semantics are
+        # integrated. An IDLE label or COMPLETE transition label is not proof.
+        if state["status"] == "IDLE":
+            raise TransactionError("renewal retired-plan proof is not yet supported")
+        if any(row.get("post_qualification_transition") is not None for row in state["step_results"]):
+            raise TransactionError("renewal required-transition receipt validation is not yet supported")
+        final = finalization._final_qualification(state)
+        if final.get("plan_hash") != state["plan_hash"]:
+            raise TransactionError("renewal final qualification belongs to another plan")
+        proof: dict[str, Any] = {"status": state["status"], "final_qualification": final}
+        if state["status"] == "READ_ONLY_COMPLETE":
+            if final["plan_owned_paths"] or final["qualified_path_fingerprints"]:
+                raise TransactionError("renewal read-only completion contains repository mutations")
+            finalization._current_qualified_tree(root, final)
+        else:
+            commit = finalization._commit_record(state)
+            if (
+                commit.get("commit_sha") != baseline["head"]
+                or commit.get("branch") != baseline["branch"]
+                or commit.get("plan_hash") != state["plan_hash"]
+            ):
+                raise TransactionError("renewal commit evidence differs from current Git/plan baseline")
+            finalization._verify_commit(root, state, final, commit["commit_sha"])
+            if finalization._plan_owned_dirty(root, final["plan_owned_paths"]):
+                raise TransactionError("renewal committed paths changed after qualification")
+            proof["commit"] = commit
+            if state["status"] == "PUSHED":
+                push = state.get("push_record")
+                if not isinstance(push, dict) or push.get("schema") != finalization.PUSH_RECORD_SCHEMA:
+                    raise TransactionError("renewal PUSHED predecessor lacks push evidence")
+                body = dict(push)
+                recorded = body.pop("record_sha256", None)
+                if (
+                    recorded != _digest(body) or push.get("commit_sha") != commit["commit_sha"]
+                    or push.get("plan_hash") != state["plan_hash"]
+                    or push.get("commit_record_sha256") != commit["record_sha256"]
+                ):
+                    raise TransactionError("renewal push evidence integrity/lineage changed")
+                # Bind recorded push evidence only; never contact a remote here.
+                proof["push"] = push
+        attribution = qualification._attribution_guard(root)
+        recovery_result = root / adoption.RUNTIME_NAME / RECOVERY_RESULT_RECORD
+        if recovery_result.exists() or recovery_result.is_symlink():
+            raise TransactionError("renewal refuses an unreconciled recovery result")
+        installed = _renewal_installed_identity(root, transaction)
+        epoch = transaction.get("plan_epoch", 0)
+        if type(epoch) is not int or epoch < 0:
+            raise TransactionError("renewal predecessor plan epoch is invalid")
+        preview: dict[str, Any] = {
+            "schema": RENEWAL_PREVIEW_SCHEMA,
+            "operator": name,
+            "worktree": str(root),
+            "predecessor": {"transaction": transaction, "controller": revoked, "plan": state},
+            "adoption": handoff,
+            "recovery_source": transaction["recovery_source"],
+            "terminal_proof": proof,
+            "obligations": {"scheduler": released, "attribution": attribution, "recovery_result": None},
+            "baseline": baseline,
+            "installed_identity": installed,
+            "runtime_inventory": inventory,
+            "successor": {
+                "plan_epoch": epoch + 1,
+                "plan_status": "IDLE",
+                "transaction_state": "ACTIVE",
+                "authority_baseline_sha256": baseline["sha256"],
+                "pre_authority_baseline_sha256": transaction["pre_authority_baseline_sha256"],
+                "controller_execution_enabled": False,
+                "execution_authority_granted": False,
+                "plan_approval": None,
+                "self_development_grant": None,
+                "provider_attribution": None,
+                "historical_path_ownership": [],
+            },
+            "requires_explicit_confirmation": True,
+            "confirmation": "RENEW",
+        }
+        successor_binding = _digest(preview)
+        preview["successor"]["transaction_id"] = "TX-" + successor_binding[:16]
+        preview["successor"]["plan_epoch_id"] = "PE-" + successor_binding
+        if (
+            inventory != lifecycle._runtime_inventory(root)
+            or baseline != adoption.capture_baseline(root).public()
+            or installed != _renewal_installed_identity(root, transaction)
+        ):
+            raise TransactionError("renewal evidence changed while building preview; retry")
+        preview["preview_sha256"] = _digest(preview)
+        return preview
+    except (
+        finalization.FinalizationError, lifecycle.LifecycleError, planning.PlanningError,
+        qualification.QualificationError, scheduler.SchedulerError, RecoveryError,
+        OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError,
+    ) as exc:
+        raise TransactionError(f"renewal preview refused: {exc}") from exc
+
+
+def renew_transaction(project: Path, operator: str, preview_sha256: str, confirmation: str) -> dict[str, Any]:
+    """Archive exact predecessor bytes, then publish an unapproved fresh epoch.
+
+    The ACTIVE transaction is the final publication write. Until it succeeds,
+    the stopped transaction prevents activation. Afterwards the unchanged,
+    revoked controller and IDLE plan still prevent execution. No rollback can
+    resurrect predecessor authority after an interrupted publication.
+    """
+    from . import lifecycle, planning
+
+    if confirmation != "RENEW":
+        raise TransactionError("explicit confirmation required: --confirm RENEW")
+    expected = _require_digest(preview_sha256, "--preview")
+    root = adoption.resolve_worktree(project)
+    try:
+        refuse_quarantined_runtime(root)
+    except QuarantinedRuntime as exc:
+        raise TransactionError(str(exc)) from exc
+    runtime = root / adoption.RUNTIME_NAME
+    if runtime.is_symlink() or not runtime.is_dir():
+        raise TransactionError("renewal requires a regular runtime directory")
+    # Lock the directory inode: no lock file is added to preview evidence.
+    descriptor = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        preview = build_renewal_preview(root, operator)
+        if preview["preview_sha256"] != expected:
+            raise TransactionError("renewal preview is stale; preview and confirm again")
+        predecessor = preview["predecessor"]["transaction"]
+        successor = preview["successor"]
+        archive_name = f"renewal-predecessor-{expected}.json"
+        archive_path = runtime / archive_name
+        if archive_path.exists() or archive_path.is_symlink():
+            raise TransactionError("renewal predecessor archive already exists")
+        files = []
+        for row in preview["runtime_inventory"]:
+            payload = (root / row["path"]).read_bytes()
+            if len(payload) != row["size"] or hashlib.sha256(payload).hexdigest() != row["sha256"]:
+                raise TransactionError("renewal evidence changed while preserving predecessor")
+            files.append({**row, "content_base64": base64.b64encode(payload).decode("ascii")})
+        archive = {
+            "schema": "stygnox_transaction_renewal_archive_v1",
+            "preview": preview, "files": files, "historical_evidence_only": True,
+        }
+        archive["record_sha256"] = _digest(archive)
+        # Recapture all bindings immediately before the first persistence write.
+        if build_renewal_preview(root, operator) != preview:
+            raise TransactionError("renewal evidence changed before preservation")
+        adoption.write_runtime_record(root, archive_name, archive, actor="controller")
+        if _renewal_record(root, archive_name, archive["schema"]) != archive:
+            raise TransactionError("renewal predecessor preservation failed verification")
+        if (
+            lifecycle._runtime_inventory(root, exclude={f"{adoption.RUNTIME_NAME}/{archive_name}"})
+            != preview["runtime_inventory"]
+            or adoption.capture_baseline(root).public() != preview["baseline"]
+            or _renewal_installed_identity(root, predecessor) != preview["installed_identity"]
+        ):
+            raise TransactionError("renewal evidence changed before publication")
+        # Build from an allowlist: grants and provider attribution never carry.
+        transaction = {
+            key: predecessor[key] for key in (
+                "schema", "operator", "handoff_preview_sha256", "pre_authority_baseline_sha256",
+                "journey", "installed_command", "recovery_source", "authority",
+            )
+        }
+        transaction.update({
+            "product_version": PRODUCT.version, "state": "ACTIVE", "opened_at": _now(),
+            "safe_stop": None, "transaction_id": successor["transaction_id"],
+            "plan_epoch": successor["plan_epoch"], "plan_epoch_id": successor["plan_epoch_id"],
+            "authority_baseline_sha256": preview["baseline"]["sha256"],
+            "predecessor_transaction_id": predecessor["transaction_id"],
+            "renewal_preview_sha256": expected, "predecessor_archive": archive_name,
+            "predecessor_archive_sha256": archive["record_sha256"],
+        })
+        transaction["record_sha256"] = _digest(transaction)
+        adoption.write_runtime_record(root, planning.PLAN_RECORD, planning._renewal_epoch(preview), actor="controller")
+        adoption.write_runtime_record(root, TRANSACTION_RECORD, transaction, actor="controller")
+        return {**transaction, "result": "TRANSACTION_RENEWED"}
+    except (OSError, lifecycle.LifecycleError, planning.PlanningError) as exc:
+        raise TransactionError(f"renewal publication refused: {exc}") from exc
+    finally:
+        os.close(descriptor)
 
 
 def successor_transaction(predecessor: Mapping[str, Any], binding: Mapping[str, Any]) -> dict[str, Any]:
@@ -351,6 +819,16 @@ def build_parser() -> argparse.ArgumentParser:
     preview.add_argument("--operator", required=True)
     preview.add_argument("--post-handoff-disposition", required=True, choices=["discard"])
 
+    renewal = sub.add_parser("renew-preview", help="preview a fresh transaction and plan epoch without mutation")
+    project_arg(renewal)
+    renewal.add_argument("--operator", required=True)
+
+    renew = sub.add_parser("renew", help="confirm an exact renewal preview and publish a fresh epoch")
+    project_arg(renew)
+    renew.add_argument("--operator", required=True)
+    renew.add_argument("--preview", required=True)
+    renew.add_argument("--confirm", required=True, help="must be RENEW")
+
     restore = sub.add_parser("restore", help="restore the exact pre-authority baseline after safe stop")
     project_arg(restore)
     restore.add_argument("--operator", required=True)
@@ -372,6 +850,10 @@ def cli_main(argv: Sequence[str] | None = None) -> int:
             result = stop_transaction(args.project, args.operator, args.reason, args.confirm)
         elif args.action == "recover-preview":
             result = build_recovery_preview(args.project, args.operator, args.post_handoff_disposition)
+        elif args.action == "renew-preview":
+            result = build_renewal_preview(args.project, args.operator)
+        elif args.action == "renew":
+            result = renew_transaction(args.project, args.operator, args.preview, args.confirm)
         else:
             result = restore_baseline(
                 args.project,
