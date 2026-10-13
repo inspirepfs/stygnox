@@ -1048,3 +1048,13 @@ separate successor service identity, atomic actual controller admission,
 reboot/crash qualification and explicit operator release. The protected
 original transaction, existing custody slots and eight accepted continuations
 remain unchanged. This does not authorise early `stygnox top` work.
+
+## R3D.2 denied-cutover implementation addendum (13 October 2026)
+
+The exclusive-authority transition must use the trusted root broker and
+append-only protected phase registry, and must not infer predecessor exclusion
+from filesystem ownership, a renamed home path, a process snapshot, or a lock.
+The denied-only service remains outside authorised plan execution. Hostile
+installed qualification, original bootstrap/rebind reconciliation, an explicit
+live cutover approval, and a separate provider release approval are mandatory.
+The formal review before any `stygnox top` development is unchanged.

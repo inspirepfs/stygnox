@@ -1,0 +1,36 @@
+# DISPOSABLE HOST FIXTURE. Not an approved production service.
+# Substitute all placeholders from a validated, root-owned reservation only.
+# Requires dedicated static identity; never use DynamicUser as the identity
+# cannot be consistently pinned to an immutable reservation UID.
+[Unit]
+Description=Stygnox R3D.2 denied-only successor identity (qualification)
+After=stygnox-recovery-broker.service
+Requires=stygnox-recovery-broker.service
+
+[Service]
+Type=simple
+User=@DEDICATED_USER@
+Group=@DEDICATED_GROUP@
+ExecStart=/usr/bin/python3 -I -B @SOURCE@/scripts/stygnox_recovery_denied_worker.py --denied-only --socket /run/stygnox-recovery-broker/denied.sock --transaction @TRANSACTION@ --plan-sha256 @PLAN@ --epoch @EPOCH@ --source-sha256 @SOURCE_SHA256@
+Restart=no
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+[Install]
+# Intentionally no WantedBy. Do not enable this rehearsal unit on the live host.

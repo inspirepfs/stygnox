@@ -7,6 +7,7 @@ no legacy retirement, controller admission, credential read, or provider launch.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -176,6 +177,17 @@ def publish_reservation(root: Path, record: Mapping[str, Any], *, owner: int) ->
         st = os.fstat(root_fd)
         if not stat.S_ISDIR(st.st_mode) or st.st_uid != owner or stat.S_IMODE(st.st_mode) != 0o700:
             _refuse('reservation parent is not private')
+        # The absence check and pending-directory claim are one critical section.
+        # Without this flock, a late publisher can pass both absence checks,
+        # then create .pending after the winner renames it into SLOT. That
+        # strands a marker beside a valid winning record (or can replace it).
+        # Locking the trusted parent inode also serializes distinct processes;
+        # the kernel drops the lock if the publisher crashes, while the
+        # durable .pending marker continues to block an interrupted write.
+        try:
+            fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise EpochReservationRefused('concurrent reservation publisher') from exc
         if os.path.lexists(root / SLOT) or os.path.lexists(root / (SLOT + '.pending')):
             _refuse('duplicate claim or interrupted publication; manual review required')
         os.mkdir(SLOT + '.pending', mode=0o700, dir_fd=root_fd)

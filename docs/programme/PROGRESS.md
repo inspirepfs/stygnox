@@ -525,3 +525,22 @@ Next:
   qualification. No root publication or live predecessor modification performed.
 - `STYX-017`, `STYX-018`, `STYX-019` remain OPEN. Mandatory formal review and
   approval before `stygnox top` remains unchanged.
+
+## 2026-10-13 — Integrated R3D.2 denied-authority cutover source (NOT host closure)
+
+- Baseline reported by operator: `2769e6e` (broker source committed).
+- Added root-private, three-phase, hash-linked authority registry with exact
+  reservation, custody, staged-manifest, transaction, original-inode, epoch,
+  boot, source digest, and dedicated UID binding; every phase remains execution-denied.
+- Denied broker now requires a trusted root phase before startup, and pins
+  kernel SO_PEERCRED UID/PID, process start time, protected worker entrypoint
+  and systemd cgroup for one-winner non-executing attestation.
+- Rejected a hostile concurrency defect during implementation: an ordinary
+  `rename` could overwrite a concurrent final authority record. Final publication
+  uses O_EXCL pending creation plus atomic no-replace hardlink and fsync.
+- Live original workspace is **not** physically retired; original processes
+  retain possible user-owned execution. The new broker must never accept legacy
+  transaction work. Existing Codex sessions remain untouched.
+- Source-only qualification is not real-host commissioning, installed-product
+  rebind, systemd/AppArmor proof, full historical suite, or execution release.
+- STYX-017–019 remain OPEN. No `stygnox top` before formal approved review.

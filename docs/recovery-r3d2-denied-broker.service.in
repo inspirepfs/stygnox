@@ -1,4 +1,8 @@
 # REHEARSAL TEMPLATE ONLY. DO NOT INSTALL/ENABLE ON THE LIVE HOST.
+# Requires a provisioned static stygnox-recovery account and the durable
+# LEGACY_UNTRUSTED authority registry before this broker may start.
+# The only allowed root-ledger write is the exact one-shot denied worker
+# attestation record under recovery-r3d2-exclusive-authority-v1.
 # Requires a provisioned static stygnox-recovery account whose UID is recorded
 # in an independently verified, root-owned, denied-only epoch reservation.
 # Replace placeholders ONLY after disposable Linux test of the actual unit.
@@ -21,7 +25,7 @@ PrivateNetwork=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadOnlyPaths=/var/lib/stygnox
-ReadWritePaths=/run/stygnox-recovery-broker
+ReadWritePaths=/run/stygnox-recovery-broker /var/lib/stygnox/recovery-r3d2-exclusive-authority-v1
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

@@ -5,6 +5,7 @@ import sys
 import os
 from pathlib import Path
 import stat
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -108,6 +109,81 @@ def test_concurrent_claims_only_one_wins(tmp_path):
     winners = [x for x in outcomes if x is not None]
     assert len(winners) == 1
     assert epoch.read_reservation(root, owner=os.getuid())['runtime_epoch'] == winners[0]
+
+
+def test_racing_late_pending_claim_cannot_replace_completed_winner(monkeypatch, tmp_path):
+    """Exercise a delayed mkdir after the prior absence check (real filesystem)."""
+    root = directory(tmp_path)
+    waiting_at_mkdir = threading.Event()
+    release_mkdir = threading.Event()
+    real_mkdir = epoch.os.mkdir
+    results = {}
+
+    def delayed_mkdir(path, mode=0o777, *, dir_fd=None):
+        if (threading.current_thread().name == 'delayed-claim' and
+                path == epoch.SLOT + '.pending'):
+            waiting_at_mkdir.set()
+            if not release_mkdir.wait(timeout=5):
+                raise OSError('test delayed claim timed out')
+        return real_mkdir(path, mode=mode, dir_fd=dir_fd)
+
+    def claim(name, nonce):
+        try:
+            epoch.publish_reservation(root, record(epoch_nonce=nonce), owner=os.getuid())
+            results[name] = nonce
+        except epoch.EpochReservationRefused:
+            results[name] = None
+
+    monkeypatch.setattr(epoch.os, 'mkdir', delayed_mkdir)
+    late = threading.Thread(target=claim, args=('late', '1'*32), name='delayed-claim')
+    rival = threading.Thread(target=claim, args=('rival', '2'*32), name='rival-claim')
+    late.start()
+    try:
+        assert waiting_at_mkdir.wait(timeout=5)
+        rival.start()
+        rival.join(timeout=5)
+    finally:
+        release_mkdir.set()
+        late.join(timeout=5)
+        if rival.ident is not None:
+            rival.join(timeout=5)
+    assert not late.is_alive() and not rival.is_alive()
+    winners = [nonce for nonce in results.values() if nonce is not None]
+    assert len(winners) == 1, results
+    assert epoch.read_reservation(root, owner=os.getuid())['runtime_epoch'] == winners[0]
+    assert not (root / (epoch.SLOT + '.pending')).exists()
+
+
+def test_independent_process_publishers_only_one_wins(tmp_path):
+    """Kernel lock must serialize separate Python processes, not just threads."""
+    if sys.platform != 'linux':
+        pytest.skip('requires Linux directory flock')
+    root = directory(tmp_path)
+    program = (
+        "import json,os,sys\n"
+        "sys.path.insert(0,sys.argv[1])\n"
+        "from stygnox import direct_interruption_epoch_reservation as epoch\n"
+        "try:\n"
+        " epoch.publish_reservation(__import__('pathlib').Path(sys.argv[2]),"
+        " json.loads(sys.argv[3]),owner=int(sys.argv[4]))\n"
+        "except epoch.EpochReservationRefused:\n"
+        " sys.exit(75)\n"
+    )
+    source = str(Path(__file__).resolve().parents[1] / 'src')
+    processes = [
+        subprocess.Popen(
+            [sys.executable, '-I', '-c', program, source, str(root),
+             json.dumps(record(epoch_nonce=f'{i:032x}')), str(os.getuid())],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for i in range(1, 9)
+    ]
+    results = [p.communicate(timeout=20) for p in processes]
+    statuses = [p.returncode for p in processes]
+    assert statuses.count(0) == 1, list(zip(statuses, results))
+    assert statuses.count(75) == 7, list(zip(statuses, results))
+    assert epoch.read_reservation(root, owner=os.getuid())['successor_execution_authorised'] is False
+    assert not (root / (epoch.SLOT + '.pending')).exists()
 
 
 def test_interrupted_pending_is_not_recovered_or_overwritten(tmp_path):

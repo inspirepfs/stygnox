@@ -684,3 +684,15 @@ At every architectural block closure:
 7. commit the reconciled programme state.
 
 A finding must never disappear because a chat ended or context was compacted.
+
+## R3D.2 integrated source qualification addendum — 13 October 2026
+
+- **STYX-017 OPEN:** new broker distrusts old transaction records, but copied
+  legacy binaries and preopened writable old inodes are not globally revoked.
+- **STYX-018 OPEN:** denied-only broker/service attestation is not an admitted
+  continuation controller and grants no provider execution. Host commissioning,
+  product upgrade/rebind and immutable mutation-scope contract remain outstanding.
+- **STYX-019 OPEN:** disposable-host systemd/UID/cgroup/socket, crash/reboot and
+  legacy/copy-source qualification must precede any host-changing cutover.
+
+No finding is closed by these source changes.

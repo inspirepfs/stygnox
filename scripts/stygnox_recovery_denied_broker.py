@@ -31,6 +31,7 @@ def main() -> int:
     from stygnox import direct_interruption_blocked_commissioning as commissioning
     from stygnox import direct_interruption_host_readiness as readiness
     from stygnox import direct_interruption_isolated_workspace as isolated
+    from stygnox import direct_interruption_authority_cutover as authority
 
     verified = gate.installed_artifact_audit(archive=arguments.installed_archive,
                                              source=base,
@@ -44,9 +45,24 @@ def main() -> int:
             rec['installed_source_archive_sha256'] != verified['source_archive_sha256'] or
             rec['installed_source_file_count'] != verified['installed_source_file_count']):
         parser.error('reserved epoch does not match verified installed source or custody')
+    # No socket is published until the root authority registry has explicitly
+    # withdrawn trust from historical files. Service restarts cannot invent it.
+    chain = authority.read_chain(intake.ROOT, owner=0)
+    if len(chain) not in (2, 3):
+        parser.error('root-controlled legacy-untrusted transition not published')
+    head = chain[-1]
+    if (head['reservation_record_sha256'] != rec['record_sha256'] or
+            head['root_custody_record_sha256'] != report['root_custody_record_sha256'] or
+            head['isolated_workspace_manifest_sha256'] != staged['manifest_record_sha256'] or
+            head['installed_source_archive_sha256'] != verified['source_archive_sha256']):
+        parser.error('authority chain differs from immutable protected evidence')
     boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
     context = broker.DeniedContext.from_reservation(rec,
         pinned_source_sha256=verified['source_archive_sha256'], boot_id=boot)
+    from dataclasses import replace
+    context = replace(context, authority_root=intake.ROOT, authority_owner=0,
+                      worker_script=base / 'scripts/stygnox_recovery_denied_worker.py',
+                      worker_unit='stygnox-recovery-denied-worker.service')
     try:
         worker = pwd.getpwuid(context.successor_uid)
     except KeyError:

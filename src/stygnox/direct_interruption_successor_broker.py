@@ -18,6 +18,7 @@ import struct
 from typing import Any, Mapping
 
 from . import direct_interruption_epoch_reservation as reservation
+from . import direct_interruption_authority_cutover as cutover
 
 SCHEMA = 'stygnox_r3d2_denied_broker_v1'
 MAX_REQUEST = 4096
@@ -45,6 +46,10 @@ class DeniedContext:
     source_sha256: str
     host_boot_id: str
     reservation_sha256: str
+    authority_root: Path | None = None
+    authority_owner: int = 0
+    worker_script: Path | None = None
+    worker_unit: str | None = None
 
     @classmethod
     def from_reservation(cls, record: Mapping[str, Any], *,
@@ -116,19 +121,103 @@ def _read_request(connection: socket.socket) -> Any:
     return value
 
 
+def linux_process_start(pid: int, *, proc: Path = Path('/proc')) -> int:
+    """Read kernel start-time field 22; never trust a request-supplied start."""
+    if type(pid) is not int or pid <= 1:
+        _deny('invalid kernel peer PID')
+    try:
+        raw = (proc / str(pid) / 'stat').read_text(encoding='ascii')
+        # comm may contain spaces and parentheses. Parse after the FINAL ')'.
+        close = raw.rfind(')')
+        fields = raw[close + 2:].split()
+        # fields[0] is stat field 3; field 22 is index 19.
+        if close < 0 or len(fields) <= 19:
+            _deny('missing process-start identity')
+        value = int(fields[19])
+        if value <= 0:
+            _deny('invalid process-start identity')
+        return value
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise BrokerRefused('unable to identify peer process start') from exc
+
+
+def verify_peer_service(pid: int, *, script: Path, unit: str,
+                        proc: Path = Path('/proc')) -> None:
+    """Require the exact installed worker script within a pinned systemd unit.
+
+    The script is in a root-owned audited source installation; the dedicated
+    UID cannot rename it or join a root-managed service cgroup on its own.
+    This is not a proof of a provider release or of revoking old FDs.
+    """
+    if (type(pid) is not int or pid <= 1 or not script.is_absolute() or
+            '..' in script.parts or not unit or '/' in unit or
+            not unit.endswith('.service')):
+        _deny('invalid pinned successor service binding')
+    try:
+        raw_cmd = (proc / str(pid) / 'cmdline').read_bytes()
+        argv = raw_cmd.split(b'\0')
+        argv = [part.decode('utf-8') for part in argv if part]
+        if (len(argv) < 4 or argv[1:3] != ['-I', '-B'] or
+                argv[3] != str(script)):
+            _deny('unexpected or copied worker script entrypoint')
+        groups = (proc / str(pid) / 'cgroup').read_text(encoding='utf-8').splitlines()
+        if not any(line.split(':', 2)[-1].rstrip('/').endswith('/'+unit)
+                   for line in groups if ':' in line):
+            _deny('peer not in commissioned systemd service cgroup')
+    except (OSError, UnicodeError) as exc:
+        raise BrokerRefused('cannot verify pinned worker service identity') from exc
+
+
+def _authorize_denied_attestation(*, context: DeniedContext, peer_pid: int,
+                                  peer_uid: int) -> None:
+    """Only root-controlled chained state admits one *denied* successor peer.
+
+    The default pre-cutover broker remains denial-only without an authority
+    claim. A commissioned broker supplies authority_root and requires the
+    durable chain before answering. Never expands RPC operations.
+    """
+    if context.authority_root is None:
+        return
+    chain = cutover.read_chain(context.authority_root, owner=context.authority_owner)
+    head = chain[-1]
+    if (head['reservation_record_sha256'] != context.reservation_sha256 or
+            head['installed_source_archive_sha256'] != context.source_sha256 or
+            head['reserved_epoch'] != context.epoch or
+            head['host_boot_id'] != context.host_boot_id or
+            head['successor_uid'] != context.successor_uid):
+        _deny('root broker authority context changed')
+    if context.worker_script is None or context.worker_unit is None:
+        _deny('commissioned service binding is mandatory')
+    verify_peer_service(peer_pid, script=context.worker_script, unit=context.worker_unit)
+    start = linux_process_start(peer_pid)
+    if len(chain) == 2:
+        cutover.advance(context.authority_root, owner=context.authority_owner,
+                        next_phase=cutover.PHASES[2], pid=peer_pid,
+                        process_start=start)
+    elif len(chain) != 3:
+        _deny('cutover not ready for denied successor')
+    cutover.broker_admission(
+        context.authority_root, owner=context.authority_owner,
+        peer_uid=peer_uid, peer_pid=peer_pid, peer_start=start,
+        boot_id=context.host_boot_id, transaction_id=context.transaction_id,
+        plan_hash=context.plan_sha256, source_sha256=context.source_sha256,
+        runtime_epoch=context.epoch)
+
+
 def handle_connection(connection: socket.socket, context: DeniedContext) -> None:
     """Never advertise success to invalid/untrusted callers; no sensitive state."""
     with connection:
         try:
-            _pid, uid, _gid = peer_identity(connection)
+            pid, uid, _gid = peer_identity(connection)
             if uid != context.successor_uid:
                 return  # No root-owned state or detail is returned to old UID.
             body = _read_request(connection)
             reply = context.answer(peer_uid=uid, message=body)
+            _authorize_denied_attestation(context=context, peer_pid=pid, peer_uid=uid)
             if len(reply) > MAX_REPLY:
                 _deny('oversized reply')
             connection.sendall(reply)
-        except (BrokerRefused, TimeoutError, socket.timeout, OSError):
+        except (BrokerRefused, cutover.AuthorityCutoverRefused, TimeoutError, socket.timeout, OSError):
             return
 
 
