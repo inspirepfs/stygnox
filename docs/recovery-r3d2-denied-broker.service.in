@@ -1,0 +1,33 @@
+# REHEARSAL TEMPLATE ONLY. DO NOT INSTALL/ENABLE ON THE LIVE HOST.
+# Requires a provisioned static stygnox-recovery account whose UID is recorded
+# in an independently verified, root-owned, denied-only epoch reservation.
+# Replace placeholders ONLY after disposable Linux test of the actual unit.
+[Unit]
+Description=StygNox denied-only transaction broker (qualification fixture)
+After=local-fs.target
+ConditionPathExists=/var/lib/stygnox/recovery-r3d2-successor-epoch-reserved-v1/epoch-reservation.json
+
+[Service]
+Type=simple
+User=root
+Group=stygnox-recovery
+RuntimeDirectory=stygnox-recovery-broker
+RuntimeDirectoryMode=0710
+ExecStart=/usr/bin/python3 -I -B @SOURCE@/scripts/stygnox_recovery_denied_broker.py --serve-denied-only --installed-source @SOURCE@ --installed-archive @ARCHIVE@ --source-sha256 @SHA256@ --socket-path /run/stygnox-recovery-broker/denied.sock
+Restart=no
+UMask=0177
+NoNewPrivileges=yes
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/stygnox
+ReadWritePaths=/run/stygnox-recovery-broker
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+
+[Install]
+# Intentionally no WantedBy; this is NOT a production enabled service.
