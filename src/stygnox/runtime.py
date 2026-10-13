@@ -36,6 +36,26 @@ class RuntimeContractError(ValueError):
     """A contract input is absent, ambiguous, substituted, or malformed."""
 
 
+class RuntimeRecordMissing(RuntimeContractError):
+    """A caller-requested optional runtime record does not exist."""
+
+
+_MAX_RUNTIME_JSON_BYTES = 64 * 1024 * 1024
+
+
+def _reject_json_constant(value: str) -> None:
+    _refuse(f"runtime JSON contains non-finite constant: {value}")
+
+
+def _unique_json_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            _refuse(f"runtime JSON contains duplicate key: {key}")
+        result[key] = value
+    return result
+
+
 def _refuse(message: str) -> None:
     raise RuntimeContractError(message)
 
@@ -181,6 +201,70 @@ class SafeRelativePath:
         except OSError as exc:
             raise RuntimeContractError("runtime path is unavailable") from exc
         return candidate
+
+
+def read_json_object(
+    root: CanonicalProjectRoot,
+    relative: SafeRelativePath,
+    *,
+    required: bool = True,
+) -> dict[str, Any] | None:
+    """Read one project-local JSON object without following substituted paths.
+
+    This is a read-only seam: it neither discovers a project root nor infers
+    authority from a record.  Callers retain ownership of record schemas and
+    authority decisions after this function has established the exact root and
+    regular-file path from which their bytes were read.
+    """
+    if not isinstance(root, CanonicalProjectRoot) or not isinstance(relative, SafeRelativePath):
+        _refuse("runtime JSON read requires canonical root and safe relative path")
+    _absolute_without_symlink(root.path, "project root", directory=True)
+    # O_NONBLOCK prevents a substituted FIFO from hanging a controller read
+    # before fstat can reject the non-regular descriptor.
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(root.path, flags | os.O_DIRECTORY)
+        for index, part in enumerate(relative.value.parts):
+            parent = descriptor
+            descriptor = os.open(
+                part,
+                flags | (os.O_DIRECTORY if index < len(relative.value.parts) - 1 else 0),
+                dir_fd=parent,
+            )
+            os.close(parent)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            _refuse("runtime JSON path must name a regular file")
+        if info.st_size > _MAX_RUNTIME_JSON_BYTES:
+            _refuse("runtime JSON record exceeds size limit")
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = None
+            raw = stream.read(_MAX_RUNTIME_JSON_BYTES + 1)
+        if len(raw) > _MAX_RUNTIME_JSON_BYTES:
+            _refuse("runtime JSON record exceeds size limit")
+    except FileNotFoundError as exc:
+        if not required:
+            return None
+        raise RuntimeRecordMissing("runtime JSON record is missing") from exc
+    except OSError as exc:
+        raise RuntimeContractError("runtime JSON path is unavailable or substituted") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_unique_json_object_pairs,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeContractError("runtime JSON record is malformed") from exc
+    if not isinstance(value, dict):
+        _refuse("runtime JSON record must be an object")
+    return value
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from . import adoption
+from . import adoption, runtime
 from .direct_interruption_execution_guard import QuarantinedRuntime, refuse_quarantined_runtime
 from .product import PRODUCT
 from .recovery import (
@@ -72,15 +72,18 @@ def _require_digest(value: str, option: str) -> str:
 
 
 def _runtime_json(root: Path, name: str, *, required: bool = True) -> dict[str, Any] | None:
-    path = root / adoption.RUNTIME_NAME / name
-    if not path.is_file():
-        if required:
-            raise TransactionError(f"required Stygnox runtime record is missing: {name}")
-        return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value = runtime.read_json_object(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(f"{adoption.RUNTIME_NAME}/{name}"),
+            required=required,
+        )
+    except runtime.RuntimeRecordMissing as exc:
+        raise TransactionError(f"required Stygnox runtime record is missing: {name}") from exc
+    except runtime.RuntimeContractError as exc:
         raise TransactionError(f"invalid Stygnox runtime record {name}: {exc}") from exc
+    if value is None:
+        return None
     if not isinstance(value, dict):
         raise TransactionError(f"Stygnox runtime record {name} must be an object")
     return value
@@ -109,14 +112,10 @@ def _transaction(root: Path, *, required: bool = True) -> dict[str, Any] | None:
 
 def _renewal_record(root: Path, name: str, schema: str) -> dict[str, Any]:
     """Read a required, integrity-bound renewal input without repairing it."""
-    runtime = root / adoption.RUNTIME_NAME
-    path = runtime / name
-    if runtime.is_symlink() or path.is_symlink() or not path.is_file():
-        raise TransactionError(f"renewal requires a regular predecessor record: {name}")
     try:
         record = _runtime_json(root, name)
-    except UnicodeError as exc:
-        raise TransactionError(f"invalid renewal record encoding: {name}") from exc
+    except TransactionError as exc:
+        raise TransactionError(f"renewal requires a regular predecessor record: {name}: {exc}") from exc
     assert record is not None
     if record.get("schema") != schema:
         raise TransactionError(f"unsupported renewal predecessor schema: {name}")
@@ -273,12 +272,12 @@ def _renewal_adoption_lineage(root: Path, transaction: Mapping[str, Any]) -> dic
     """
     from . import recovery
 
-    runtime = root / adoption.RUNTIME_NAME
-    path = runtime / "adoption.json"
-    if runtime.is_symlink() or path.is_symlink() or not path.is_file():
-        raise TransactionError("renewal requires a regular adoption handoff")
+    runtime_dir = root / adoption.RUNTIME_NAME
     try:
-        handoff = _load_adoption(root)
+        try:
+            handoff = _load_adoption(root)
+        except TransactionError as exc:
+            raise TransactionError("renewal requires a regular adoption handoff") from exc
         for key, transaction_key in (
             ("operator", "operator"), ("preview_sha256", "handoff_preview_sha256"),
             ("baseline_sha256", "pre_authority_baseline_sha256"), ("journey", "journey"),
@@ -310,7 +309,7 @@ def _renewal_adoption_lineage(root: Path, transaction: Mapping[str, Any]) -> dic
         if any(key not in source or source[key] != original.get(key) for key in keys):
             raise TransactionError("renewal adoption recovery source changed")
         if transaction["journey"] != "dirty":
-            directory = runtime / recovery.INTERNAL_RECOVERY_DIR
+            directory = runtime_dir / recovery.INTERNAL_RECOVERY_DIR
             if directory.is_symlink() or not directory.is_dir():
                 raise TransactionError("renewal requires a regular recovery directory")
             for filename in (recovery.INTERNAL_METADATA, recovery.INTERNAL_ARCHIVE, recovery.INTERNAL_INDEX):

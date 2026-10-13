@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from pathlib import Path, PurePosixPath
+import subprocess
 import sys
 
 import pytest
@@ -11,7 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from stygnox import runtime
+from stygnox import adoption, runtime, transactions
 
 
 EPOCH = "0123456789abcdef0123456789abcdef"
@@ -176,3 +179,83 @@ def test_sealing_rejects_stale_installed_controller(disposable_runtime):
     controller_path.write_bytes(b"modified after capture")
     with pytest.raises(runtime.RuntimeContractError, match="controller bytes changed"):
         runtime.seal(runtime.AuthorityRecord("A", "ACTIVE"), runtime=identity, controller=controller)
+
+
+def test_adoption_and_transactions_read_a_normal_runtime_record_through_the_runtime_seam(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    record = root / adoption.RUNTIME_NAME / "adoption.json"
+    record.parent.mkdir()
+    record.write_text('{"schema":"stygnox_adoption_handoff_v1","reserve_percent":12.5}', encoding="utf-8")
+
+    canonical_root = adoption.resolve_worktree(root)
+
+    assert canonical_root == root
+    assert transactions._runtime_json(canonical_root, "adoption.json") == {
+        "schema": "stygnox_adoption_handoff_v1",
+        "reserve_percent": 12.5,
+    }
+
+
+def test_adoption_refuses_substituted_project_identity_and_transactions_refuse_record_substitution(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    alias = tmp_path / "substituted-project"
+    alias.symlink_to(root, target_is_directory=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"schema":"stygnox_adoption_handoff_v1"}', encoding="utf-8")
+    runtime_dir = root / adoption.RUNTIME_NAME
+    runtime_dir.mkdir()
+    (runtime_dir / "adoption.json").symlink_to(outside)
+
+    with pytest.raises(adoption.AdoptionError, match="project root"):
+        adoption.resolve_worktree(alias)
+    with pytest.raises(transactions.TransactionError, match="substituted"):
+        transactions._runtime_json(root, "adoption.json")
+
+
+def test_runtime_seam_refuses_fifo_without_blocking(tmp_path: Path):
+    root = tmp_path / "project"
+    runtime_dir = root / ".stygnox"
+    runtime_dir.mkdir(parents=True)
+    fifo = runtime_dir / "transaction.json"
+    os.mkfifo(fifo)
+    with pytest.raises(runtime.RuntimeContractError, match="regular file"):
+        runtime.read_json_object(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(".stygnox/transaction.json"),
+        )
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"state": "ACTIVE", "state": "STOPPED"}',
+    b'{"usage": NaN}',
+    b'{"usage": Infinity}',
+    b'{"nested": {"id": "a", "id": "b"}}',
+])
+def test_runtime_seam_refuses_ambiguous_json(tmp_path: Path, raw: bytes):
+    root = tmp_path / "project"
+    runtime_dir = root / ".stygnox"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "transaction.json").write_bytes(raw)
+    with pytest.raises(runtime.RuntimeContractError, match="duplicate key|non-finite"):
+        runtime.read_json_object(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(".stygnox/transaction.json"),
+        )
+
+
+def test_runtime_seam_rejects_oversize_json_before_read(tmp_path: Path):
+    root = tmp_path / "project"
+    runtime_dir = root / ".stygnox"
+    runtime_dir.mkdir(parents=True)
+    record = runtime_dir / "transaction.json"
+    with record.open("wb") as stream:
+        stream.truncate(64 * 1024 * 1024 + 1)
+    with pytest.raises(runtime.RuntimeContractError, match="size limit"):
+        runtime.read_json_object(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(".stygnox/transaction.json"),
+        )

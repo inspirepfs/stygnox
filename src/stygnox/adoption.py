@@ -26,7 +26,7 @@ import subprocess
 import sys
 from typing import Any
 
-from . import execution_policy
+from . import execution_policy, runtime
 from .product import PRODUCT
 
 
@@ -134,12 +134,15 @@ def _git(candidate: Path, *args: str, check: bool = True, text: bool = False) ->
 
 
 def resolve_worktree(candidate: Path) -> Path:
-    requested = candidate.expanduser().resolve()
+    try:
+        requested = runtime.CanonicalProjectRoot.from_path(candidate.expanduser()).path
+    except runtime.RuntimeContractError as exc:
+        raise AdoptionError(f"invalid project root: {exc}") from exc
     result = _git(requested, "rev-parse", "--show-toplevel", text=True)
-    root = Path(result.stdout.strip()).resolve()
-    if not root.is_dir():
-        raise AdoptionError(f"Git worktree does not exist: {root}")
-    return root
+    try:
+        return runtime.CanonicalProjectRoot.from_path(Path(result.stdout.strip())).path
+    except runtime.RuntimeContractError as exc:
+        raise AdoptionError(f"Git worktree has an invalid project root: {exc}") from exc
 
 
 def _file_record(path: Path, relative: str) -> dict[str, str]:
