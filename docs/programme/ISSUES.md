@@ -611,6 +611,11 @@ transaction-bound runtime epoch, immutable plan/scope and atomic admission
 are not commissioned or qualified. Reconcile with existing STYX-005; do not
 execute historical reconstructed source or replay eight accepted continuations.
 
+**13 October source-only progress:** Exact denied-only epoch reservation and
+one-winner durable publication primitive added. This does not commission the
+successor controller or satisfy the predecessor-exclusion and host admission
+requirements; **STYX-018 remains OPEN**.
+
 ---
 
 ## STYX-019 — Hostile Linux Cutover Qualification Missing

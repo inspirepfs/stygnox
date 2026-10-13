@@ -1038,3 +1038,13 @@ Then expand safely into:
 - additional operator intelligence.
 
 The authority foundation comes first.
+
+## R3D.2 recovery qualification clarification (13 October 2026)
+
+A durable root-controlled *epoch reservation* is not an installed-controller
+rebind, host-enforced predecessor exclusion, or executor admission. R3D.2
+continues to require a reviewed original-workspace retirement protocol,
+separate successor service identity, atomic actual controller admission,
+reboot/crash qualification and explicit operator release. The protected
+original transaction, existing custody slots and eight accepted continuations
+remain unchanged. This does not authorise early `stygnox top` work.

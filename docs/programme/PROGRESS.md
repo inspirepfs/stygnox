@@ -510,3 +510,18 @@ Next:
   from the recovery staging work.
 - No implementation of `stygnox top` before formal review and explicit
   operator approval, following R3D.3.
+
+## 2026-10-13 — R3D.2 source-only epoch reservation (NOT cutover)
+
+- Working baseline `89a0fb6` qualifies the denied-only cutover gate and
+  records `STYX-017`–`STYX-019` as open.
+- Added a root-private, one-shot, single-winner epoch **reservation** primitive
+  bound to transaction `TX-a6379f065ce68138`, approved plan digest, historical
+  eight continuations, custody/workspace digests, original inode, successor
+  UID, host boot ID and verified installed-source digest.
+- Reservation cannot enable a controller, import credentials, launch a provider,
+  infer predecessor exclusion or convert historical progress to authority.
+- Source and disposable-container hostile tests are not production cutover
+  qualification. No root publication or live predecessor modification performed.
+- `STYX-017`, `STYX-018`, `STYX-019` remain OPEN. Mandatory formal review and
+  approval before `stygnox top` remains unchanged.
