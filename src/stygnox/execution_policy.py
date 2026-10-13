@@ -352,6 +352,9 @@ def show_policy(project: Path) -> dict[str, Any]:
                 and evidence.get("selected_model") == policy.get("model")
                 and evidence.get("selected_effort") == policy.get("effort")
             )
+    if approved and policy.get("provider") and not provider_catalog_bound:
+        from . import provider_release
+        provider_catalog_bound = provider_release.planning_ready(root)
     return {
         "schema": "stygnox_execution_policy_status_v1",
         "product_version": PRODUCT.version,

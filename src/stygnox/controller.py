@@ -284,6 +284,7 @@ def activate_controller(project: Path, operator: str, confirmation: str) -> dict
         if existing.get("transaction_id") == tx.get("transaction_id"):
             return {**existing, "result": "CONTROLLER_ALREADY_ACTIVE"}
         raise ControllerError("a controller is already active for a different transaction")
+    from . import provider_release
     body: dict[str, Any] = {
         "schema": CONTROLLER_SCHEMA,
         "product_version": PRODUCT.version,
@@ -302,6 +303,7 @@ def activate_controller(project: Path, operator: str, confirmation: str) -> dict
         "provider_execution_ready": bool(
             policy_status["policy"].get("provider") and policy_status["policy"].get("model")
             and policy_status.get("approved") and policy_status.get("provider_catalog_bound")
+            and not provider_release.planning_ready(root)
         ),
     }
     body["record_sha256"] = _digest(body)
@@ -451,6 +453,9 @@ def build_run_preview(
         raise ControllerError("provider execution refused: non-neutral policy is not reviewer-approved")
     if not policy_status.get("provider_catalog_bound"):
         raise ControllerError("provider execution refused: model catalogue binding is absent")
+    from . import provider_release
+    if provider_release.planning_ready(root):
+        raise ControllerError("02N planning-only release cannot authorise a controller turn")
     current = adoption.capture_baseline(root).public()
     objective_value = _objective(objective)
     plan_binding = None

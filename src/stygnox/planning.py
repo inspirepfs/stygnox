@@ -1302,7 +1302,9 @@ def propose_plan(
     except provider_usage.ProviderUsageError as exc:
         raise PlanningError(str(exc)) from exc
     try:
-        provider = provider_codex.execute_structured(
+        from . import provider_release
+        with provider_release.approved_proposal_turn(root, expected):
+            provider = provider_codex.execute_structured(
             cwd=root,
             prompt=_planning_prompt(str(preview["goal"]), minimum, maximum, preview.get("retirement_context")),
             model=str(preview["model"]),

@@ -43,15 +43,16 @@ class ProviderError(RuntimeError):
     """Fail-closed installed-provider error."""
 
 
-def _deny_recovery_provider_dispatch() -> None:
-    """02N repair-branch interlock: there is no provider release authority.
+def _deny_recovery_provider_dispatch(cwd: Path, purpose: str) -> None:
+    """02N remains deny-by-default; release requires exact local transaction binding.
 
-    Guard the three real subprocess launch sites, not a standalone probe or
-    an environment-controlled optional flag. Normal provider functionality
-    stays disabled in this recovery candidate until a separately reviewed,
-    transaction-bound dispatch replaces this deliberate denial. This does
-    NOT constrain the independently installed R3D.1 predecessor.
+    This does NOT constrain a separately installed R3D.1 predecessor. Only
+    catalogue metadata and confirmed read-only planning are releasable here;
+    write turns, reset-credit consumption and old worktrees stay denied.
     """
+    from . import provider_release
+    if provider_release.dispatch_allowed(cwd, purpose):
+        return
     raise ProviderError('02N recovery provider dispatch blocked: successor not authorised')
 
 
@@ -143,7 +144,7 @@ def _normalise_model_catalog(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 def model_catalog(cwd: Path, *, timeout: float = APP_SERVER_TIMEOUT_SECONDS) -> dict[str, Any]:
     """Read the supported Codex model/effort catalogue without executing a model turn."""
-    _deny_recovery_provider_dispatch()
+    _deny_recovery_provider_dispatch(cwd, "catalogue")
     codex = shutil.which("codex")
     if not codex:
         raise ProviderError("reviewed provider 'codex' is not installed or not on PATH")
@@ -286,7 +287,7 @@ def _normalise_rate_limits(raw: Mapping[str, Any], model: str | None = None) -> 
 
 
 def _app_server_request(cwd: Path, method: str, *, params: Mapping[str, Any] | None = None, timeout: float = APP_SERVER_TIMEOUT_SECONDS) -> dict[str, Any]:
-    _deny_recovery_provider_dispatch()
+    _deny_recovery_provider_dispatch(cwd, "quota" if method == "account/rateLimits/read" else "forbidden")
     codex = shutil.which("codex")
     if not codex:
         raise ProviderError("reviewed provider 'codex' is not installed or not on PATH")
@@ -477,7 +478,13 @@ def _metrics_from_jsonl(output: str) -> dict[str, int | float]:
 
 
 def _run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-    _deny_recovery_provider_dispatch()
+    if len(args) >= 2 and args[1] == "sandbox":
+        purpose = "sandbox"
+    elif "--sandbox" in args and args.index("--sandbox") + 1 < len(args) and args[args.index("--sandbox") + 1] == "read-only":
+        purpose = "read-only-turn"
+    else:
+        purpose = "forbidden"
+    _deny_recovery_provider_dispatch(cwd, purpose)
     return subprocess.run(
         args,
         cwd=cwd,

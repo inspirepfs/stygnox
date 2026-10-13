@@ -59,6 +59,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if namespace.command == "profile":
         from .profile import cli_main
         return cli_main(namespace.args)
+    if namespace.command == "provider-release":
+        from .provider_release import cli_main
+        return cli_main(namespace.args)
     if namespace.command in {"execution-policy", "policy"}:
         from .execution_policy import cli_main
         return cli_main(namespace.args)
