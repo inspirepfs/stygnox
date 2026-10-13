@@ -489,3 +489,24 @@ Repaired wheel:
 Next:
 
 > Establish fresh native authority from the repaired installed artifact and resume R3D.1 without redesigning the accepted five-stage R3D architecture.
+
+
+## 2026-10-13 — R3D.2 recovery addendum (NOT stage closure)
+
+- Original `TX-a6379f065ce68138` at Step 2 of 4; one Step 1 result and eight
+  accepted continuations protected and not replayed.
+- Root custody published as execution denied; root storage 0700, record 0400.
+  Independent-inode isolated workspace staged and verified as denied.
+- Source `a04f001`; protected source archive SHA-256:
+  `d1a97f8e6263339c6a360c5097cb471469bbe78cd5eee3372c212a1e446ed991`.
+- Operator expanded source suite: 155 passed, 5 skipped, 14 subtests passed;
+  root/private host and reboot qualification outstanding.
+- Root audit returned `EXCLUSIVE_CUSTODY_NOT_PROVED`, exit 75.
+- Original user-owned checkout remains independently runnable. Successor
+  service identity, runtime epoch and atomic admission not commissioned.
+- `STYX-017`–`STYX-019` recorded; STYX-014/015/016 are older, distinct
+  programme findings and are preserved unchanged.
+- R3D.1 installed rebind and bootstrap-provenance status must not be inferred
+  from the recovery staging work.
+- No implementation of `stygnox top` before formal review and explicit
+  operator approval, following R3D.3.

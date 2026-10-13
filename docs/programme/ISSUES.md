@@ -581,6 +581,53 @@ Locked R3D.4 amendment §§9A, 9B, 9C and 10; commit `4b4bafa`.
 
 ---
 
+## STYX-017 — Legacy Execution Remains Independent of Root Custody
+
+**Status:** OPEN
+**Target:** R3D.2 recovery / R3D.3 boundary
+**Severity:** BLOCKING
+
+Published root-private custody and denied-only isolated worktree have not
+excluded the legacy controller. Original project remains UID 1000-owned under
+user-controlled `/home`. C3f retirement requires root-controlled ancestors and
+cannot be applied to this checkout as-is. Copied binaries, preopened FDs,
+path recreation, credentials and reboot require an OS-enforced policy.
+
+**Disposition:** No exclusion claimed. The original workspace must not be
+mutated without a reviewed, explicitly authorised, hostile-tested cutover.
+Preserve existing unrelated Codex sessions and all recovery evidence.
+
+---
+
+## STYX-018 — Independent Successor Admission Is Missing
+
+**Status:** OPEN
+**Target:** R3D.1/R3D.2 recovery
+**Severity:** BLOCKING
+
+Protected source `a04f001` and staged workspace remain execution-denied.
+Exact installed successor identity, independent unprivileged service,
+transaction-bound runtime epoch, immutable plan/scope and atomic admission
+are not commissioned or qualified. Reconcile with existing STYX-005; do not
+execute historical reconstructed source or replay eight accepted continuations.
+
+---
+
+## STYX-019 — Hostile Linux Cutover Qualification Missing
+
+**Status:** OPEN
+**Target:** R3D.2 recovery / R3D.3
+**Severity:** HIGH
+
+Operator source tests for `a04f001` returned 155 passed, 5 skipped,
+14 subtests passed; privileged host fixtures remain unqualified. Qualify
+competing controllers, old/copy binaries, preopened FDs, UID isolation,
+mount/path aliases, integrity failure, reboot and crash on a disposable host.
+Do not run disruptive privileged hostile tests on `k3s-tanix85` merely to
+turn skips green.
+
+---
+
 # New Finding Template
 
 Copy for each material discovery:

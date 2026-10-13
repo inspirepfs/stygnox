@@ -400,6 +400,17 @@ where supported, without implying that absence of events proves process death.
 Record unresolved streaming/replay gaps for R3D.4 rather than widening R3D.3
 into a terminal UI project.
 
+## Mandatory formal architecture gate before any `stygnox top` implementation
+
+The existing TOP-00 programme amendment records requirements, **not approval
+to implement**. After R3D.1–R3D.3 qualification, a written formal architecture
+and programme review must assess runtime/controller authority, event/snapshot
+readiness, live streaming, CLI/TUI responsibility, data privacy, real logs,
+interruption and failure, unrepaired operator features, hostile live tests,
+Controller API / Web UI compatibility, alternatives, scope, dependencies and
+sequencing. **Explicit operator approval** is mandatory. Neither passing
+regressions nor pre-existing TOP requirements authorises TOP development.
+
 ## R3D.4 — Native Operator Experience Parity
 
 Restore the proven human operator experience natively.

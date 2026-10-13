@@ -1,0 +1,38 @@
+# Illustration for disposable host qualification ONLY.
+# @@SOURCE@@ must be replaced by an exact, root-owned, read-only installed
+# source directory from a future committed/verified archive (NOT a Git tree).
+# Do not place this template in /etc/systemd/system or enable on the live host.
+[Unit]
+Description=Stygnox R3D.2 unprivileged denied-only service identity probe
+ConditionPathIsDirectory=@@SOURCE@@
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+PrivateUsers=yes
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+UMask=0077
+RuntimeDirectory=stygnox-r3d2-denied-probe
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/python3 -I -B @@SOURCE@@/scripts/stygnox_recovery_successor_denied_probe.py --probe-denied-only
+SuccessExitStatus=75
+RemainAfterExit=no
+Restart=no
+TimeoutStartSec=10s
