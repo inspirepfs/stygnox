@@ -318,6 +318,56 @@ def read_authority_json(
     return value
 
 
+def authority_record_names(
+    root: CanonicalProjectRoot,
+    relative_directory: SafeRelativePath,
+    *,
+    prefix: str,
+    suffix: str,
+) -> tuple[str, ...]:
+    """Return matching direct record names without making an authority decision.
+
+    This is deliberately limited to safe discovery: it validates the canonical
+    root and directory without following a substituted path, then returns a
+    stable set of *names*.  It neither opens a record nor supplies chronology,
+    receipt ordering, or an index.  Each returned name must still be read with
+    :func:`read_authority_json` and validated by its domain owner.
+
+    A missing runtime directory is bootstrap-compatible and has no records.
+    Once the directory exists, a symlink, non-directory, or inaccessible
+    substitute is a contract failure.  Step 4 owns any future durable receipt
+    index; filename discovery is not ordering or authority evidence.
+    """
+    if not isinstance(root, CanonicalProjectRoot) or not isinstance(relative_directory, SafeRelativePath):
+        _refuse("authority record discovery requires canonical root and safe directory")
+    if not isinstance(prefix, str) or not isinstance(suffix, str) or "/" in prefix or "/" in suffix:
+        _refuse("authority record discovery requires plain filename bounds")
+    _absolute_without_symlink(root.path, "project root", directory=True)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_DIRECTORY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(root.path, flags)
+        for part in relative_directory.value.parts:
+            parent = descriptor
+            descriptor = os.open(part, flags, dir_fd=parent)
+            os.close(parent)
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):  # pragma: no cover - O_DIRECTORY enforces this.
+            _refuse("authority record directory must be a directory")
+        return tuple(sorted(
+            name for name in os.listdir(descriptor)
+            if name.startswith(prefix) and name.endswith(suffix)
+        ))
+    except FileNotFoundError:
+        return ()
+    except OSError as exc:
+        raise RuntimeContractError("authority record directory is unavailable or substituted") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeIdentity:
     """The sole binding for a project root and its opaque runtime epoch."""

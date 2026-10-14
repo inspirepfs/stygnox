@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from stygnox import adoption, controller, planning, runtime, scheduler, transactions
+from stygnox import adoption, controller, planning, qualification, reconciliation, runtime, scheduler, transactions
 
 
 EPOCH = "0123456789abcdef0123456789abcdef"
@@ -392,3 +392,179 @@ def test_controller_recovery_receipt_with_invalid_digest_refuses(tmp_path: Path)
     }), encoding="utf-8")
     with pytest.raises(scheduler.SchedulerError, match="integrity"):
         scheduler._controller_receipt(root, preview)
+
+
+def _controller_receipt(*, epoch: str | None = None) -> dict[str, object]:
+    body: dict[str, object] = {
+        "schema": controller.RUN_RESULT_SCHEMA,
+        "preview_sha256": "c" * 64,
+        "operator": "Operator One",
+        "transaction_id": "TX-disposable",
+        "plan_binding": {"plan_hash": "d" * 64, "current_step": 1},
+        "actual_delta": {"paths": []},
+    }
+    if epoch is not None:
+        body["runtime_epoch"] = epoch
+    body["record_sha256"] = controller._digest(body)
+    return body
+
+
+def test_qualification_receipt_discovery_preserves_bootstrap_and_absence(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+
+    assert qualification._controller_receipts(root) == []
+    receipt = _controller_receipt()
+    _write_runtime_record(root, "controller-run-cccccccccccccccc.json", receipt)
+
+    assert qualification._controller_receipts(root) == [receipt]
+
+
+@pytest.mark.parametrize(("mutation", "message"), [
+    ("wrong-epoch", "runtime epoch"),
+    ("symlink", "substituted|unavailable"),
+    ("malformed", "malformed|duplicate key"),
+])
+def test_qualification_receipt_discovery_refuses_unproven_runtime_evidence(tmp_path: Path, mutation: str, message: str):
+    root = tmp_path / "project"
+    root.mkdir()
+    identity = runtime.RuntimeIdentity.create(runtime.CanonicalProjectRoot.from_path(root), EPOCH)
+    _write_runtime_record(root, runtime.RUNTIME_IDENTITY_RECORD, identity.to_mapping())
+    name = "controller-run-cccccccccccccccc.json"
+    _write_runtime_record(root, name, _controller_receipt(epoch=EPOCH))
+
+    path = root / adoption.RUNTIME_NAME / name
+    if mutation == "wrong-epoch":
+        _write_runtime_record(root, name, _controller_receipt(epoch="f" * 32))
+    elif mutation == "symlink":
+        outside = tmp_path / "receipt.json"
+        outside.write_text(json.dumps(_controller_receipt(epoch=EPOCH)), encoding="utf-8")
+        path.unlink()
+        path.symlink_to(outside)
+    else:
+        path.write_bytes(b'{"schema":"first","schema":"second"}')
+
+    with pytest.raises(qualification.QualificationError, match=message):
+        qualification._controller_receipts(root)
+
+
+def test_qualification_does_not_treat_wrong_controller_lineage_as_current_authority(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    receipt = _controller_receipt()
+    receipt.update({
+        "operator": "Other Operator",
+        "transaction_id": "TX-other",
+        "plan_binding": {"plan_hash": "d" * 64, "current_step": 1, "plan_record_sha256": "e" * 64},
+        "before_baseline_sha256": "a" * 64,
+        "after_baseline_sha256": "b" * 64,
+        "next_action": "turn-complete",
+        "human_gate": None,
+    })
+    receipt["record_sha256"] = controller._digest({key: value for key, value in receipt.items() if key != "record_sha256"})
+    _write_runtime_record(root, "controller-run-cccccccccccccccc.json", receipt)
+
+    with pytest.raises(qualification.QualificationError, match="no exact completed controller turn"):
+        qualification._step_receipt(root, {
+            "current_step": 1,
+            "plan_hash": "d" * 64,
+            "record_sha256": "e" * 64,
+            "step_authority_baseline_sha256": "a" * 64,
+            "operator": "Operator One",
+            "transaction_id": "TX-current",
+        }, "b" * 64)
+
+
+def test_reconciliation_receipt_discovery_refuses_substituted_current_evidence(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    runtime_dir = root / adoption.RUNTIME_NAME
+    runtime_dir.mkdir()
+    name = "controller-run-dddddddddddddddd.json"
+    outside = tmp_path / "receipt.json"
+    outside.write_text("{}", encoding="utf-8")
+    (runtime_dir / name).symlink_to(outside)
+
+    with pytest.raises(reconciliation.ReconciliationError, match="controller receipt.*substituted|controller receipt.*unavailable"):
+        reconciliation._authorised_adopted_delta(
+            root,
+            {"plan_hash": "d" * 64, "current_step": 1, "transaction_id": "TX-disposable"},
+            {"disposition": reconciliation.ADOPTED, "classification": "retired-carry-forward", "path": "README.md", "inherited_fingerprint": "before"},
+            {"path": "README.md", "content_fingerprint": "after"},
+        )
+
+
+def test_reconciliation_refuses_corrupt_competing_receipt_after_valid_match(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    valid = _controller_receipt()
+    valid.update({
+        "actual_delta": {"paths": [{
+            "path": "README.md", "before_fingerprint": "before",
+            "after_fingerprint": "after", "kind": "modified",
+        }]},
+        "next_action": "qualification-required",
+        "provider_result": {"status": "PASS"},
+    })
+    valid["record_sha256"] = controller._digest({k: v for k, v in valid.items() if k != "record_sha256"})
+    _write_runtime_record(root, "controller-run-aaaaaaaaaaaaaaaa.json", valid)
+    state = {"plan_hash": "d" * 64, "current_step": 1, "operator": "Operator One", "transaction_id": "TX-disposable"}
+    action = {"disposition": reconciliation.ADOPTED, "classification": "retired-carry-forward",
+              "path": "README.md", "inherited_fingerprint": "before"}
+    candidate = {"path": "README.md", "content_fingerprint": "after"}
+    assert reconciliation._authorised_adopted_delta(root, state, action, candidate) is not None
+
+    corrupt = dict(valid)
+    corrupt["record_sha256"] = "0" * 64
+    _write_runtime_record(root, "controller-run-bbbbbbbbbbbbbbbb.json", corrupt)
+    with pytest.raises(reconciliation.ReconciliationError, match="integrity"):
+        reconciliation._authorised_adopted_delta(root, state, action, candidate)
+
+
+def test_reconciliation_unsupported_receipt_schema_is_not_invisible(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    _write_runtime_record(root, "controller-run-aaaaaaaaaaaaaaaa.json", {"schema": "unexpected", "record_sha256": "0" * 64})
+    with pytest.raises(reconciliation.ReconciliationError, match="schema"):
+        reconciliation._authorised_adopted_delta(
+            root,
+            {"plan_hash": "d" * 64, "current_step": 1, "operator": "Operator One", "transaction_id": "TX-disposable"},
+            {"disposition": reconciliation.ADOPTED, "classification": "retired-carry-forward",
+             "path": "README.md", "inherited_fingerprint": "before"},
+            {"path": "README.md", "content_fingerprint": "after"},
+        )
+
+
+def test_reconciliation_malformed_signed_step_is_not_coerced(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    receipt = _controller_receipt()
+    receipt["plan_binding"] = {"plan_hash": "d" * 64, "current_step": "not-a-step"}
+    receipt["record_sha256"] = controller._digest({k: v for k, v in receipt.items() if k != "record_sha256"})
+    _write_runtime_record(root, "controller-run-aaaaaaaaaaaaaaaa.json", receipt)
+    assert reconciliation._authorised_adopted_delta(
+        root,
+        {"plan_hash": "d" * 64, "current_step": 1, "operator": "Operator One", "transaction_id": "TX-disposable"},
+        {"disposition": reconciliation.ADOPTED, "classification": "retired-carry-forward",
+         "path": "README.md", "inherited_fingerprint": "before"},
+        {"path": "README.md", "content_fingerprint": "after"},
+    ) is None
+
+
+def test_completion_report_binds_persisted_runtime_identity(tmp_path: Path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    identity = runtime.RuntimeIdentity.create(runtime.CanonicalProjectRoot.from_path(root), EPOCH)
+    _write_runtime_record(root, runtime.RUNTIME_IDENTITY_RECORD, identity.to_mapping())
+    plan_hash = "d" * 64
+    monkeypatch.setattr(adoption, "resolve_worktree", lambda _project: root)
+    monkeypatch.setattr(planning, "_record", lambda _root: {"plan_hash": plan_hash})
+    report = {"schema": qualification.REPORT_SCHEMA, "plan_hash": plan_hash}
+    report["report_sha256"] = qualification._digest(report)
+    _write_runtime_record(root, qualification.REPORT_JSON, report)
+    with pytest.raises(qualification.QualificationError, match="runtime epoch"):
+        qualification.completion_report(root, plan_hash)
+    report["runtime_epoch"] = EPOCH
+    report["report_sha256"] = qualification._digest({k: v for k, v in report.items() if k != "report_sha256"})
+    _write_runtime_record(root, qualification.REPORT_JSON, report)
+    assert qualification.completion_report(root, plan_hash) == report

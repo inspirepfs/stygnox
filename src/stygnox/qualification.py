@@ -22,7 +22,7 @@ import time
 import tomllib
 from typing import Any
 
-from . import adoption, controller, execution_policy, planning, scheduler, transactions
+from . import adoption, controller, execution_policy, planning, runtime, scheduler, transactions
 from .product import PRODUCT
 from .profile import DEFAULT_PROFILE
 
@@ -149,22 +149,38 @@ def _validate_active_authority(project: Path, operator: str, plan_hash: str) -> 
 
 
 def _controller_receipts(root: Path) -> list[dict[str, Any]]:
-    runtime = root / adoption.RUNTIME_NAME
+    """Read all retained controller receipts without assigning them an order.
+
+    Filename discovery remains a Step 4 limitation, not receipt ordering.  A
+    malformed or substituted candidate cannot be classified as proven
+    historical evidence, so it refuses qualification instead of disappearing.
+    Valid historical receipts remain non-authoritative until an exact current
+    plan/transaction/checkpoint lineage below selects them.
+    """
+    try:
+        names = runtime.authority_record_names(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(adoption.RUNTIME_NAME),
+            prefix="controller-run-",
+            suffix=".json",
+        )
+    except runtime.RuntimeContractError as exc:
+        raise QualificationError(f"controller receipt directory is invalid: {exc}") from exc
     rows: list[dict[str, Any]] = []
-    if not runtime.is_dir():
-        return rows
-    for path in sorted(runtime.glob("controller-run-*.json"), key=lambda item: item.stat().st_mtime_ns):
+    for name in names:
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(value, dict) or value.get("schema") != controller.RUN_RESULT_SCHEMA:
-            continue
+            value = controller._runtime_json(root, name)
+        except controller.ControllerError as exc:
+            raise QualificationError(f"controller receipt is invalid: {name}: {exc}") from exc
+        assert value is not None
+        if value.get("schema") != controller.RUN_RESULT_SCHEMA:
+            raise QualificationError(f"controller receipt schema is unsupported: {name}")
         recorded = str(value.get("record_sha256") or "")
         body = dict(value)
         body.pop("record_sha256", None)
-        if _HEX64.fullmatch(recorded) and recorded == _digest(body):
-            rows.append(value)
+        if not _HEX64.fullmatch(recorded) or recorded != _digest(body):
+            raise QualificationError(f"controller receipt integrity check failed: {name}")
+        rows.append(value)
     return rows
 
 
@@ -287,6 +303,8 @@ def _step_receipt(root: Path, state: Mapping[str, Any], current_baseline_sha256:
             binding.get("plan_hash") == plan_hash
             and (exact_current or failed_gate_retry)
             and int(binding.get("current_step") or 0) == step
+            and receipt.get("operator") == state.get("operator")
+            and receipt.get("transaction_id") == state.get("transaction_id")
             and receipt.get("after_baseline_sha256") == current_baseline_sha256
             and receipt.get("next_action") in {"qualification-required", "turn-complete"}
             and receipt.get("human_gate") is None
@@ -296,7 +314,9 @@ def _step_receipt(root: Path, state: Mapping[str, Any], current_baseline_sha256:
             matches.append(receipt)
     if not matches:
         raise QualificationError("current approved step has no exact completed controller turn awaiting qualification")
-    return matches[-1]
+    if len(matches) != 1:
+        raise QualificationError("current approved step has ambiguous completed controller turn evidence")
+    return matches[0]
 
 
 def _attribution_guard(root: Path) -> dict[str, Any]:
@@ -458,7 +478,9 @@ def _accepted_controller_attribution(
             }),
         }
 
-    receipts_by_sha = {str(row.get("record_sha256")): row for row in _controller_receipts(root)}
+    receipts_by_sha: dict[str, list[dict[str, Any]]] = {}
+    for row in _controller_receipts(root):
+        receipts_by_sha.setdefault(str(row.get("record_sha256") or ""), []).append(row)
     accepted: list[dict[str, Any]] = []
     seen_receipts: set[str] = set()
     for result in _completion_coverage(state) if state.get("status") in {"STEPS_COMPLETE", "READY_TO_COMMIT"} else [
@@ -470,10 +492,11 @@ def _accepted_controller_attribution(
             if result.get("result") == "HUMAN_CONFIRMED":
                 continue
             raise QualificationError("accepted step lacks controller receipt attribution")
-        if receipt_sha in seen_receipts or receipt_sha not in receipts_by_sha:
+        receipt_rows = receipts_by_sha.get(receipt_sha, [])
+        if receipt_sha in seen_receipts or len(receipt_rows) != 1:
             raise QualificationError("accepted controller receipt attribution is missing or duplicated")
         seen_receipts.add(receipt_sha)
-        accepted.append(receipts_by_sha[receipt_sha])
+        accepted.append(receipt_rows[0])
     if pending_receipt is not None:
         receipt_sha = str(pending_receipt.get("record_sha256") or "")
         if not receipt_sha or receipt_sha in seen_receipts:
@@ -492,6 +515,8 @@ def _accepted_controller_attribution(
             or binding.get("plan_hash") != state.get("plan_hash")
             or binding.get("repository_mutation_scope") != scope
             or binding.get("repository_mutation_scope_sha256") != scope_digest
+            or receipt.get("operator") != state.get("operator")
+            or receipt.get("transaction_id") != state.get("transaction_id")
             or receipt.get("repository_authority") != "write"
             or not isinstance(delta, Mapping)
         ):
@@ -989,14 +1014,20 @@ def completion_report(project: Path, plan_hash: str) -> dict[str, Any]:
     assert state is not None
     if str(state.get("plan_hash") or "") != str(plan_hash or "").strip().lower():
         raise QualificationError("report plan hash does not match current plan")
-    path = root / adoption.RUNTIME_NAME / REPORT_JSON
-    if not path.is_file() or path.is_symlink():
-        raise QualificationError("completion report is not available until final qualification passes")
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        # A completion report is qualification evidence, not a passive status
+        # snapshot.  Once an epoch identity exists it must be bound to that
+        # epoch exactly like the controller receipts that established it.
+        report = runtime.read_authority_json(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(f"{adoption.RUNTIME_NAME}/{REPORT_JSON}"),
+            required=False,
+        )
+    except runtime.RuntimeContractError as exc:
         raise QualificationError(f"invalid completion report: {exc}") from exc
-    if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA or report.get("plan_hash") != state.get("plan_hash"):
+    if report is None:
+        raise QualificationError("completion report is not available until final qualification passes")
+    if report.get("schema") != REPORT_SCHEMA or report.get("plan_hash") != state.get("plan_hash"):
         raise QualificationError("completion report does not match current plan")
     recorded = str(report.get("report_sha256") or "")
     body = dict(report)

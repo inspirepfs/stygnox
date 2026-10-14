@@ -18,7 +18,7 @@ import re
 import sys
 from typing import Any
 
-from . import adoption, planning, scheduler
+from . import adoption, planning, runtime, scheduler
 from .product import PRODUCT
 
 RECONCILIATION_SNAPSHOT_SCHEMA = "stygnox_reconciliation_snapshot_v1"
@@ -254,22 +254,43 @@ def _authorised_adopted_delta(root: Path, state: Mapping[str, Any], action: Mapp
     if not isinstance(inherited, str) or not inherited or candidate is None:
         return None
     from . import controller
+    # Step 4 must replace filename discovery with durable receipt indexing.
+    # Until then this is an unordered candidate set: every entry is read via
+    # the seam and current authority requires exactly one matching lineage.
+    try:
+        names = runtime.authority_record_names(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(adoption.RUNTIME_NAME),
+            prefix="controller-run-",
+            suffix=".json",
+        )
+    except runtime.RuntimeContractError as exc:
+        raise ReconciliationError(f"controller receipt directory is invalid: {exc}") from exc
     matches: list[dict[str, Any]] = []
-    for receipt_path in sorted((root / adoption.RUNTIME_NAME).glob("controller-run-*.json")):
+    for name in names:
         try:
-            receipt = controller._runtime_json(root, receipt_path.name)
-        except controller.ControllerError:
-            continue
+            receipt = controller._runtime_json(root, name)
+        except controller.ControllerError as exc:
+            raise ReconciliationError(f"controller receipt is invalid: {name}: {exc}") from exc
         assert receipt is not None
         body = dict(receipt)
         recorded = body.pop("record_sha256", None)
+        # Every controller-named candidate must have a valid schema and
+        # integrity seal, even when another receipt matches current lineage.
+        # Otherwise a corrupt competing claim silently disappears and can
+        # leave reconciliation reporting an unambiguous authorised delta.
+        if receipt.get("schema") != controller.RUN_RESULT_SCHEMA:
+            raise ReconciliationError(f"controller receipt schema is unsupported: {name}")
+        if not isinstance(recorded, str) or not _HEX64.fullmatch(recorded) or _digest(body) != recorded:
+            raise ReconciliationError(f"controller receipt integrity check failed: {name}")
         binding = receipt.get("plan_binding") if isinstance(receipt.get("plan_binding"), Mapping) else None
         delta = receipt.get("actual_delta") if isinstance(receipt.get("actual_delta"), Mapping) else None
         if not (
-            receipt.get("schema") == controller.RUN_RESULT_SCHEMA and isinstance(recorded, str) and _HEX64.fullmatch(recorded)
-            and _digest(body) == recorded and isinstance(binding, Mapping) and isinstance(delta, Mapping)
-            and binding.get("plan_hash") == state.get("plan_hash") and int(binding.get("current_step") or 0) == int(state.get("current_step") or 0)
-            and receipt.get("transaction_id") == state.get("transaction_id") and receipt.get("next_action") == "qualification-required"
+            isinstance(binding, Mapping) and isinstance(delta, Mapping)
+            and binding.get("plan_hash") == state.get("plan_hash")
+            and type(binding.get("current_step")) is int and binding.get("current_step") == int(state.get("current_step") or 0)
+            and receipt.get("operator") == state.get("operator") and receipt.get("transaction_id") == state.get("transaction_id")
+            and receipt.get("next_action") == "qualification-required"
             and isinstance(receipt.get("provider_result"), Mapping) and receipt["provider_result"].get("status") == "PASS"
         ):
             continue
