@@ -480,6 +480,8 @@ def _metrics_from_jsonl(output: str) -> dict[str, int | float]:
 def _run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
     if len(args) >= 2 and args[1] == "sandbox":
         purpose = "sandbox"
+    elif "--sandbox" in args and args.index("--sandbox") + 1 < len(args) and args[args.index("--sandbox") + 1] == "workspace-write":
+        purpose = "write-turn"
     elif "--sandbox" in args and args.index("--sandbox") + 1 < len(args) and args[args.index("--sandbox") + 1] == "read-only":
         purpose = "read-only-turn"
     else:

@@ -451,11 +451,10 @@ def build_run_preview(
         raise ControllerError(f"unsupported installed provider adapter: {provider!r}")
     if not policy_status.get("approved"):
         raise ControllerError("provider execution refused: non-neutral policy is not reviewer-approved")
-    if not policy_status.get("provider_catalog_bound"):
+    from . import provider_write_release
+    successor_release_ready = provider_write_release.execution_ready(root)
+    if not policy_status.get("provider_catalog_bound") and not successor_release_ready:
         raise ControllerError("provider execution refused: model catalogue binding is absent")
-    from . import provider_release
-    if provider_release.planning_ready(root):
-        raise ControllerError("02N planning-only release cannot authorise a controller turn")
     current = adoption.capture_baseline(root).public()
     objective_value = _objective(objective)
     plan_binding = None
@@ -506,6 +505,20 @@ def build_run_preview(
             except self_development.SelfDevelopmentError as exc:
                 raise ControllerError(str(exc)) from exc
             plan_binding["self_development_grant"] = grant
+    from . import provider_release
+    if authority == "write" or provider_release.planning_ready(root) or successor_release_ready:
+        # All write previews in this 02N recovery build require the native
+        # successor release, including absent/corrupt/expired release records.
+        # Otherwise, a reviewed catalogue alone could produce a misleading
+        # write preview although provider dispatch would still be denied.
+        # 02N is still planning-only.  The sole exception is an independently
+        # released, exact write turn with a plan binding constructed above.
+        if authority != "write" or plan_binding is None:
+            raise ControllerError("02N planning-only release cannot authorise a controller turn")
+        try:
+            provider_write_release.require_controller_authority(root, operator=name, plan_binding={**plan_binding, "transaction_id": tx["transaction_id"], "controller_record_sha256": controller["record_sha256"]})
+        except provider_write_release.ProviderWriteReleaseError as exc:
+            raise ControllerError("02N planning-only release cannot authorise a controller turn: " + str(exc)) from exc
     body: dict[str, Any] = {
         "schema": RUN_PREVIEW_SCHEMA,
         "product_version": PRODUCT.version,
@@ -667,14 +680,23 @@ def run_controller(
         before_snapshot = _snapshot_manifest(root, before_manifest)
     _refuse_quarantined(root)
     try:
-        provider_result = provider_codex.execute(
-            cwd=root,
-            prompt=_prompt(preview),
-            model=str(preview["model"]),
-            effort=preview.get("effort"),
-            repository_authority=str(preview["repository_authority"]),
+        from . import provider_write_release
+        write_context = (
+            provider_write_release.authorised_write_turn(
+                root, operator=str(preview["operator"]), plan_binding=plan_binding
+            )
+            if preview["repository_authority"] == "write" and isinstance(plan_binding, Mapping)
+            else __import__("contextlib").nullcontext()
         )
-    except provider_codex.ProviderError as exc:
+        with write_context:
+            provider_result = provider_codex.execute(
+                cwd=root,
+                prompt=_prompt(preview),
+                model=str(preview["model"]),
+                effort=preview.get("effort"),
+                repository_authority=str(preview["repository_authority"]),
+            )
+    except (provider_codex.ProviderError, provider_write_release.ProviderWriteReleaseError) as exc:
         raise ControllerError(str(exc)) from exc
     # A formerly admitted turn must not publish controller evidence after a
     # quarantine barrier appears while the provider was running. This guard

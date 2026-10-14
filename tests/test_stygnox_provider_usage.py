@@ -202,9 +202,28 @@ class ProviderUsageTests(TestCase):
             ):
                 active_reviewed(repo, base/"external")
                 approved=approve(repo)
-                preview=scheduler.build_schedule_preview(repo, "Operator One")
-                with mock.patch.object(controller, "run_controller", side_effect=controller.ControllerUsageBlocked("provider usage admission blocked: reserve")):
-                    stopped=scheduler.run_schedule(repo, "Operator One", preview["preview_sha256"], "SCHEDULE")
+                # Without successor release, preview admission must fail closed.
+                with self.assertRaisesRegex(
+                    scheduler.SchedulerError, "native write-release record is missing"
+                ):
+                    scheduler.build_schedule_preview(repo, "Operator One")
+
+                # This test isolates quota-stop classification, not release
+                # admission. No real controller or provider turn is executed.
+                with (
+                    mock.patch("stygnox.provider_write_release.require_controller_authority"),
+                    mock.patch.object(
+                        controller,
+                        "run_controller",
+                        side_effect=controller.ControllerUsageBlocked(
+                            "provider usage admission blocked: reserve"
+                        ),
+                    ),
+                ):
+                    preview = scheduler.build_schedule_preview(repo, "Operator One")
+                    stopped = scheduler.run_schedule(
+                        repo, "Operator One", preview["preview_sha256"], "SCHEDULE"
+                    )
             self.assertEqual("STOPPED_USAGE_LIMIT", stopped["status"])
             self.assertIn("reserve", stopped["stop_reason"])
             self.assertIsNone(stopped.get("turn_before_manifest"))

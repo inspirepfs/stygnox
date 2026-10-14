@@ -225,6 +225,12 @@ def dispatch_allowed(cwd: Path, purpose: str) -> bool:
         # also protects the original 02N inert-subprocess-canary tests.
         if purpose == "catalogue" and _catalog_probe.get() == str(candidate):
             return True
+        # A completed successor transfer owns its own tightly-scoped write
+        # context.  Do this before checking predecessor planning readiness:
+        # that readiness intentionally binds predecessor installed bytes.
+        from . import provider_write_release
+        if provider_write_release.dispatch_allowed(candidate, purpose):
+            return True
         if not (candidate / adoption.RUNTIME_NAME / RECORD).is_file():
             return False
         root = adoption.resolve_worktree(candidate)
@@ -236,6 +242,9 @@ def dispatch_allowed(cwd: Path, purpose: str) -> bool:
             return True
         if purpose == "read-only-turn":
             return _proposal_turn.get() == str(root)
+        if purpose == "write-turn":
+            # 02N itself never grants a write turn.
+            return False
         return False  # Always deny write turns and unknown dispatch types.
     except (ProviderReleaseError, OSError, ValueError):
         return False
