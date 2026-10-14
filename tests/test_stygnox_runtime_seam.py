@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from stygnox import adoption, runtime, transactions
+from stygnox import adoption, controller, planning, runtime, scheduler, transactions
 
 
 EPOCH = "0123456789abcdef0123456789abcdef"
@@ -259,3 +259,136 @@ def test_runtime_seam_rejects_oversize_json_before_read(tmp_path: Path):
             runtime.CanonicalProjectRoot.from_path(root),
             runtime.SafeRelativePath.parse(".stygnox/transaction.json"),
         )
+
+
+def _write_runtime_record(root: Path, name: str, body: dict[str, object]) -> None:
+    path = root / adoption.RUNTIME_NAME / name
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+
+def _plan_record(*, epoch: str | None = None) -> dict[str, object]:
+    body: dict[str, object] = {"schema": planning.PLAN_SCHEMA}
+    if epoch is not None:
+        body["runtime_epoch"] = epoch
+    body["record_sha256"] = planning._digest(body)
+    return body
+
+
+def _scheduler_record(*, epoch: str | None = None) -> dict[str, object]:
+    body: dict[str, object] = {"schema": scheduler.SCHEDULER_SCHEMA}
+    if epoch is not None:
+        body["runtime_epoch"] = epoch
+    body["record_sha256"] = scheduler._digest(body)
+    return body
+
+
+def test_controller_planning_and_scheduler_authority_reads_allow_identity_bootstrap(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    _write_runtime_record(root, "controller.json", {"schema": controller.CONTROLLER_SCHEMA})
+    _write_runtime_record(root, planning.PLAN_RECORD, _plan_record())
+    _write_runtime_record(root, scheduler.SCHEDULER_RECORD, _scheduler_record())
+
+    assert controller._runtime_json(root, "controller.json") == {"schema": controller.CONTROLLER_SCHEMA}
+    assert planning._record(root) is not None
+    assert scheduler._record(root) is not None
+
+
+def test_authority_readers_bind_established_runtime_epoch_and_refuse_stale_records(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    identity = runtime.RuntimeIdentity.create(runtime.CanonicalProjectRoot.from_path(root), EPOCH)
+    _write_runtime_record(root, runtime.RUNTIME_IDENTITY_RECORD, identity.to_mapping())
+    _write_runtime_record(root, "controller.json", {"schema": controller.CONTROLLER_SCHEMA, "runtime_epoch": EPOCH})
+    _write_runtime_record(root, planning.PLAN_RECORD, _plan_record(epoch=EPOCH))
+    _write_runtime_record(root, scheduler.SCHEDULER_RECORD, _scheduler_record(epoch=EPOCH))
+
+    assert controller._runtime_json(root, "controller.json")["runtime_epoch"] == EPOCH
+    assert planning._record(root) is not None
+    assert scheduler._record(root) is not None
+
+    _write_runtime_record(root, planning.PLAN_RECORD, _plan_record(epoch="f" * 32))
+    with pytest.raises(planning.PlanningError, match="runtime epoch.*stale|substituted"):
+        planning._record(root)
+
+
+@pytest.mark.parametrize(("name", "reader", "body"), [
+    ("controller.json", controller._runtime_json, {"schema": controller.CONTROLLER_SCHEMA}),
+    (planning.PLAN_RECORD, planning._record, _plan_record()),
+    (scheduler.SCHEDULER_RECORD, scheduler._record, _scheduler_record()),
+])
+def test_authority_readers_refuse_symlink_substitution(tmp_path: Path, name, reader, body):
+    root = tmp_path / "project"
+    root.mkdir()
+    outside = tmp_path / f"{name}.json"
+    outside.write_text(json.dumps(body), encoding="utf-8")
+    runtime_dir = root / adoption.RUNTIME_NAME
+    runtime_dir.mkdir()
+    (runtime_dir / name).symlink_to(outside)
+
+    with pytest.raises((controller.ControllerError, planning.PlanningError, scheduler.SchedulerError), match="substituted|unavailable"):
+        if reader is controller._runtime_json:
+            reader(root, name)
+        else:
+            reader(root)
+
+
+@pytest.mark.parametrize(("name", "reader"), [
+    ("controller.json", controller._runtime_json),
+    (planning.PLAN_RECORD, planning._record),
+    (scheduler.SCHEDULER_RECORD, scheduler._record),
+])
+def test_authority_readers_refuse_ambiguous_json(tmp_path: Path, name, reader):
+    root = tmp_path / "project"
+    runtime_dir = root / adoption.RUNTIME_NAME
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / name).write_bytes(b'{"schema":"first","schema":"second"}')
+
+    with pytest.raises((controller.ControllerError, planning.PlanningError, scheduler.SchedulerError), match="duplicate key"):
+        if reader is controller._runtime_json:
+            reader(root, name)
+        else:
+            reader(root)
+
+
+def test_epoch_bearing_authority_does_not_downgrade_to_bootstrap_if_identity_missing(tmp_path: Path):
+    root = tmp_path / "project"
+    root.mkdir()
+    identity = runtime.RuntimeIdentity.create(runtime.CanonicalProjectRoot.from_path(root), EPOCH)
+    _write_runtime_record(root, runtime.RUNTIME_IDENTITY_RECORD, identity.to_mapping())
+    _write_runtime_record(root, planning.PLAN_RECORD, _plan_record(epoch="f" * 32))
+    with pytest.raises(planning.PlanningError, match="runtime epoch"):
+        planning._record(root)
+    (root / adoption.RUNTIME_NAME / runtime.RUNTIME_IDENTITY_RECORD).unlink()
+    with pytest.raises(planning.PlanningError, match="runtime identity is missing"):
+        planning._record(root)
+
+
+def test_controller_recovery_receipt_missing_is_distinct_from_substituted(tmp_path: Path):
+    root = tmp_path / "project"
+    runtime_dir = root / adoption.RUNTIME_NAME
+    runtime_dir.mkdir(parents=True)
+    preview = "a" * 64
+    assert scheduler._controller_receipt(root, preview) is None
+    receipt = runtime_dir / f"controller-run-{preview[:16]}.json"
+    target = tmp_path / "outside.json"
+    target.write_text("{}", encoding="utf-8")
+    receipt.symlink_to(target)
+    with pytest.raises(scheduler.SchedulerError, match="invalid|substituted"):
+        scheduler._controller_receipt(root, preview)
+
+
+def test_controller_recovery_receipt_with_invalid_digest_refuses(tmp_path: Path):
+    root = tmp_path / "project"
+    runtime_dir = root / adoption.RUNTIME_NAME
+    runtime_dir.mkdir(parents=True)
+    preview = "b" * 64
+    receipt = runtime_dir / f"controller-run-{preview[:16]}.json"
+    receipt.write_text(json.dumps({
+        "schema": controller.RUN_RESULT_SCHEMA,
+        "preview_sha256": preview,
+        "record_sha256": "0" * 64,
+    }), encoding="utf-8")
+    with pytest.raises(scheduler.SchedulerError, match="integrity"):
+        scheduler._controller_receipt(root, preview)

@@ -15,7 +15,7 @@ import re
 import stat
 from typing import Any, Mapping, Sequence
 
-from . import adoption, efficiency, execution_policy, transactions
+from . import adoption, efficiency, execution_policy, runtime, transactions
 from .direct_interruption_execution_guard import QuarantinedRuntime, refuse_quarantined_runtime
 from . import provider_usage
 from .product import PRODUCT
@@ -57,19 +57,16 @@ def _digest(value: Any) -> str:
 
 
 def _runtime_json(root: Path, name: str, *, required: bool = True) -> dict[str, Any] | None:
-    path = root / adoption.RUNTIME_NAME / name
-    if not path.exists():
-        if required:
-            raise ControllerError(f"controller runtime record is missing: {name}")
-        return None
-    if path.is_symlink() or not path.is_file():
-        raise ControllerError(f"controller runtime record must be a regular file: {name}")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value = runtime.read_authority_json(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(f"{adoption.RUNTIME_NAME}/{name}"),
+            required=required,
+        )
+    except runtime.RuntimeRecordMissing as exc:
+        raise ControllerError(f"controller runtime record is missing: {name}") from exc
+    except runtime.RuntimeContractError as exc:
         raise ControllerError(f"invalid controller runtime record {name}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ControllerError(f"controller runtime record must be a JSON object: {name}")
     return value
 
 

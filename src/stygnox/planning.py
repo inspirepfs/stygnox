@@ -15,7 +15,7 @@ import re
 import sys
 from typing import Any, Mapping, Sequence
 
-from . import adoption, controller, provider_codex, provider_usage, usage
+from . import adoption, controller, provider_codex, provider_usage, runtime, usage
 from .product import PRODUCT
 
 
@@ -176,18 +176,19 @@ def _validate_plan(plan: object) -> dict[str, Any]:
 
 
 def _record(root: Path, *, required: bool = True) -> dict[str, Any] | None:
-    path = root / adoption.RUNTIME_NAME / PLAN_RECORD
-    if not path.exists():
-        if required:
-            raise PlanningError("no Stygnox plan state exists")
-        return None
-    if path.is_symlink() or not path.is_file():
-        raise PlanningError("plan runtime record must be a regular file")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value = runtime.read_authority_json(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(f"{adoption.RUNTIME_NAME}/{PLAN_RECORD}"),
+            required=required,
+        )
+    except runtime.RuntimeRecordMissing as exc:
+        raise PlanningError("no Stygnox plan state exists") from exc
+    except runtime.RuntimeContractError as exc:
         raise PlanningError(f"invalid plan runtime record: {exc}") from exc
-    if not isinstance(value, dict) or value.get("schema") != PLAN_SCHEMA:
+    if value is None:
+        return None
+    if value.get("schema") != PLAN_SCHEMA:
         raise PlanningError("unsupported plan runtime schema")
     recorded = str(value.get("record_sha256") or "")
     body = dict(value)
@@ -216,12 +217,9 @@ def _renewal_plan_obligations(
     obligations and stopped/revoked transaction authority before renewal.
     An IDLE label by itself does not prove retirement or permit publication.
     """
-    path = root / adoption.RUNTIME_NAME / PLAN_RECORD
-    if path.is_symlink() or not path.is_file():
-        raise PlanningError("renewal requires a regular predecessor plan record")
     try:
         state = _record(root)
-    except (UnicodeError, TypeError, ValueError) as exc:
+    except (PlanningError, UnicodeError, TypeError, ValueError) as exc:
         raise PlanningError("malformed renewal predecessor plan record") from exc
     assert state is not None
     if (
@@ -542,20 +540,22 @@ def _legacy_rejection_receipt(
             "legacy replacement bridge rejection receipt plan identity is malformed"
         )
 
-    path = root / adoption.RUNTIME_NAME / f"plan-rejection-{plan_hash[:16]}.json"
-    if path.is_symlink() or not path.is_file():
+    try:
+        receipt = runtime.read_authority_json(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(f"{adoption.RUNTIME_NAME}/plan-rejection-{plan_hash[:16]}.json"),
+        )
+    except runtime.RuntimeRecordMissing as exc:
         raise PlanningError(
             "legacy replacement bridge rejection receipt is missing"
-        )
-
-    try:
-        receipt = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        ) from exc
+    except runtime.RuntimeContractError as exc:
         raise PlanningError(
             f"legacy replacement bridge rejection receipt is invalid: {exc}"
         ) from exc
 
-    if not isinstance(receipt, dict) or receipt.get("schema") != PLAN_REJECTION_SCHEMA:
+    assert receipt is not None
+    if receipt.get("schema") != PLAN_REJECTION_SCHEMA:
         raise PlanningError(
             "legacy replacement bridge rejection receipt schema is unsupported"
         )
@@ -1056,16 +1056,19 @@ def _persisted_legacy_replacement_bridge(
     source_receipt_sha = str(bridge.get("rejection_receipt_record_sha256") or "").strip().lower()
     if not _HEX64.fullmatch(source_plan_hash) or not _HEX64.fullmatch(source_receipt_sha):
         raise PlanningError("persisted legacy replacement bridge source rejection identity is malformed")
-    source_receipt_path = root / adoption.RUNTIME_NAME / f"plan-rejection-{source_plan_hash[:16]}.json"
-    if source_receipt_path.is_symlink() or not source_receipt_path.is_file():
-        raise PlanningError("persisted legacy replacement bridge source rejection receipt is missing")
     try:
-        source_receipt = json.loads(source_receipt_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        source_receipt = runtime.read_authority_json(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(f"{adoption.RUNTIME_NAME}/plan-rejection-{source_plan_hash[:16]}.json"),
+        )
+    except runtime.RuntimeRecordMissing as exc:
+        raise PlanningError("persisted legacy replacement bridge source rejection receipt is missing")
+    except runtime.RuntimeContractError as exc:
         raise PlanningError(
             f"persisted legacy replacement bridge source rejection receipt is invalid: {exc}"
         ) from exc
-    if not isinstance(source_receipt, dict) or source_receipt.get("schema") != PLAN_REJECTION_SCHEMA:
+    assert source_receipt is not None
+    if source_receipt.get("schema") != PLAN_REJECTION_SCHEMA:
         raise PlanningError("persisted legacy replacement bridge source rejection receipt schema is unsupported")
     source_body = dict(source_receipt)
     recorded_source_sha = str(source_body.pop("record_sha256", None) or "").strip().lower()

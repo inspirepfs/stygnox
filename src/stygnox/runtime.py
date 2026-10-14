@@ -22,6 +22,7 @@ from typing import Any, ClassVar, Mapping, TypeAlias
 
 
 RUNTIME_IDENTITY_SCHEMA = "stygnox_runtime_identity_v1"
+RUNTIME_IDENTITY_RECORD = "runtime-identity.json"
 INSTALLED_CONTROLLER_SCHEMA = "stygnox_installed_controller_identity_v1"
 ENVELOPE_SCHEMA = "stygnox_runtime_envelope_v1"
 CONTRACT_VERSION = 1
@@ -264,6 +265,56 @@ def read_json_object(
         raise RuntimeContractError("runtime JSON record is malformed") from exc
     if not isinstance(value, dict):
         _refuse("runtime JSON record must be an object")
+    return value
+
+
+def established_runtime_identity(root: CanonicalProjectRoot) -> "RuntimeIdentity | None":
+    """Return the persisted runtime identity when this project has one.
+
+    Early adoption records intentionally predate this contract.  Their absence
+    is therefore a valid bootstrap state, but once an identity is published it
+    becomes an exact root/epoch binding for every authority-bearing record
+    read through :func:`read_authority_json`.
+    """
+    record = read_json_object(
+        root, SafeRelativePath.parse(f".stygnox/{RUNTIME_IDENTITY_RECORD}"), required=False,
+    )
+    if record is None:
+        return None
+    identity = RuntimeIdentity.from_mapping(record)
+    if identity.root != root:
+        _refuse("persisted runtime identity does not match the canonical project root")
+    return identity
+
+
+def read_authority_json(
+    root: CanonicalProjectRoot,
+    relative: SafeRelativePath,
+    *,
+    required: bool = True,
+) -> dict[str, Any] | None:
+    """Read an authority-bearing record through the canonical runtime seam.
+
+    The filesystem and JSON protections of :func:`read_json_object` are
+    applied first.  A project without a persisted runtime identity remains a
+    valid bootstrap state.  After identity publication, records must carry
+    its exact epoch; an omitted or substituted epoch is refused rather than
+    being inferred.  Domain modules retain ownership of their schemas,
+    integrity digests, approval rules, and controller/transaction/plan
+    lineage checks.
+    """
+    value = read_json_object(root, relative, required=required)
+    if value is None:
+        return None
+    identity = established_runtime_identity(root)
+    if identity is None:
+        # Legacy bootstrap records lack an epoch.  An epoch-bearing record is
+        # not a bootstrap record: loss of the identity anchor must not turn a
+        # previously rejected stale record into accepted legacy authority.
+        if "runtime_epoch" in value:
+            _refuse("authority record declares a runtime epoch but runtime identity is missing")
+    elif value.get("runtime_epoch") != identity.epoch:
+        _refuse("authority record runtime epoch is missing, stale, or substituted")
     return value
 
 

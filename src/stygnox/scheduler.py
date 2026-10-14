@@ -19,7 +19,7 @@ import stat
 import sys
 from typing import Any, Iterable, Mapping, Sequence
 
-from . import adoption, controller, planning
+from . import adoption, controller, planning, runtime
 from .direct_interruption_execution_guard import QuarantinedRuntime, refuse_quarantined_runtime
 from .product import PRODUCT
 
@@ -56,18 +56,21 @@ def _utc_now() -> str:
 
 
 def _record(root: Path, *, required: bool = False) -> dict[str, Any] | None:
-    path = root / adoption.RUNTIME_NAME / SCHEDULER_RECORD
-    if not path.exists():
-        if required:
-            raise SchedulerError("no scheduler state exists")
-        return None
-    if path.is_symlink() or not path.is_file():
-        raise SchedulerError("scheduler runtime record must be a regular file")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value = runtime.read_authority_json(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(f"{adoption.RUNTIME_NAME}/{SCHEDULER_RECORD}"),
+            required=required,
+        )
+    except runtime.RuntimeRecordMissing as exc:
+        if required:
+            raise SchedulerError("no scheduler state exists") from exc
+        return None
+    except runtime.RuntimeContractError as exc:
         raise SchedulerError(f"invalid scheduler runtime record: {exc}") from exc
-    if not isinstance(value, dict) or value.get("schema") != SCHEDULER_SCHEMA:
+    if value is None:
+        return None
+    if value.get("schema") != SCHEDULER_SCHEMA:
         raise SchedulerError("unsupported scheduler runtime schema")
     recorded = str(value.get("record_sha256") or "")
     body = dict(value)
@@ -124,10 +127,6 @@ def renewal_quiescence(
     and resolution of human/qualification obligations are separate renewal
     checks; a stopped scheduler alone does not establish either.
     """
-    path = root / adoption.RUNTIME_NAME / SCHEDULER_RECORD
-    # _record treats a dangling symlink as absent; renewal must fail closed.
-    if path.is_symlink():
-        raise SchedulerError("renewal scheduler record must be a regular file")
     state = _record(root, required=False)
     if state is None:
         return None
@@ -422,20 +421,25 @@ def run_schedule(project: Path, operator: str, preview_sha256: str, confirmation
 
 
 def _controller_receipt(root: Path, preview_sha256: str) -> dict[str, Any] | None:
-    path = root / adoption.RUNTIME_NAME / f"controller-run-{preview_sha256[:16]}.json"
-    if not path.is_file() or path.is_symlink():
-        return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        value = runtime.read_authority_json(
+            runtime.CanonicalProjectRoot.from_path(root),
+            runtime.SafeRelativePath.parse(f"{adoption.RUNTIME_NAME}/controller-run-{preview_sha256[:16]}.json"),
+            required=False,
+        )
+    except runtime.RuntimeRecordMissing:
         return None
-    if not isinstance(value, dict) or value.get("schema") != controller.RUN_RESULT_SCHEMA or value.get("preview_sha256") != preview_sha256:
+    except runtime.RuntimeContractError as exc:
+        raise SchedulerError(f"controller recovery receipt is invalid: {exc}") from exc
+    if value is None:
         return None
+    if value.get("schema") != controller.RUN_RESULT_SCHEMA or value.get("preview_sha256") != preview_sha256:
+        raise SchedulerError("controller recovery receipt schema or preview identity is invalid")
     digest = str(value.get("record_sha256") or "")
     body = dict(value)
     body.pop("record_sha256", None)
     if not _HEX64.fullmatch(digest) or digest != _digest(body):
-        return None
+        raise SchedulerError("controller recovery receipt integrity check failed")
     return value
 
 
